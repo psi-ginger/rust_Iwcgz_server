@@ -1,0 +1,206 @@
+{
+  "cases": [
+    {
+      "name": "A1_encode_passthrough_size0",
+      "key1": 0, "key2": 0,
+      "ops": [
+        {"op": "encode", "follow": false, "in": "0000", "out": "", "overrun": false, "keys_after": [1, 1]}
+      ]
+    },
+    {
+      "name": "A2_encode_passthrough_size1",
+      "key1": 0, "key2": 0,
+      "ops": [
+        {"op": "encode", "follow": false, "in": "0100ab", "out": "01", "overrun": false, "keys_after": [1, 1]}
+      ]
+    },
+    {
+      "name": "A3_encode_passthrough_size2",
+      "key1": 0, "key2": 0,
+      "ops": [
+        {"op": "encode", "follow": false, "in": "0200abcd", "out": "0200", "overrun": false, "keys_after": [1, 1]}
+      ]
+    },
+    {
+      "name": "A4_encode_passthrough_size3",
+      "key1": 0, "key2": 0,
+      "ops": [
+        {"op": "encode", "follow": false, "in": "0300abcdef", "out": "0300ab", "overrun": false, "keys_after": [1, 1]}
+      ]
+    },
+    {
+      "name": "A5_passthrough_ticks_keys",
+      "key1": 0, "key2": 0,
+      "ops": [
+        {"op": "encode", "follow": false, "in": "0300abcdef", "out": "0300ab", "overrun": false, "keys_after": [1, 1]},
+        {"op": "encode", "follow": false, "in": "04000011", "out": "04001315", "overrun": false, "keys_after": [2, 2]}
+      ]
+    },
+    {
+      "name": "B1_encode_size4",
+      "key1": 0, "key2": 0,
+      "ops": [
+        {"op": "encode", "follow": false, "in": "04000011", "out": "04001211", "overrun": false, "keys_after": [1, 1]}
+      ]
+    },
+    {
+      "name": "B2_encode_size5",
+      "key1": 0, "key2": 0,
+      "ops": [
+        {"op": "encode", "follow": false, "in": "0500001122", "out": "0500231144", "overrun": false, "keys_after": [1, 1]}
+      ]
+    },
+    {
+      "name": "B3_encode_size8",
+      "key1": 0, "key2": 0,
+      "ops": [
+        {"op": "encode", "follow": false, "in": "08000011223344556677", "out": "080056114435acbb", "overrun": false, "keys_after": [1, 1]}
+      ]
+    },
+    {
+      "name": "B4_encode_size64",
+      "key1": 0, "key2": 0,
+      "ops": [
+        {"op": "encode", "follow": false, "in": "4000030a11181f262d343b424950575e656c737a81888f969da4abb2b9c0c7ced5dce3eaf1f8ff060d141b222930373e454c535a61686f767d848b9299a0a7ae", "out": "4000af0c251e518e8fc8f37069e20592d34ca7342d26395657909bf8f1ea6d7a1b14cfdcb5aea19e9f98c3c0f9f2556263dcf784bd36892667606b88817abdca", "overrun": false, "keys_after": [1, 1]}
+      ]
+    },
+    {
+      "name": "C1_enc2_encode_size8",
+      "key1": 18, "key2": 52,
+      "ops": [
+        {"op": "encode", "follow": false, "in": "0800aabbccddeeff", "out": "080012dd5475f02f", "overrun": false, "keys_after": [19, 53]}
+      ]
+    },
+    {
+      "name": "C8_trailing_byte_ignored",
+      "key1": 18, "key2": 52,
+      "ops": [
+        {"op": "encode", "follow": false, "in": "0800aabbccddeeff99", "out": "080012dd5475f02f", "overrun": false, "keys_after": [19, 53]}
+      ]
+    },
+    {
+      "name": "C2_enc2_encode_size16",
+      "key1": 18, "key2": 52,
+      "ops": [
+        {"op": "encode", "follow": false, "in": "1000f0efeeedecebeae9e8e7e6e5e4e3", "out": "1000f631361112e3e8bbbc858a555617", "overrun": false, "keys_after": [19, 53]}
+      ]
+    },
+    {
+      "name": "C3_enc2_counter_advances",
+      "key1": 18, "key2": 52,
+      "ops": [
+        {"op": "encode", "follow": false, "in": "0800aabbccddeeff", "out": "080012dd5475f02f", "overrun": false, "keys_after": [19, 53]},
+        {"op": "encode", "follow": false, "in": "0800aabbccddeeff", "out": "080013e5547bea37", "overrun": false, "keys_after": [20, 54]}
+      ]
+    },
+    {
+      "name": "C4_enc2_roundtrip",
+      "key1": 18, "key2": 52,
+      "ops": [
+        {"op": "encode", "follow": false, "in": "0800aabbccddeeff", "out": "080012dd5475f02f", "overrun": false, "keys_after": [19, 53]},
+        {"op": "decode", "follow": true, "in": "080012dd5475f02f", "ok": true, "out": "0800aabbccddeeff", "overrun": false, "in_after": "0800ffdd5475f02f", "keys_after": [19, 53]}
+      ]
+    },
+    {
+      "name": "C5_enc2_roundtrip_size16",
+      "key1": 18, "key2": 52,
+      "ops": [
+        {"op": "encode", "follow": false, "in": "1000f0efeeedecebeae9e8e7e6e5e4e3", "out": "1000f631361112e3e8bbbc858a555617", "overrun": false, "keys_after": [19, 53]},
+        {"op": "decode", "follow": true, "in": "1000f631361112e3e8bbbc858a555617", "ok": true, "out": "1000aaefeeedecebeae9e8e7e6e5e4e3", "overrun": false, "in_after": "1000e331361112e3e8bbbc858a555617", "keys_after": [19, 53]}
+      ]
+    },
+    {
+      "name": "C6_enc2_roundtrip_size64",
+      "key1": 18, "key2": 52,
+      "ops": [
+        {"op": "encode", "follow": false, "in": "4000030a11181f262d343b424950575e656c737a81888f969da4abb2b9c0c7ced5dce3eaf1f8ff060d141b222930373e454c535a61686f767d848b9299a0a7ae", "out": "4000c14e476077b0b10a19928b242bd4158ecd766f687f7899d2e11a332cb3bc3d56151ed7f0c7c0c1dae9e21b347ba4a51e1dc6ff78cf48a9a2b1aac3bc030c", "overrun": false, "keys_after": [19, 53]},
+        {"op": "decode", "follow": true, "in": "4000c14e476077b0b10a19928b242bd4158ecd766f687f7899d2e11a332cb3bc3d56151ed7f0c7c0c1dae9e21b347ba4a51e1dc6ff78cf48a9a2b1aac3bc030c", "ok": true, "out": "4000aa0a11181f262d343b424950575e656c737a81888f969da4abb2b9c0c7ced5dce3eaf1f8ff060d141b222930373e454c535a61686f767d848b9299a0a7ae", "overrun": false, "in_after": "4000ae4e476077b0b10a19928b242bd4158ecd766f687f7899d2e11a332cb3bc3d56151ed7f0c7c0c1dae9e21b347ba4a51e1dc6ff78cf48a9a2b1aac3bc030c", "keys_after": [19, 53]}
+      ]
+    },
+    {
+      "name": "C7_enc2_roundtrip_burst",
+      "key1": 18, "key2": 52,
+      "ops": [
+        {"op": "encode", "follow": false, "in": "04000011", "out": "04002437", "overrun": false, "keys_after": [19, 53]},
+        {"op": "decode", "follow": true, "in": "04002437", "ok": true, "out": "0400aa11", "overrun": false, "in_after": "04001137", "keys_after": [19, 53]},
+        {"op": "encode", "follow": false, "in": "0700112233445566", "out": "0700696c5dcce3", "overrun": false, "keys_after": [20, 54]},
+        {"op": "decode", "follow": true, "in": "0700696c5dcce3", "ok": true, "out": "0700aa22334455", "overrun": false, "in_after": "0700556c5dcce3", "keys_after": [20, 54]},
+        {"op": "encode", "follow": false, "in": "4000010e1b2835424f5c697683909daab7c4d1deebf805121f2c394653606d7a8794a1aebbc8d5e2effc091623303d4a5764717e8b98a5b2bfccd9e6f3000d1a", "out": "40002f524588a51c0f9acf66594c79b0a39e333aed100d04176257cee194a1584b665ba29598356cdf2a1f36295c8900f3aec38a7da09dd4e7f2679e31243128", "overrun": false, "keys_after": [21, 55]},
+        {"op": "decode", "follow": true, "in": "40002f524588a51c0f9acf66594c79b0a39e333aed100d04176257cee194a1584b665ba29598356cdf2a1f36295c8900f3aec38a7da09dd4e7f2679e31243128", "ok": true, "out": "4000aa0e1b2835424f5c697683909daab7c4d1deebf805121f2c394653606d7a8794a1aebbc8d5e2effc091623303d4a5764717e8b98a5b2bfccd9e6f3000d1a", "overrun": false, "in_after": "40001a524588a51c0f9acf66594c79b0a39e333aed100d04176257cee194a1584b665ba29598356cdf2a1f36295c8900f3aec38a7da09dd4e7f2679e31243128", "keys_after": [21, 55]}
+      ]
+    },
+    {
+      "name": "D1_encode_wrap_ff",
+      "key1": 255, "key2": 255,
+      "ops": [
+        {"op": "encode", "follow": false, "in": "06000102030405", "out": "06000402030a", "overrun": false, "keys_after": [0, 0]}
+      ]
+    },
+    {
+      "name": "D2_encode_wrap_across_calls",
+      "key1": 254, "key2": 255,
+      "ops": [
+        {"op": "encode", "follow": false, "in": "050010203040", "out": "05002fdf0f", "overrun": false, "keys_after": [255, 0]},
+        {"op": "encode", "follow": false, "in": "050010203040", "out": "0500302131", "overrun": false, "keys_after": [0, 1]}
+      ]
+    },
+    {
+      "name": "D3_roundtrip_wrap",
+      "key1": 255, "key2": 254,
+      "ops": [
+        {"op": "encode", "follow": false, "in": "06000102030405", "out": "060004010209", "overrun": false, "keys_after": [0, 255]},
+        {"op": "decode", "follow": false, "in": "06000102030405", "ok": true, "out": "0600aa030201", "overrun": false, "in_after": "06000102030405", "keys_after": [0, 255]}
+      ]
+    },
+    {
+      "name": "E1_decode_valid",
+      "key1": 0, "key2": 0,
+      "ops": [
+        {"op": "encode", "follow": false, "in": "04000011", "out": "04001211", "overrun": false, "keys_after": [1, 1]},
+        {"op": "decode", "follow": true, "in": "04001211", "ok": true, "out": "0400aa11", "overrun": false, "in_after": "04001111", "keys_after": [1, 1]}
+      ]
+    },
+    {
+      "name": "E2_decode_corrupt_payload",
+      "key1": 0, "key2": 0,
+      "ops": [
+        {"op": "decode", "follow": false, "in": "0400001235", "ok": false, "out": "0400aa10", "overrun": false, "in_after": "0400ff1235", "keys_after": [1, 1]}
+      ]
+    },
+    {
+      "name": "E3_decode_oversize",
+      "key1": 0, "key2": 0,
+      "ops": [
+        {"op": "decode", "follow": false, "in": "ffff", "ok": false, "out": "", "rejected_oversize": true, "overrun": false, "overrun": false, "in_after": "ffff", "keys_after": [1, 1]}
+      ]
+    },
+    {
+      "name": "E4_decode_passthrough_size3",
+      "key1": 0, "key2": 0,
+      "ops": [
+        {"op": "decode", "follow": false, "in": "0300abcdef", "ok": true, "out": "0300ab", "overrun": false, "in_after": "0300abcdef", "keys_after": [1, 1]}
+      ]
+    },
+    {
+      "name": "E5_decode_passthrough_size0",
+      "key1": 0, "key2": 0,
+      "ops": [
+        {"op": "decode", "follow": false, "in": "0000", "ok": true, "out": "", "overrun": false, "in_after": "0000", "keys_after": [1, 1]}
+      ]
+    },
+    {
+      "name": "E6_decode_wrong_key",
+      "key1": 153, "key2": 153,
+      "ops": [
+        {"op": "decode", "follow": false, "in": "0400001234", "ok": false, "out": "0400aae2", "overrun": false, "in_after": "0400661234", "keys_after": [154, 154]}
+      ]
+    },
+    {
+      "name": "E7_decode_corrupt_checksum_slot",
+      "key1": 0, "key2": 0,
+      "ops": [
+        {"op": "decode", "follow": false, "in": "0500ff001122", "ok": false, "out": "0500aafeed", "overrun": false, "in_after": "0500fe001122", "keys_after": [1, 1]}
+      ]
+    }
+  ]
+}
