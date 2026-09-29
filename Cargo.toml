@@ -1,0 +1,25 @@
+# goonzu-rs workspace - scaffolded in M0 T-001 (see WORKPACKAGES.md)
+[workspace]
+resolver = "3"
+members = [
+    "crates/gz-proto",
+    "crates/gz-net",
+    "crates/gz-cipher",
+    "crates/gz-lzf",
+    "crates/gz-data",
+    "crates/gz-db",
+    "crates/gz-sim",
+    "crates/gz-ops",
+    "crates/gz-bot",
+    "services/front",
+    "services/auth",
+    "services/game",
+    "services/logd",
+    "services/supervisor",
+    "tools/codegen",
+    "tools/capture",
+]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2024"
