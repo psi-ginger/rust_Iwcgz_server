@@ -7,8 +7,6 @@ use crate::parse::EnumDef;
 
 /// Configuration for one generated module.
 pub struct EmitSpec<'a> {
-    /// Enum tag in the legacy header (e.g. `eGameNetworkMsg`).
-    pub tag: &'a str,
     /// Source path recorded in the generated header comment.
     pub source: &'a str,
     /// Legacy identifier prefix stripped from variant names (e.g. `GAMEMSG_`).
@@ -96,16 +94,18 @@ pub fn emit(def: &EnumDef, spec: &EmitSpec<'_>) -> Result<String, String> {
     out.push_str("//!\n");
     let _ = writeln!(
         out,
-        "//! Source: `{}` (enum `{}`, lines {}-{})",
-        spec.source, spec.tag, def.start_line, def.end_line
+        "//! Source: `{}` ({} lines {}-{})",
+        spec.source,
+        def.describe(),
+        def.start_line,
+        def.end_line
     );
     out.push_str("//!\n");
-    out.push_str("//! Regenerate with `cargo run -p codegen`. The discriminants are the exact\n");
+    out.push_str("//! Regenerate with `cargo run -p codegen -- all`. The discriminants are\n");
     out.push_str(
-        "//! legacy numbers: wire compatibility with the shipped client depends on them.\n",
-    );
-    out.push_str(
-        "//! Every entry keeps its legacy line number for traceability to the header.\n\n",
+        "//! the exact legacy numbers: wire compatibility with the shipped client depends\n\
+         //! on them. Every entry keeps its legacy line number for traceability to the\n\
+         //! header.\n\n",
     );
 
     let _ = writeln!(out, "/// {}", spec.doc);
@@ -204,11 +204,10 @@ fn is_plain_ident(s: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::parse::{EnumDef, Enumerator, parse_enum};
+    use crate::parse::{EnumDef, EnumSelector, Enumerator, parse_enum, parse_selected};
 
     fn spec<'a>() -> EmitSpec<'a> {
         EmitSpec {
-            tag: "eGameNetworkMsg",
             source: "MsgType.h",
             prefix: "GAMEMSG_",
             ty: "GameMsg",
@@ -290,6 +289,77 @@ mod tests {
     fn output_is_deterministic() {
         let def = parse_enum(b"enum e{\n\tGAMEMSG_A = 1,\n};\n", "e").unwrap();
         assert_eq!(emit(&def, &spec()).unwrap(), emit(&def, &spec()).unwrap());
+    }
+
+    #[test]
+    fn anonymous_enum_is_parsed_and_labelled() {
+        // Mirrors FrontMsg.h / AuthMsg.h, which use a bare `enum { ... }`.
+        let src = b"enum {\n\tFRONTMSG_REQUEST_LOGIN = 1,\n\tFRONTMSG_RESPONSE_LOGIN = 1000,\n};\n";
+        let def = parse_selected(
+            src,
+            EnumSelector::Anonymous {
+                prefix: "FRONTMSG_",
+            },
+        )
+        .unwrap();
+        assert_eq!(def.tag, "");
+        assert_eq!(def.describe(), "anonymous `enum`");
+        assert_eq!(def.members.len(), 2);
+        assert_eq!(def.members[1].value, 1000);
+    }
+
+    #[test]
+    fn header_comment_distinguishes_tagged_from_anonymous() {
+        let tagged = parse_enum(b"enum e{\n\tGAMEMSG_A = 1,\n};\n", "e").unwrap();
+        assert!(
+            emit(&tagged, &spec())
+                .unwrap()
+                .contains("(enum `e` lines 1-3)"),
+            "tagged"
+        );
+        let anon = parse_selected(
+            b"enum {\n\tGAMEMSG_A = 1,\n};\n",
+            EnumSelector::Anonymous { prefix: "GAMEMSG_" },
+        )
+        .unwrap();
+        assert!(
+            emit(&anon, &spec())
+                .unwrap()
+                .contains("(anonymous `enum` lines 1-3)"),
+            "anonymous"
+        );
+    }
+
+    #[test]
+    fn ambiguous_anonymous_selector_is_rejected() {
+        let src = b"enum {\n\tFRONTMSG_A = 1,\n};\nenum {\n\tFRONTMSG_B = 1,\n};\n";
+        let err = parse_selected(
+            src,
+            EnumSelector::Anonymous {
+                prefix: "FRONTMSG_",
+            },
+        )
+        .unwrap_err();
+        assert!(err.message.contains("ambiguous"), "{err}");
+    }
+
+    #[test]
+    fn anonymous_selector_with_no_match_is_rejected() {
+        let err = parse_selected(
+            b"enum {\n\tOTHER_A = 1,\n};\n",
+            EnumSelector::Anonymous { prefix: "X_" },
+        )
+        .unwrap_err();
+        assert!(err.message.contains("no anonymous enum block"), "{err}");
+    }
+
+    #[test]
+    fn tag_selector_ignores_anonymous_blocks() {
+        let src = b"enum {\n\tFRONTMSG_A = 1,\n};\nenum eTag{\n\tGAMEMSG_B = 5,\n};\n";
+        let def = parse_enum(src, "eTag").unwrap();
+        assert_eq!(def.tag, "eTag");
+        assert_eq!(def.members.len(), 1);
+        assert_eq!(def.members[0].value, 5);
     }
 
     #[test]

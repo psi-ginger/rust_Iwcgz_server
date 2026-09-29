@@ -31,7 +31,7 @@ pub struct Enumerator {
 /// A parsed legacy enum block.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EnumDef {
-    /// C enum tag, e.g. `eGameNetworkMsg`.
+    /// C enum tag, e.g. `eGameNetworkMsg`. Empty for an anonymous `enum { ... }`.
     pub tag: String,
     /// 1-based line of the `enum` keyword.
     pub start_line: usize,
@@ -39,6 +39,29 @@ pub struct EnumDef {
     pub end_line: usize,
     /// Enumerators in source order (including any terminator such as `GAMEMSG_END`).
     pub members: Vec<Enumerator>,
+}
+
+impl EnumDef {
+    /// Human-readable description of the block, for the generated header comment.
+    #[must_use]
+    pub fn describe(&self) -> String {
+        if self.tag.is_empty() {
+            "anonymous `enum`".to_string()
+        } else {
+            format!("enum `{}`", self.tag)
+        }
+    }
+}
+
+/// How to find the target enum block inside a header.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EnumSelector<'a> {
+    /// A tagged block such as `enum eGameNetworkMsg { ... }`.
+    Tag(&'a str),
+    /// An anonymous block such as `enum { ... }`, which the legacy front/auth
+    /// headers use. Selected as the single block whose first enumerator starts
+    /// with `prefix`; more than one match is an error rather than a guess.
+    Anonymous { prefix: &'a str },
 }
 
 /// Error raised when a header cannot be parsed without guessing.
@@ -75,13 +98,64 @@ impl std::error::Error for ParseError {}
 /// `= N` sets the counter, anything else increments it. Values that do not fit
 /// in `u16` are rejected, since `usCmd` on the wire is a `UI16`.
 pub fn parse_enum(source: &[u8], tag: &str) -> Result<EnumDef, ParseError> {
+    parse_selected(source, EnumSelector::Tag(tag))
+}
+
+/// Parses the enum block chosen by `selector`.
+pub fn parse_selected(source: &[u8], selector: EnumSelector<'_>) -> Result<EnumDef, ParseError> {
     let code = strip_comments(source)?;
+    let start = locate(&code, selector)?;
+    let tag = enum_start(&code[start].1).flatten().unwrap_or_default();
+    parse_block(&code, start, tag)
+}
 
-    let start = code
-        .iter()
-        .position(|(_, line)| enum_tag(line) == Some(tag))
-        .ok_or_else(|| ParseError::new(0, format!("enum `{tag}` not found")))?;
+/// Finds the line index of the enum block selected by `selector`.
+fn locate(code: &[(usize, String)], selector: EnumSelector<'_>) -> Result<usize, ParseError> {
+    let candidates: Vec<usize> = (0..code.len())
+        .filter(|&i| match selector {
+            EnumSelector::Tag(tag) => enum_start(&code[i].1) == Some(Some(tag)),
+            EnumSelector::Anonymous { .. } => enum_start(&code[i].1) == Some(None),
+        })
+        .collect();
 
+    match selector {
+        EnumSelector::Tag(tag) => candidates
+            .first()
+            .copied()
+            .ok_or_else(|| ParseError::new(0, format!("enum `{tag}` not found"))),
+        EnumSelector::Anonymous { prefix } => {
+            // Scan for the single anonymous block holding this prefix. These
+            // headers have exactly one enum each, so this stays unambiguous, but
+            // a second match means the selector needs to be tightened rather than
+            // silently picking the first.
+            let matching: Vec<usize> = candidates
+                .iter()
+                .copied()
+                .filter(|&i| {
+                    code.get(i + 1).is_some_and(|(_, text)| {
+                        first_ident(text).is_some_and(|id| id.starts_with(prefix))
+                    })
+                })
+                .collect();
+            match matching.len() {
+                0 => Err(ParseError::new(
+                    0,
+                    format!("no anonymous enum block starting with `{prefix}` found"),
+                )),
+                1 => Ok(matching[0]),
+                n => Err(ParseError::new(
+                    code[matching[1]].0,
+                    format!(
+                        "{n} anonymous enum blocks start with `{prefix}`; the selector is ambiguous"
+                    ),
+                )),
+            }
+        }
+    }
+}
+
+/// Parses the enum block whose opening line is at `start`.
+fn parse_block(code: &[(usize, String)], start: usize, tag: &str) -> Result<EnumDef, ParseError> {
     let start_line = code[start].0;
     let mut members: Vec<Enumerator> = Vec::new();
     // The first enumerator of the block is always explicit in the legacy headers;
@@ -179,19 +253,30 @@ pub fn parse_enum(source: &[u8], tag: &str) -> Result<EnumDef, ParseError> {
     })
 }
 
-/// Returns the tag of a line that opens an enum, e.g. `enum eGameNetworkMsg{`.
-fn enum_tag(line: &str) -> Option<&str> {
+/// Classifies a line that opens an enum.
+///
+/// Returns `None` when the line is not an enum opener, `Some(None)` for an
+/// anonymous `enum {`, and `Some(Some(tag))` for `enum eGameNetworkMsg {`.
+fn enum_start(line: &str) -> Option<Option<&str>> {
     let rest = line.trim().strip_prefix("enum")?;
     if !rest.starts_with(|c: char| c.is_whitespace()) {
         return None;
     }
     let rest = rest.trim_start();
+    if rest.starts_with('{') {
+        return Some(None);
+    }
     let (ident, tail) = split_ident(rest)?;
     if tail.trim_start().starts_with('{') {
-        Some(ident)
+        Some(Some(ident))
     } else {
         None
     }
+}
+
+/// The leading identifier of a line, used to sniff the first member of a block.
+fn first_ident(line: &str) -> Option<&str> {
+    split_ident(line.trim()).map(|(ident, _)| ident)
 }
 
 /// Splits leading ASCII identifier characters from `s`.
@@ -391,5 +476,70 @@ mod tests {
         let def = parse_enum(b"enum e{\n\tGAMEMSG_A = 1,\n}", "e").unwrap();
         assert_eq!(def.members.len(), 1);
         assert_eq!(def.end_line, 3);
+    }
+
+    #[test]
+    fn anonymous_enum_is_selected_by_prefix() {
+        let src = b"struct sPacketHeader { int a; };\n\
+                  enum {\n\
+                  \tFRONTMSG_REQUEST_LOGIN = 1,\n\
+                  \t//FRONTMSG_REQUEST_HANGAMEJP_LOGIN,\n\
+                  \tFRONTMSG_REQUEST_DIFFHELLMAN_KEY,\n\
+                  \n\
+                  \tFRONTMSG_RESPONSE_LOGIN = 1000,\n\
+                  };\n";
+        let def = parse_selected(
+            src,
+            EnumSelector::Anonymous {
+                prefix: "FRONTMSG_",
+            },
+        )
+        .unwrap();
+        // The commented-out enumerator is skipped, exactly as the C compiler does,
+        // so DIFFHELLMAN_KEY is 13 and not 14.
+        let got: Vec<(&str, u16)> = def
+            .members
+            .iter()
+            .map(|m| (m.name.as_str(), m.value))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                ("FRONTMSG_REQUEST_LOGIN", 1),
+                ("FRONTMSG_REQUEST_DIFFHELLMAN_KEY", 2),
+                ("FRONTMSG_RESPONSE_LOGIN", 1000),
+            ]
+        );
+        assert_eq!(def.tag, "");
+        assert_eq!(def.start_line, 2);
+    }
+
+    #[test]
+    fn anonymous_enum_only_looks_at_enum_openers() {
+        // `prefix` appearing in a struct field must not be mistaken for the block.
+        let src = b"struct sX { int FRONTMSG_FAKE; };\nenum {\n\tFRONTMSG_A = 1,\n};\n";
+        let def = parse_selected(
+            src,
+            EnumSelector::Anonymous {
+                prefix: "FRONTMSG_",
+            },
+        )
+        .unwrap();
+        assert_eq!(def.members.len(), 1);
+        assert_eq!(def.start_line, 2);
+    }
+
+    #[test]
+    fn enum_start_classifies_all_three_shapes() {
+        // Callers pass exactly one comment-stripped line, so a brace on the next
+        // line is not visible here and the line is not an opener.
+        assert_eq!(
+            enum_start("enum eGameNetworkMsg{"),
+            Some(Some("eGameNetworkMsg"))
+        );
+        assert_eq!(enum_start("enum {"), Some(None));
+        assert_eq!(enum_start("enum\teTag"), None, "no brace on the line");
+        assert_eq!(enum_start("enumeration = 1,"), None);
+        assert_eq!(enum_start("struct enumX {"), None);
     }
 }
