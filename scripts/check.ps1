@@ -25,8 +25,8 @@ $legacyRoot = if ($env:GOONZU_LEGACY_ROOT) {
 }
 Write-Host "[4/4] codegen --check" -ForegroundColor Cyan
 if (Test-Path -LiteralPath (Join-Path $legacyRoot "GoonZuWorld\CommonLogic\MsgType.h")) {
-    cargo run -q -p codegen -- game --check
-    if ($LASTEXITCODE -ne 0) { throw "generated opcodes are stale; re-run cargo run -p codegen -- game" }
+    cargo run -q -p codegen -- all --check
+    if ($LASTEXITCODE -ne 0) { throw "generated opcode tables are stale; re-run cargo run -p codegen -- all" }
 } else {
     Write-Host "  legacy tree not found at $legacyRoot - skipping drift check" -ForegroundColor Yellow
 }
