@@ -1,8 +1,9 @@
 //! Generates Rust opcode enums from the legacy C++ headers.
 //!
 //! ```text
-//! cargo run -p codegen -- game            # write crates/gz-proto/src/opcodes_game.rs
-//! cargo run -p codegen -- game --check    # fail if the committed file is stale
+//! cargo run -p codegen -- all             # write every generated module
+//! cargo run -p codegen -- all --check     # fail if any committed file is stale
+//! cargo run -p codegen -- front          # or game | auth individually
 //! ```
 //!
 //! The generated files are committed; CI runs `--check` so a header change that
@@ -28,8 +29,8 @@ struct Target {
     name: &'static str,
     /// Path of the legacy header, relative to the legacy root.
     header: &'static str,
-    /// Enum tag inside that header.
-    tag: &'static str,
+    /// Enum tag inside that header, or `None` when the block is anonymous.
+    tag: Option<&'static str>,
     /// Generated file, relative to the workspace root.
     out: &'static str,
     /// Legacy identifier prefix stripped from variant names.
@@ -40,17 +41,45 @@ struct Target {
     doc: &'static str,
 }
 
-const TARGETS: &[Target] = &[Target {
-    name: "game",
-    header: r"GoonZuWorld\CommonLogic\MsgType.h",
-    tag: "eGameNetworkMsg",
-    out: r"crates\gz-proto\src\opcodes_game.rs",
-    prefix: "GAMEMSG_",
-    ty: "GameMsg",
-    name_fn: "name",
-    count_fn: "count",
-    doc: "Game client <-> game server message opcodes (`GAMEMSG_*`).",
-}];
+const TARGETS: &[Target] = &[
+    Target {
+        name: "game",
+        header: r"GoonZuWorld\CommonLogic\MsgType.h",
+        tag: Some("eGameNetworkMsg"),
+        out: r"crates\gz-proto\src\opcodes_game.rs",
+        prefix: "GAMEMSG_",
+        ty: "GameMsg",
+        name_fn: "name",
+        count_fn: "count",
+        doc: "Game client <-> game server message opcodes (`GAMEMSG_*`).",
+    },
+    // `Server\AUTHSERVERCHINA\AuthMsg.h` is a reduced China-only variant of the
+    // auth enum (requests 1-6, responses 1000-1005) and is deliberately NOT
+    // generated: blueprint Part A 5.1 scopes it out. If a China build ever needs
+    // it, add a separate target rather than editing this one.
+    Target {
+        name: "front",
+        header: r"Server\FrontServer\FrontMsg.h",
+        tag: None,
+        out: r"crates\gz-proto\src\opcodes_front.rs",
+        prefix: "FRONTMSG_",
+        ty: "FrontMsg",
+        name_fn: "name",
+        count_fn: "count",
+        doc: "Client <-> front server opcodes (`FRONTMSG_*`), plus front <-> game server.",
+    },
+    Target {
+        name: "auth",
+        header: r"Server\AuthServer\AuthMsg.h",
+        tag: None,
+        out: r"crates\gz-proto\src\opcodes_auth.rs",
+        prefix: "AUTHMSG_",
+        ty: "AuthMsg",
+        name_fn: "name",
+        count_fn: "count",
+        doc: "Front / game / master server <-> auth server opcodes (`AUTHMSG_*`).",
+    },
+];
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -63,26 +92,47 @@ fn main() -> ExitCode {
     let check = args.iter().any(|a| a == "--check");
     let positional: Vec<&String> = args.iter().filter(|a| !a.starts_with("--")).collect();
 
-    let target_name = match positional.first() {
-        Some(name) => name.as_str(),
-        None => {
-            eprintln!("error: missing target; expected one of: {}", target_names());
-            return ExitCode::FAILURE;
-        }
-    };
-
-    let Some(target) = TARGETS.iter().find(|t| t.name == target_name) else {
+    let Some(target_name) = positional.first().map(|s| s.as_str()) else {
         eprintln!(
-            "error: unknown target `{target_name}`; expected one of: {}",
+            "error: missing target; expected one of: all, {}",
             target_names()
         );
         return ExitCode::FAILURE;
     };
 
-    let legacy_root = std::env::var_os(LEGACY_ROOT_ENV)
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(DEFAULT_LEGACY_ROOT));
-    let header = legacy_root.join(target.header);
+    // `all` regenerates/verifies every table in one go, so CI and a human cannot
+    // forget a target.
+    if target_name == "all" {
+        let legacy_root = legacy_root();
+        let root = workspace_root();
+        let mut failed = false;
+        for target in TARGETS {
+            let header = legacy_root.join(target.header);
+            let out = root.join(target.out);
+            match run(target, &header, &out, check) {
+                Ok(message) => println!("{message}"),
+                Err(message) => {
+                    eprintln!("error: {message}");
+                    failed = true;
+                }
+            }
+        }
+        return if failed {
+            ExitCode::FAILURE
+        } else {
+            ExitCode::SUCCESS
+        };
+    }
+
+    let Some(target) = TARGETS.iter().find(|t| t.name == target_name) else {
+        eprintln!(
+            "error: unknown target `{target_name}`; expected one of: all, {}",
+            target_names()
+        );
+        return ExitCode::FAILURE;
+    };
+
+    let header = legacy_root().join(target.header);
     let out = workspace_root().join(target.out);
 
     match run(target, &header, &out, check) {
@@ -97,17 +147,30 @@ fn main() -> ExitCode {
     }
 }
 
+fn legacy_root() -> PathBuf {
+    std::env::var_os(LEGACY_ROOT_ENV)
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(DEFAULT_LEGACY_ROOT))
+}
+
 fn run(target: &Target, header: &Path, out: &Path, check: bool) -> Result<String, String> {
     let source = std::fs::read(header)
         .map_err(|e| format!("cannot read legacy header {}: {e}", header.display()))?;
 
-    let def = parse::parse_enum(&source, target.tag)
-        .map_err(|e| format!("{} ({})", e, header.display()))?;
+    let def = match target.tag {
+        Some(tag) => parse::parse_enum(&source, tag),
+        None => parse::parse_selected(
+            &source,
+            parse::EnumSelector::Anonymous {
+                prefix: target.prefix,
+            },
+        ),
+    }
+    .map_err(|e| format!("{} ({})", e, header.display()))?;
 
     let rendered = emit::emit(
         &def,
         &EmitSpec {
-            tag: target.tag,
             source: target.header,
             prefix: target.prefix,
             ty: target.ty,
@@ -185,7 +248,9 @@ fn print_help() {
          USAGE:\n    \
              cargo run -p codegen -- <TARGET> [--check]\n\
          \n\
-         TARGETS:\n    {}\n\
+         TARGETS:\n    {}\
+         \n\
+         `all` regenerates or checks every table in one pass.\n\
          \n\
          FLAGS:\n    \
              --check   verify the committed file matches the legacy header; \
@@ -195,8 +260,8 @@ fn print_help() {
              {LEGACY_ROOT_ENV}  legacy source root (default: {DEFAULT_LEGACY_ROOT})\n",
         TARGETS
             .iter()
-            .map(|t| format!("    {:<6} {} -> {}", t.name, t.header, t.out))
+            .map(|t| format!("    {:<6} {} -> {}\n", t.name, t.header, t.out))
             .collect::<Vec<_>>()
-            .join("\n")
+            .join("")
     );
 }
