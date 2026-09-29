@@ -55,9 +55,11 @@ Three properties worth remembering when reading the tables:
 
 ### Known deviation from the blueprint
 
-Blueprint Part B §1.1 reports "1633 enumerator lines; real messages = 1632". That
-count includes 12 enumerators inside the `/* ... */` block at `MsgType.h:1309-1327`
-that the C compiler never sees. The live count is **1621** (1620 messages plus the
+Blueprint Part B §1.1 originally reported "1633 enumerator lines; real messages = 1632"
+(corrected in the doc to 1621/1620 on 2026-09-29). The figure missed one of the **13**
+enumerator names inside the `/* ... */` block at `MsgType.h:1309-1327` (the first shares
+its line with the opening `/*`; a naive line-scanner sees 12). The C compiler never sees
+any of them. The live count is **1621** (1620 messages plus the
 terminator). No *value* is affected: the next real enumerator is an explicit rebase
 back to 5000, and all 53 anchors plus all 157 annotations agree either way. Only
 the headline count was off. The front and auth counts in §4.2 / §5.1 are correct.
