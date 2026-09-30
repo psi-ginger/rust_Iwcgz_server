@@ -35,7 +35,9 @@ pub struct Variant<'a> {
 /// `GAMEMSG_REQUEST_CHAT` with prefix `GAMEMSG_` becomes `RequestChat`. Two
 /// distinct legacy names can normalise to the same Rust identifier (`GAMEMSG_A_B`
 /// and `GAMEMSG_A__B` both become `AB`), which is a hard error rather than a
-/// silently duplicated variant.
+/// silently duplicated variant. A C *alias* — two enumerators sharing a value —
+/// is rejected for the same reason: neither the enum nor the lookup tables can
+/// express it.
 pub fn build_variants<'a>(
     def: &'a EnumDef,
     spec: &EmitSpec<'_>,
@@ -67,6 +69,18 @@ pub fn build_variants<'a>(
             return Err(format!(
                 "line {}: duplicate enumerator `{}`",
                 member.line, member.name
+            ));
+        }
+        // A C alias (two enumerators sharing a value) is legal C, but it is not
+        // expressible here: `#[repr(u16)]` would give the enum two identical
+        // discriminants and both lookup tables would get duplicate `match` arms,
+        // so the generated file would not compile. Caught here so the failure is
+        // one sentence pointing at the header line.
+        if let Some(clash) = out.iter().find(|v| v.value == member.value) {
+            return Err(format!(
+                "line {}: `{}` and `{}` both have value {}; C aliases cannot be \
+                 represented as an enum discriminant",
+                member.line, member.name, clash.legacy, member.value
             ));
         }
         if let Some(clash) = out.iter().find(|v| v.variant == variant) {
@@ -243,6 +257,15 @@ mod tests {
         let src = b"enum e{\n\tGAMEMSG_SELF = 1,\n};\n";
         let def = parse_enum(src, "e").unwrap();
         assert!(build_variants(&def, &spec()).is_err());
+    }
+
+    #[test]
+    fn alias_value_is_rejected() {
+        // Legal C, but it cannot be an enum discriminant nor a `match` arm.
+        let src = b"enum e{\n\tGAMEMSG_A = 1,\n\tGAMEMSG_B = 1,\n};\n";
+        let def = parse_enum(src, "e").unwrap();
+        let err = build_variants(&def, &spec()).unwrap_err();
+        assert!(err.contains("both have value 1"), "{err}");
     }
 
     #[test]

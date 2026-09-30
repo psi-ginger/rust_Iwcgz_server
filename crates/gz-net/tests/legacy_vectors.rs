@@ -15,7 +15,7 @@ mod data {
     include!("data/vectors.rs");
 }
 
-use data::{CASES, DIVERGENT};
+use data::{CASES, DIVERGENT, Divergence};
 use gz_net::{FrameParser, HEADER_SIZE, MAX_FRAME_SIZE};
 
 fn unhex(s: &str) -> Vec<u8> {
@@ -26,22 +26,31 @@ fn unhex(s: &str) -> Vec<u8> {
         .collect()
 }
 
+/// The recorded reason this case is allowed to differ, if it is allowed to.
+fn divergence_of(name: &str) -> Option<Divergence> {
+    DIVERGENT
+        .iter()
+        .find(|(case, _)| *case == name)
+        .map(|(_, kind)| *kind)
+}
+
 /// What this port did with one case's chunks, compared step by step against the
 /// legacy.
 ///
 /// Returns `Err(())` if the two disagree anywhere, so the caller can report which
 /// case and which read went wrong.
 fn replay(case: &data::Case) -> Result<(), String> {
-    let divergent = DIVERGENT.contains(&case.name);
+    let divergence = divergence_of(case.name);
     let mut parser = FrameParser::new();
+    let mut sent: Vec<u8> = Vec::new();
 
     for (index, step) in case.steps.iter().enumerate() {
         let at = format!("{} read {index}", case.name);
 
-        if divergent {
-            // The only divergence: the legacy accepted a frame with no room for a
-            // command id, this port refuses the connection. Asserted in both
-            // directions, so neither side can drift into agreeing by accident.
+        if divergence == Some(Divergence::SubHeader) {
+            // BUG-013: the legacy accepted a frame with no room for a command id,
+            // this port refuses the connection. Asserted in both directions, so
+            // neither side can drift into agreeing by accident.
             let refused = parser.feed(&unhex(step.chunk)).is_err();
             assert!(refused, "{at}: expected this port to refuse");
             assert!(step.completed, "{at}: legacy is expected to accept");
@@ -56,6 +65,19 @@ fn replay(case: &data::Case) -> Result<(), String> {
                 "{at}: a refused parser must stay refused"
             );
             return Ok(());
+        }
+
+        if divergence == Some(Divergence::RingCapacity) {
+            // BUG-014: the legacy's ring wrapped and overwrote a half-received
+            // frame, so it handed out a *different* frame than the one sent. This
+            // port has no ring, so it must accept every read and reassemble the
+            // frame the peer actually wrote. Any step that refused, or any frame
+            // that is not the bytes that arrived, is the bug reappearing.
+            parser
+                .feed(&unhex(step.chunk))
+                .map_err(|e| format!("{at}: this port refused ({e})"))?;
+            sent.extend_from_slice(&unhex(step.chunk));
+            continue;
         }
 
         match parser.feed(&unhex(step.chunk)) {
@@ -92,6 +114,30 @@ fn replay(case: &data::Case) -> Result<(), String> {
                 "{at}: frames differ\n  legacy: {want:x?}\n  this port: {got:x?}"
             ));
         }
+    }
+
+    if divergence == Some(Divergence::RingCapacity) {
+        let mut got: Vec<Vec<u8>> = Vec::new();
+        while let Some(frame) = parser.next_frame().expect("ring case must not be rejected") {
+            got.push(frame.into_bytes());
+        }
+        assert_eq!(
+            got,
+            vec![sent.clone()],
+            "this port must deliver exactly the frame the peer sent, reassembled"
+        );
+        // And it must genuinely differ from what the legacy handed out, or this
+        // case is no longer testing the divergence it was written for.
+        let legacy: Vec<u8> = case
+            .steps
+            .iter()
+            .flat_map(|step| step.packets)
+            .flat_map(|packet| unhex(packet))
+            .collect();
+        assert_ne!(
+            legacy, sent,
+            "the legacy no longer mangles this frame; re-check BUG-014"
+        );
     }
 
     Ok(())
@@ -149,28 +195,59 @@ fn the_port_agrees_with_the_legacy_on_everything_but_the_declared_divergence() {
 }
 
 #[test]
-fn the_divergence_is_exactly_the_three_sub_header_sizes() {
-    // If a new case is ever added to DIVERGENT this pins down what it is allowed
-    // to be: a declared size of 2, 3 or 4 and nothing else.
+fn the_divergence_list_is_exactly_what_was_reviewed() {
+    // If a case is ever added to or removed from DIVERGENT this pins down what is
+    // allowed to differ from the legacy, and why: the three sub-header sizes
+    // (BUG-013, this port refuses) and the over-ring frame (BUG-014, this port
+    // reassembles). Nothing else may.
     assert_eq!(
         DIVERGENT,
-        &["declared_2", "declared_3", "declared_4"],
+        &[
+            ("declared_2", Divergence::SubHeader),
+            ("declared_3", Divergence::SubHeader),
+            ("declared_4", Divergence::SubHeader),
+            ("ring_smaller_than_frame", Divergence::RingCapacity),
+        ],
         "the divergence list changed; re-verify it against the legacy"
     );
 
-    for name in DIVERGENT {
+    for (name, kind) in DIVERGENT {
         let case = CASES
             .iter()
             .find(|case| case.name == *name)
             .expect("divergent case missing from the fixture");
+
         let frames: Vec<Vec<u8>> = case
             .steps
             .iter()
             .flat_map(|step| step.packets)
             .map(|packet| unhex(packet))
             .collect();
-        assert_eq!(frames.len(), 1, "{name}");
-        assert!(frames[0].len() < HEADER_SIZE, "{name}");
+
+        match kind {
+            Divergence::SubHeader => {
+                assert_eq!(frames.len(), 1, "{name}");
+                assert!(frames[0].len() < HEADER_SIZE, "{name}");
+            }
+            Divergence::RingCapacity => {
+                // The legacy handed out *something*, and it was not the frame that
+                // was sent: it re-read a header out of the bytes that the wrap
+                // exposed, i.e. the first 5 bytes of the *second* read. Pinning
+                // that exactly is what proves the case is still testing BUG-014
+                // rather than some other mismatch.
+                assert_eq!(frames.len(), 1, "{name}");
+                assert!(
+                    case.steps[0].packets.is_empty(),
+                    "{name}: the first read should hold the partial frame"
+                );
+                let second_read = unhex(case.steps[1].chunk);
+                assert_eq!(
+                    frames[0],
+                    second_read[..5],
+                    "{name}: the recorded frame should be the ring-wrap artefact"
+                );
+            }
+        }
     }
 }
 

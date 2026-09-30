@@ -22,10 +22,22 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 TRUTH = os.path.join(HERE, "ground_truth.json")
 OUT = os.path.join(HERE, os.pardir, "tests", "data", "vectors.rs")
 
-# Names where this port deliberately refuses what the legacy accepts: a declared
-# size of 2..=4 cannot hold the 5-byte header. BUG-013. Everything else in the
-# table must agree with the legacy exactly.
-DIVERGENT = {"declared_2", "declared_3", "declared_4"}
+# Cases where this port deliberately answers differently from the legacy, and why.
+#
+# `SubHeader`     - the legacy accepts a declared size of 2..=4, which cannot hold
+#                   the 5-byte header. BUG-013. This port refuses.
+# `RingCapacity`  - a frame larger than the link's receive ring: the legacy wraps
+#                   its ring and overwrites the partial frame, delivering a
+#                   different frame (or refusing). BUG-014. This port, which has
+#                   no ring, reassembles the frame that was actually sent.
+#
+# Every other case in the table must agree with the legacy exactly.
+DIVERGENT = {
+    "declared_2": "SubHeader",
+    "declared_3": "SubHeader",
+    "declared_4": "SubHeader",
+    "ring_smaller_than_frame": "RingCapacity",
+}
 
 STEP_RE = re.compile(
     r'Step \{ chunk: "(?P<chunk>[^"]*)", completed: (?P<ok>\w+), '
@@ -41,6 +53,14 @@ def parse(path):
     avoids pulling the emitter and the parser out of sync.
     """
     text = io.open(path, encoding="utf-8").read()
+    # A harness that died mid-run leaves a truncated file, and every step it
+    # never wrote would simply be absent from the fixture - a smaller table that
+    # still passes `cargo test`. Only a closed document is a complete one.
+    if not text.rstrip().endswith("]"):
+        raise SystemExit(
+            "%s is truncated (no closing `]`): the harness did not finish, "
+            "refusing to write a fixture that lost cases" % path
+        )
     cases = []
     name = None
     for line in text.splitlines():
@@ -90,10 +110,14 @@ def check(cases):
                     )
             if not step["completed"] and step["packets"]:
                 raise SystemExit(f"{where}: refused buffer handed out a frame")
-            if not step["completed"] and case is not cases[-1]:
-                # The harness stops feeding a refused buffer; so must the fixture.
-                if index != len(case["steps"]) - 1:
-                    raise SystemExit(f"{where}: steps recorded after a refusal")
+            if not step["completed"] and index != len(case["steps"]) - 1:
+                # The harness stops feeding a refused buffer, so a read recorded
+                # after one describes a session that no longer exists. This must
+                # hold for *every* case, including the last: the harness happens to
+                # put its refusal cases last today, which is exactly why an earlier
+                # version of this guard exempted `cases[-1]` and silently allowed
+                # the bad shape.
+                raise SystemExit(f"{where}: steps recorded after a refusal")
 
 
 def emit(cases):
@@ -136,11 +160,23 @@ def emit(cases):
         out.append("    },")
     out.append("];")
     out.append("")
-    out.append("/// Cases this port deliberately answers differently from the legacy: the")
-    out.append("/// legacy accepts a declared size of 2..=4, which cannot hold the 5-byte")
-    out.append("/// header. BUG-013.")
-    out.append("pub static DIVERGENT: &[&str] = &[%s];"
-               % ", ".join('"%s"' % n for n in sorted(DIVERGENT)))
+    out.append("/// Cases this port deliberately answers differently from the legacy, and why.")
+    out.append("///")
+    out.append("/// `SubHeader` - the legacy accepts a declared size of 2..=4, which cannot")
+    out.append("/// hold the 5-byte header (BUG-013); this port refuses. `RingCapacity` - a")
+    out.append("/// frame larger than the link's receive ring, which the legacy overwrites")
+    out.append("/// mid-frame (BUG-014); this port, having no ring, delivers what was sent.")
+    out.append("#[derive(Debug, Clone, Copy, PartialEq, Eq)]")
+    out.append("pub enum Divergence {")
+    out.append("    SubHeader,")
+    out.append("    RingCapacity,")
+    out.append("}")
+    out.append("")
+    out.append("/// Every deliberately divergent case, with the reason it diverges.")
+    out.append("pub static DIVERGENT: &[(&str, Divergence)] = &[")
+    for name in sorted(DIVERGENT):
+        out.append('    ("%s", Divergence::%s),' % (name, DIVERGENT[name]))
+    out.append("];")
     out.append("")
     return "\n".join(out)
 
@@ -150,13 +186,18 @@ def main():
     if not cases:
         raise SystemExit("no cases parsed from %s" % TRUTH)
     check(cases)
-    missing = DIVERGENT - {c["name"] for c in cases}
+    missing = set(DIVERGENT) - {c["name"] for c in cases}
     if missing:
         raise SystemExit("divergent cases absent from the harness: %s" % sorted(missing))
     io.open(OUT, "w", encoding="utf-8", newline="\n").write(emit(cases))
     print(
-        "%d cases / %d steps written to %s"
-        % (len(cases), sum(len(c["steps"]) for c in cases), os.path.normpath(OUT))
+        "%d cases / %d steps written to %s (%d divergent)"
+        % (
+            len(cases),
+            sum(len(c["steps"]) for c in cases),
+            os.path.normpath(OUT),
+            len(DIVERGENT),
+        )
     )
 
 

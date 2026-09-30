@@ -39,13 +39,19 @@ checked-in table is then always a real change.
 
 `emit_vectors.py` refuses to emit a table when
 
+- the harness output is truncated — no closing `]`, which is what a harness that
+  died mid-run leaves behind. Without this the emitter would happily write a
+  smaller fixture that still passes every test, so a crash would look like a
+  legitimate deletion rather than a failed run;
 - a case name repeats, or a case has no steps;
 - a chunk or frame is odd-length hex, or the harness hit `RING_OVERFLOW`
   (which would mean the harness, not the legacy, got the ring geometry wrong);
 - a recorded frame's length disagrees with its own declared size - i.e. the
   legacy would be reporting something self-inconsistent;
 - a refused read handed out a frame, or any read was recorded after a refusal
-  (the legacy caller disconnects, so those reads never happened).
+  (the legacy caller disconnects, so those reads never happened);
+- a name in `DIVERGENT` has no matching case, so the divergence allowlist cannot
+  quietly stop covering what it claims to cover.
 
 ## Two lifecycle details the harness has to reproduce
 
@@ -65,7 +71,7 @@ Both cost a debugging session to find, so they are worth writing down:
 
 ## What the harness covers
 
-20 cases, 50 reads, chosen to hit every branch and both boundaries:
+21 cases, 52 reads, chosen to hit every branch and both boundaries:
 
 - **accepted frames** — single frame; two frames in one chunk; one frame split
   across three chunks; one byte at a time (25 reads); the two size bytes and the
@@ -82,6 +88,13 @@ Both cost a debugging session to find, so they are worth writing down:
   The legacy delivers nothing at all, because the good frame is behind the bad
   header in the same buffer. This is the case that makes eager validation in
   `feed` the right design rather than a stylistic choice.
+- **a frame larger than the ring** — the one case that does *not* use the big
+  default ring. `ring_smaller_than_frame` sets the ring to 32 bytes and sends a
+  40-byte frame in two reads, so the second read wraps `m_pLastPtr` over the
+  first. The legacy delivers `0500aabbcc`, a 5-byte "frame" assembled from the
+  second read's bytes, which is BUG-014 and nothing like the frame that was sent.
+  The geometry is not invented: `CreateFactory` passes 30000/50000 for the game
+  client's link (`GameProtocol.cpp:25,27`) while the guard allows 64992.
 
 Not covered here, on purpose:
 
@@ -89,10 +102,11 @@ Not covered here, on purpose:
   worth carrying in a source fixture. The decision that 64992 is *accepted* is
   pinned by the short-body case; that a full frame is *deliverable* end to end is
   covered by `../tests/framing.rs`.
-- **Ring wrap.** The legacy linearises a frame that straddles the ring end by
-  copying it into the `PACKET_MAX_SIZE`-byte slack zone before `m_pBasePtr`
+- **A frame that straddles the ring end.** The legacy linearises one by copying
+  it into the `PACKET_MAX_SIZE`-byte slack zone before `m_pBasePtr`
   (`:250-257`). `gz-net` buffers in a `VecDeque` and has no ring, so there is
-  nothing to linearise; the harness likewise uses a ring far larger than any
-  case needs.
+  nothing to linearise, and the copy exists only to paper over the wrap. Ring
+  *overflow* — a frame that does not fit at all — is covered by
+  `ring_smaller_than_frame` above; this entry is only about the wrap itself.
 - **`headerType == 1`.** No call site in the tree passes it (blueprint 01 Part A
   §1.6). Every case runs with the default 0.

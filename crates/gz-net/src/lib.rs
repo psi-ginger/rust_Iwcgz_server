@@ -8,9 +8,13 @@
 //! ```text
 //! offset 0..2   usSize    little-endian u16, TOTAL frame length, header included
 //! offset 2      ucChk     reserved; the link cipher's integrity slot
-//! offset 3..5   usCmd     little-endian u16 opcode
+//! offset 3..5   usCmd     little-endian u16 opcode; bit 15 is the LZF flag
 //! offset 5..    payload
 //! ```
+//!
+//! Bit 15 of `usCmd` is the LZF compression flag, not part of the opcode — see
+//! [`Frame::cmd`]. A `VecDeque` has no ring, so there is no per-link capacity
+//! limit either; see the capacity note on [`FrameParser`].
 //!
 //! The size field is **raw memory, not network order** — the legacy never applies
 //! `htons` to packet data, only to socket addresses (blueprint 01 Part A §1.6), so
@@ -54,6 +58,12 @@ pub const PACKET_MAX_SIZE: usize = 65000;
 /// Largest frame the receive path accepts: `PACKET_MAX_SIZE - 8`, the literal
 /// arithmetic at `ITZRecvBuffer.cpp:172`.
 pub const MAX_FRAME_SIZE: usize = PACKET_MAX_SIZE - 8;
+
+/// Bit 15 of `usCmd`: the LZF compression flag.
+///
+/// Set by the legacy producer on a compressed frame; cleared by the consumer
+/// *after* decompressing (`GameProtocol.cpp:141`). See [`Frame::compressed`].
+pub const COMPRESSION_FLAG: u16 = 0x8000;
 
 /// Why a frame could not be accepted.
 ///
@@ -211,12 +221,48 @@ impl Frame {
 
     /// The little-endian `usCmd` opcode.
     ///
-    /// **Only meaningful on an unencrypted link.** On the game client link the
+    /// **Bit 15 (`0x8000`) is the LZF compression flag, not part of the opcode.**
+    /// The legacy tests it before decompressing (`GameProtocol.cpp:109`,
+    /// `Client-Winsock.cpp:896`) and clears it *afterwards* with
+    /// `usCmd -= 0x8000` (`GameProtocol.cpp:141`). Every real opcode is below
+    /// `0x8000`, which `gz-proto` asserts for all three tables.
+    ///
+    /// So the flag is the **decompressing consumer's** to clear, not the framing
+    /// layer's: masking it here would silently mislabel a compressed frame. Use
+    /// [`Frame::compressed`] to branch, and [`Frame::cmd_id`] to get the opcode
+    /// once the payload has been decompressed.
+    ///
+    /// Passing this straight to `gz_proto::*::from_id` returns `None` for every
+    /// compressed packet — that is the trap this doc exists to prevent.
+    ///
+    /// **Also only meaningful on an unencrypted link.** On the game client link the
     /// cipher enciphers everything from offset 3 onwards, so this reads ciphertext
     /// unless the frame has already been through `gz_cipher::Cipher::decode`.
     #[must_use]
     pub fn cmd(&self) -> u16 {
         u16::from_le_bytes([self.bytes[3], self.bytes[4]])
+    }
+
+    /// Bit 15 of [`Frame::cmd`]: the legacy's LZF compression flag.
+    ///
+    /// Only answerable on a decrypted link. When this is set, the payload is
+    /// LZF-compressed and the opcode is still `cmd() & !0x8000`.
+    #[must_use]
+    pub fn compressed(&self) -> bool {
+        self.cmd() & COMPRESSION_FLAG != 0
+    }
+
+    /// The opcode with the compression flag cleared, i.e. what
+    /// `gz_proto::*::from_id` expects.
+    ///
+    /// **Only correct once the payload has been decompressed.** The legacy clears
+    /// the flag at the same point it replaces the payload
+    /// (`GameProtocol.cpp:140-141`), so calling this on a still-compressed frame
+    /// hands back an opcode that does not describe the bytes you hold. On an
+    /// *uncompressed* frame it is exactly [`Frame::cmd`].
+    #[must_use]
+    pub fn cmd_id(&self) -> u16 {
+        self.cmd() & !COMPRESSION_FLAG
     }
 
     /// Bytes after the header.
@@ -307,8 +353,26 @@ impl SessionState {
 /// [`FrameParser::next_frame`]. A frame split across any number of chunks and
 /// several frames sharing one chunk are both handled — the legacy has the same
 /// property, it just does it with a ring buffer and a `PACKET_MAX_SIZE`-byte
-/// slack zone (`ITZRecvBuffer::CreateRecvBuffer`, `itzbase.cpp:56-58`) instead of
-/// a deque.
+/// slack zone (`ITZRecvBuffer::CreateRecvBuffer`, `ITZRecvBuffer.cpp:56-58`)
+/// instead of a deque.
+///
+/// # Capacity: no ring means no second ceiling
+///
+/// The legacy's per-link receive ring is a *second* limit that its size guard
+/// never sees. `GetRecvParam` wraps `m_pLastPtr` to `m_pBasePtr` whenever the
+/// ring is full and nothing has been consumed (`ITZRecvBuffer.cpp:78-89`), which
+/// overwrites a half-received frame — so the game client link, whose recv buffer
+/// is only 30000/50000 bytes (`GameProtocol.cpp:25,27`), corrupts any frame
+/// larger than its ring even though 64992 is inside the size guard. Recorded as
+/// BUG-014.
+///
+/// Two consequences for callers:
+/// - **Size each link's buffer from [`MAX_FRAME_SIZE`]**, not from the legacy's
+///   per-link numbers, or we inherit the corruption.
+/// - [`FrameParser::feed`] does **not** cap how much it will buffer. Buffering is
+///   bounded by [`MAX_FRAME_SIZE`] *provided the caller drains frames*; a caller
+///   that only ever calls `feed` grows without limit, where the legacy refuses
+///   once its ring fills.
 ///
 /// # Rejection is sticky
 ///
@@ -722,6 +786,26 @@ mod tests {
         assert!(SessionState::Established.is_active());
         assert!(!SessionState::Disconnected.is_active());
         assert_eq!(SessionState::default(), SessionState::None);
+    }
+
+    #[test]
+    fn the_compression_flag_is_readable_and_strippable() {
+        // GameProtocol.cpp:109 tests bit 15, :141 clears it with `usCmd -= 0x8000`.
+        let wire = Frame::new(117, b"hello").unwrap().into_bytes();
+        let plain = Frame {
+            bytes: wire.clone(),
+        };
+        assert!(!plain.compressed());
+        assert_eq!(plain.cmd(), 117);
+        assert_eq!(plain.cmd_id(), 117);
+
+        // usCmd is little-endian at offsets 3..5, so bit 15 is the high byte's top bit.
+        let mut flagged = wire;
+        flagged[4] |= 0x80;
+        let frame = Frame { bytes: flagged };
+        assert!(frame.compressed());
+        assert_eq!(frame.cmd(), 117 | COMPRESSION_FLAG);
+        assert_eq!(frame.cmd_id(), 117);
     }
 
     #[test]

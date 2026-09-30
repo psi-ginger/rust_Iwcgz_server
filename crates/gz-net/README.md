@@ -25,16 +25,21 @@ The 5-byte `sPacketHeader` (`itzbase.h:63-68`, `#pragma pack(1)`), then a payloa
 | Offset | Field | Bytes | Meaning |
 |---|---|---|---|
 | 0..2 | `usSize` | 2 | **Total** frame length, header included. Little-endian. |
-| 2 | `ucChk` | 1 | Reserved — see below. |
-| 3..5 | `usCmd` | 2 | Opcode, little-endian. |
-| 5.. | payload | | |
+| 2 | `ucChk` | 1 | Reserved?" see below. |
+| 3..5 | `usCmd` | 2 | Opcode, little-endian. **Bit 15 is the LZF flag** — see below. |
+| 5.. | payload | | | |
 
 `usSize` is **raw memory, not network order**: the legacy never applies `htons`
-to packet data, only to socket addresses (blueprint 01 Part A §1.6), so
+to packet data, only to socket addresses (blueprint 01 Part A A1.6), so
 little-endian is what an x86 peer puts on the wire.
 
 Limits: smallest frame 5 bytes, largest **64992** (`PACKET_MAX_SIZE - 8`,
 `itzbase.h:45` and the arithmetic at `ITZRecvBuffer.cpp:172`).
+
+**These are frame-size limits, not a promise about capacity.** The legacy backs
+each link with a ring whose size is chosen per link, and the largest frame the
+size guard accepts can exceed the smallest such ring — see *Ring capacity* in
+Deliberate divergences below.
 
 ## `ucChk` is reserved, not a checksum
 
@@ -50,6 +55,28 @@ Limits: smallest frame 5 bytes, largest **64992** (`PACKET_MAX_SIZE - 8`,
 `Frame::new` writes zero. Do not build integrity on it; if real integrity is
 wanted, that is its own decision (see SEC-014, which also says the link cipher
 is obfuscation and not a security boundary).
+
+## Bit 15 of `usCmd` is the LZF flag, not part of the opcode
+
+`usCmd` is a `USHORT`, so the legacy spent its top bit as a side channel:
+`GameProtocol.cpp:109` tests `usCmd & 0x8000` and, when set, runs the payload
+through LZF before dispatch. It only clears the bit afterwards, at `:141`
+(`usCmd -= 0x8000`), in the same block that installs the decompressed payload.
+The opcode id itself is always below 32768, so the bit is otherwise free.
+
+Framing does not touch it, but three accessors make the trap explicit:
+
+| Call | Returns |
+|---|---|
+| `frame.cmd()` | the raw `usCmd`, flag and all |
+| `frame.compressed()` | whether bit 15 is set |
+| `frame.cmd_id()` | `cmd()` with bit 15 cleared |
+
+`cmd_id()` is what `gz_proto::*::from_id` expects, and it is **only correct once
+the payload has been decompressed** — on a still-compressed frame it reports an
+opcode that does not describe the bytes you are holding. On an uncompressed frame
+it is exactly `cmd()`. Until `gz-lzf` exists (T-005) nothing in this workspace can
+produce a flagged frame, which is exactly why the flag was easy to overlook.
 
 ## What `cmd` and `payload` are worth on each link
 
@@ -101,7 +128,7 @@ legacy doing the same thing.
 
 ## Deliberate divergences from the legacy
 
-All four are intentional and none changes a byte on the wire for a valid frame.
+All five are intentional and none changes a byte on the wire for a valid frame.
 
 1. **Frames below 5 bytes are refused** (above). Measured against the legacy in
    `tests/legacy_vectors.rs`, not assumed.
@@ -117,6 +144,22 @@ All four are intentional and none changes a byte on the wire for a valid frame.
    `PACKET_MAX_SIZE`-byte slack zone before `m_pBasePtr` to linearise frames that
    straddle the ring end (`:250-257`); a deque has no wrap, so there is nothing
    to linearise. `clear()` covers `ClearBuffer`.
+5. **Ring capacity cannot corrupt a frame.** This one is a legacy bug (BUG-014)
+   that is measured, not assumed. The ring's size is chosen per link:
+   `CreateFactory` is called with 30000/50000 for the game client's link
+   (`GameProtocol.cpp:25,27`), while the size guard accepts frames up to 64992.
+   `GetRecvParam` then wraps `m_pLastPtr` to `m_pBasePtr` once the ring is full
+   and nothing has been consumed (`ITZRecvBuffer.cpp:78-89`), overwriting the
+   front of a half-received frame, so the *next* size it reads comes from later
+   bytes. The `ring_smaller_than_frame` fixture case pins it exactly: a 40-byte
+   frame into a 32-byte ring arrives as a bogus 5-byte frame built out of the
+   second read.
+
+   `gz-net` has no ring, so the caller now owns that bound: **a link must be able
+   to hold one maximum-size frame (64992 bytes) before it is drained.** `feed`
+   copies every byte it is handed and never evicts, so draining after each
+   `feed` makes the requirement vanish; a caller that buffers more than that
+   before draining is its own ring, and needs to be at least that big.
 
 `headerType == 1` (byte-swapped size, `+8`) is **not** implemented: no call site
 anywhere in the tree passes it, and the only non-default arguments to
@@ -153,17 +196,19 @@ to miss and are not visible in `ITZRecvBuffer`:
 Three independent layers, because any one alone is weak:
 
 - `src/lib.rs` unit tests pin the guard table (every boundary value 0, 1, 2, 3, 4,
-  5, 64992, 64993, 65535), the `Frame` accessors, sticky rejection, and the
-  `SessionState` mapping to the `#define`s.
+  5, 64992, 64993, 65535), the `Frame` accessors including the compression-flag
+  split, sticky rejection, and the `SessionState` mapping to the `#define`s.
 - `tests/framing.rs` pins the stream properties: byte-exact round trip at **every**
   split point of a frame, one byte at a time, 200 frames across eight chunk sizes,
   a frame at the receive limit, interleaved split/merge ordering, and that a
   truncated final frame is held rather than emitted.
-- `tests/legacy_vectors.rs` replays **20 recorded cases from the legacy
+- `tests/legacy_vectors.rs` replays **21 recorded cases from the legacy
   `ITZRecvBuffer`** and requires agreement on both the refusal decision and the
-  exact frame bytes — except the three sub-header sizes, which are asserted to
-  differ in the direction we want. See `reference/README.md` for how to
-  regenerate.
+  exact frame bytes — except the three sub-header sizes (which are asserted to
+  differ in the direction we want) and the over-ring frame (where it asserts this
+  port delivers what the peer actually sent). Every divergent case is pinned by
+  name and reason, so widening the allowlist fails the build. See
+  `reference/README.md` for how to regenerate.
 
 ## Not in this crate
 

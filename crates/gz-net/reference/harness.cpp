@@ -97,6 +97,20 @@ static Case named(const std::string &name) {
 	return c;
 }
 
+/// A case whose receive ring is deliberately smaller than the frames it carries.
+///
+/// This is not a hypothetical geometry: `CreateFactory` passes per-link sizes,
+/// and the game client link gets 30000/50000 (`GameProtocol.cpp:25,27`) while the
+/// size guard allows 64992. `GetRecvParam` wraps `m_pLastPtr` to `m_pBasePtr`
+/// once the ring is full and nothing has been consumed
+/// (`ITZRecvBuffer.cpp:78-89`), which overwrites a half-received frame. BUG-014.
+static Case named_with_ring(const std::string &name, SI32 ring) {
+	Case c;
+	c.name = name;
+	c.ring_size = ring;
+	return c;
+}
+
 static Case one(const std::string &name, const std::string &hex) {
 	Case c = named(name);
 	Step s;
@@ -196,6 +210,30 @@ static std::vector<Case> build_cases() {
 	// A legal frame followed by an over-limit header: the good frame must not be
 	// reachable, because a refusal is a disconnect and not a skip.
 	cases.push_back(one("good_then_over_limit", good_frame_hex(1, 6) + frame_hex(64993, 40)));
+
+	// --- BUG-014: a frame larger than the link's receive ring ---
+	//
+	// Ring 32, frame declares 40. Read 1 fills the ring: the size is legal and the
+	// body is late, so the frame is held. Read 2 wraps `m_pLastPtr` back to
+	// `m_pBasePtr` and overwrites the first 8 bytes of the partial frame, so the
+	// legacy re-reads a size out of the *second* read's bytes. Those bytes are
+	// chosen so the corruption is deterministic and visible: `05 00` becomes a
+	// bogus 5-byte "frame", and the next header it finds there (`04 00`) runs past
+	// the end of what was received, so the loop stops.
+	//
+	// gz-net has no ring, so it reassembles the correct 40-byte frame. That is the
+	// divergence this case exists to pin, so it must NOT be copied into a shape
+	// where both sides are expected to agree.
+	{
+		Case c = named_with_ring("ring_smaller_than_frame", 32);
+		Step a;
+		a.chunk = from_hex(frame_hex(40, 40).substr(0, 64));   // first 32 bytes
+		Step b;
+		b.chunk = from_hex("0500aabbcc040000");                // 8 bytes, wraps
+		c.steps.push_back(a);
+		c.steps.push_back(b);
+		cases.push_back(c);
+	}
 
 	return cases;
 }

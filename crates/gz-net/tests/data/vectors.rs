@@ -24,332 +24,179 @@ pub struct Case {
 pub static CASES: &[Case] = &[
     Case {
         name: "single_frame",
-        steps: &[Step {
-            chunk: "0d0000020101060b10151a1f24",
-            completed: true,
-            packets: &["0d0000020101060b10151a1f24"],
-        }],
+        steps: &[
+            Step { chunk: "0d0000020101060b10151a1f24", completed: true, packets: &["0d0000020101060b10151a1f24"] },
+        ],
     },
     Case {
         name: "two_frames_one_chunk",
-        steps: &[Step {
-            chunk: "05000001002d0000020001060b10151a1f24292e33383d42474c51565b60656a6f74797e83888d92979ca1a6abb0b5babfc4",
-            completed: true,
-            packets: &[
-                "0500000100",
-                "2d0000020001060b10151a1f24292e33383d42474c51565b60656a6f74797e83888d92979ca1a6abb0b5babfc4",
-            ],
-        }],
+        steps: &[
+            Step { chunk: "05000001002d0000020001060b10151a1f24292e33383d42474c51565b60656a6f74797e83888d92979ca1a6abb0b5babfc4", completed: true, packets: &["0500000100", "2d0000020001060b10151a1f24292e33383d42474c51565b60656a6f74797e83888d92979ca1a6abb0b5babfc4"] },
+        ],
     },
     Case {
         name: "split_across_three_chunks",
         steps: &[
-            Step {
-                chunk: "23000004030106",
-                completed: true,
-                packets: &[],
-            },
-            Step {
-                chunk: "0b10151a1f24292e33383d42",
-                completed: true,
-                packets: &[],
-            },
-            Step {
-                chunk: "474c51565b60656a6f74797e83888d92",
-                completed: true,
-                packets: &[
-                    "230000040301060b10151a1f24292e33383d42474c51565b60656a6f74797e83888d92",
-                ],
-            },
+            Step { chunk: "23000004030106", completed: true, packets: &[] },
+            Step { chunk: "0b10151a1f24292e33383d42", completed: true, packets: &[] },
+            Step { chunk: "474c51565b60656a6f74797e83888d92", completed: true, packets: &["230000040301060b10151a1f24292e33383d42474c51565b60656a6f74797e83888d92"] },
         ],
     },
     Case {
         name: "byte_at_a_time",
         steps: &[
-            Step {
-                chunk: "19",
-                completed: true,
-                packets: &[],
-            },
-            Step {
-                chunk: "00",
-                completed: true,
-                packets: &[],
-            },
-            Step {
-                chunk: "00",
-                completed: true,
-                packets: &[],
-            },
-            Step {
-                chunk: "06",
-                completed: true,
-                packets: &[],
-            },
-            Step {
-                chunk: "05",
-                completed: true,
-                packets: &[],
-            },
-            Step {
-                chunk: "01",
-                completed: true,
-                packets: &[],
-            },
-            Step {
-                chunk: "06",
-                completed: true,
-                packets: &[],
-            },
-            Step {
-                chunk: "0b",
-                completed: true,
-                packets: &[],
-            },
-            Step {
-                chunk: "10",
-                completed: true,
-                packets: &[],
-            },
-            Step {
-                chunk: "15",
-                completed: true,
-                packets: &[],
-            },
-            Step {
-                chunk: "1a",
-                completed: true,
-                packets: &[],
-            },
-            Step {
-                chunk: "1f",
-                completed: true,
-                packets: &[],
-            },
-            Step {
-                chunk: "24",
-                completed: true,
-                packets: &[],
-            },
-            Step {
-                chunk: "29",
-                completed: true,
-                packets: &[],
-            },
-            Step {
-                chunk: "2e",
-                completed: true,
-                packets: &[],
-            },
-            Step {
-                chunk: "33",
-                completed: true,
-                packets: &[],
-            },
-            Step {
-                chunk: "38",
-                completed: true,
-                packets: &[],
-            },
-            Step {
-                chunk: "3d",
-                completed: true,
-                packets: &[],
-            },
-            Step {
-                chunk: "42",
-                completed: true,
-                packets: &[],
-            },
-            Step {
-                chunk: "47",
-                completed: true,
-                packets: &[],
-            },
-            Step {
-                chunk: "4c",
-                completed: true,
-                packets: &[],
-            },
-            Step {
-                chunk: "51",
-                completed: true,
-                packets: &[],
-            },
-            Step {
-                chunk: "56",
-                completed: true,
-                packets: &[],
-            },
-            Step {
-                chunk: "5b",
-                completed: true,
-                packets: &[],
-            },
-            Step {
-                chunk: "60",
-                completed: true,
-                packets: &["190000060501060b10151a1f24292e33383d42474c51565b60"],
-            },
+            Step { chunk: "19", completed: true, packets: &[] },
+            Step { chunk: "00", completed: true, packets: &[] },
+            Step { chunk: "00", completed: true, packets: &[] },
+            Step { chunk: "06", completed: true, packets: &[] },
+            Step { chunk: "05", completed: true, packets: &[] },
+            Step { chunk: "01", completed: true, packets: &[] },
+            Step { chunk: "06", completed: true, packets: &[] },
+            Step { chunk: "0b", completed: true, packets: &[] },
+            Step { chunk: "10", completed: true, packets: &[] },
+            Step { chunk: "15", completed: true, packets: &[] },
+            Step { chunk: "1a", completed: true, packets: &[] },
+            Step { chunk: "1f", completed: true, packets: &[] },
+            Step { chunk: "24", completed: true, packets: &[] },
+            Step { chunk: "29", completed: true, packets: &[] },
+            Step { chunk: "2e", completed: true, packets: &[] },
+            Step { chunk: "33", completed: true, packets: &[] },
+            Step { chunk: "38", completed: true, packets: &[] },
+            Step { chunk: "3d", completed: true, packets: &[] },
+            Step { chunk: "42", completed: true, packets: &[] },
+            Step { chunk: "47", completed: true, packets: &[] },
+            Step { chunk: "4c", completed: true, packets: &[] },
+            Step { chunk: "51", completed: true, packets: &[] },
+            Step { chunk: "56", completed: true, packets: &[] },
+            Step { chunk: "5b", completed: true, packets: &[] },
+            Step { chunk: "60", completed: true, packets: &["190000060501060b10151a1f24292e33383d42474c51565b60"] },
         ],
     },
     Case {
         name: "header_split_from_body",
         steps: &[
-            Step {
-                chunk: "1d",
-                completed: true,
-                packets: &[],
-            },
-            Step {
-                chunk: "000007",
-                completed: true,
-                packets: &[],
-            },
-            Step {
-                chunk: "0601060b10151a1f24292e33383d42474c51565b60656a6f74",
-                completed: true,
-                packets: &["1d0000070601060b10151a1f24292e33383d42474c51565b60656a6f74"],
-            },
+            Step { chunk: "1d", completed: true, packets: &[] },
+            Step { chunk: "000007", completed: true, packets: &[] },
+            Step { chunk: "0601060b10151a1f24292e33383d42474c51565b60656a6f74", completed: true, packets: &["1d0000070601060b10151a1f24292e33383d42474c51565b60656a6f74"] },
         ],
     },
     Case {
         name: "empty_chunk_then_frame",
         steps: &[
-            Step {
-                chunk: "",
-                completed: true,
-                packets: &[],
-            },
-            Step {
-                chunk: "090000080701060b10",
-                completed: true,
-                packets: &["090000080701060b10"],
-            },
+            Step { chunk: "", completed: true, packets: &[] },
+            Step { chunk: "090000080701060b10", completed: true, packets: &["090000080701060b10"] },
         ],
     },
     Case {
         name: "frame_then_empty_chunk",
         steps: &[
-            Step {
-                chunk: "110000090001060b10151a1f24292e3338",
-                completed: true,
-                packets: &["110000090001060b10151a1f24292e3338"],
-            },
-            Step {
-                chunk: "",
-                completed: true,
-                packets: &[],
-            },
+            Step { chunk: "110000090001060b10151a1f24292e3338", completed: true, packets: &["110000090001060b10151a1f24292e3338"] },
+            Step { chunk: "", completed: true, packets: &[] },
         ],
     },
     Case {
         name: "frame_then_partial",
-        steps: &[Step {
-            chunk: "0f0000010001060b10151a1f24292e370000020001060b10151a1f24292e33383d42474c51565b",
-            completed: true,
-            packets: &["0f0000010001060b10151a1f24292e"],
-        }],
+        steps: &[
+            Step { chunk: "0f0000010001060b10151a1f24292e370000020001060b10151a1f24292e33383d42474c51565b", completed: true, packets: &["0f0000010001060b10151a1f24292e"] },
+        ],
     },
     Case {
         name: "declared_5_header_only",
-        steps: &[Step {
-            chunk: "050011181f",
-            completed: true,
-            packets: &["050011181f"],
-        }],
+        steps: &[
+            Step { chunk: "050011181f", completed: true, packets: &["050011181f"] },
+        ],
     },
     Case {
         name: "declared_64992_short_body",
-        steps: &[Step {
-            chunk: "e0fd11181f262d343b424950575e656c737a81888f969da4abb2b9c0c7ced5dce3eaf1f8ff060d14",
-            completed: true,
-            packets: &[],
-        }],
+        steps: &[
+            Step { chunk: "e0fd11181f262d343b424950575e656c737a81888f969da4abb2b9c0c7ced5dce3eaf1f8ff060d14", completed: true, packets: &[] },
+        ],
     },
     Case {
         name: "declared_300_short_body",
-        steps: &[Step {
-            chunk: "2c0111181f262d343b424950575e656c737a81888f969da4abb2b9c0c7ced5dce3eaf1f8ff060d14",
-            completed: true,
-            packets: &[],
-        }],
+        steps: &[
+            Step { chunk: "2c0111181f262d343b424950575e656c737a81888f969da4abb2b9c0c7ced5dce3eaf1f8ff060d14", completed: true, packets: &[] },
+        ],
     },
     Case {
         name: "declared_0",
-        steps: &[Step {
-            chunk: "000011181f262d34",
-            completed: false,
-            packets: &[],
-        }],
+        steps: &[
+            Step { chunk: "000011181f262d34", completed: false, packets: &[] },
+        ],
     },
     Case {
         name: "declared_1",
-        steps: &[Step {
-            chunk: "010011181f262d34",
-            completed: false,
-            packets: &[],
-        }],
+        steps: &[
+            Step { chunk: "010011181f262d34", completed: false, packets: &[] },
+        ],
     },
     Case {
         name: "declared_2",
-        steps: &[Step {
-            chunk: "020011181f262d34",
-            completed: true,
-            packets: &["0200"],
-        }],
+        steps: &[
+            Step { chunk: "020011181f262d34", completed: true, packets: &["0200"] },
+        ],
     },
     Case {
         name: "declared_3",
-        steps: &[Step {
-            chunk: "030011181f262d34",
-            completed: true,
-            packets: &["030011"],
-        }],
+        steps: &[
+            Step { chunk: "030011181f262d34", completed: true, packets: &["030011"] },
+        ],
     },
     Case {
         name: "declared_4",
-        steps: &[Step {
-            chunk: "040011181f262d34",
-            completed: true,
-            packets: &["04001118"],
-        }],
+        steps: &[
+            Step { chunk: "040011181f262d34", completed: true, packets: &["04001118"] },
+        ],
     },
     Case {
         name: "declared_5",
-        steps: &[Step {
-            chunk: "050011181f262d34",
-            completed: true,
-            packets: &["050011181f"],
-        }],
+        steps: &[
+            Step { chunk: "050011181f262d34", completed: true, packets: &["050011181f"] },
+        ],
     },
     Case {
         name: "declared_64993_over_limit",
-        steps: &[Step {
-            chunk: "e1fd11181f262d343b424950575e656c737a81888f969da4abb2b9c0c7ced5dce3eaf1f8ff060d14",
-            completed: false,
-            packets: &[],
-        }],
+        steps: &[
+            Step { chunk: "e1fd11181f262d343b424950575e656c737a81888f969da4abb2b9c0c7ced5dce3eaf1f8ff060d14", completed: false, packets: &[] },
+        ],
     },
     Case {
         name: "declared_65535",
-        steps: &[Step {
-            chunk: "ffff11181f262d343b424950575e656c737a81888f969da4abb2b9c0c7ced5dce3eaf1f8ff060d14",
-            completed: false,
-            packets: &[],
-        }],
+        steps: &[
+            Step { chunk: "ffff11181f262d343b424950575e656c737a81888f969da4abb2b9c0c7ced5dce3eaf1f8ff060d14", completed: false, packets: &[] },
+        ],
     },
     Case {
         name: "good_then_over_limit",
-        steps: &[Step {
-            chunk: "0b0000010001060b10151ae1fd11181f262d343b424950575e656c737a81888f969da4abb2b9c0c7ced5dce3eaf1f8ff060d14",
-            completed: false,
-            packets: &[],
-        }],
+        steps: &[
+            Step { chunk: "0b0000010001060b10151ae1fd11181f262d343b424950575e656c737a81888f969da4abb2b9c0c7ced5dce3eaf1f8ff060d14", completed: false, packets: &[] },
+        ],
+    },
+    Case {
+        name: "ring_smaller_than_frame",
+        steps: &[
+            Step { chunk: "280011181f262d343b424950575e656c737a81888f969da4abb2b9c0c7ced5dc", completed: true, packets: &[] },
+            Step { chunk: "0500aabbcc040000", completed: true, packets: &["0500aabbcc"] },
+        ],
     },
 ];
 
-/// Cases this port deliberately answers differently from the legacy: the
-/// legacy accepts a declared size of 2..=4, which cannot hold the 5-byte
-/// header. BUG-013.
-pub static DIVERGENT: &[&str] = &["declared_2", "declared_3", "declared_4"];
+/// Cases this port deliberately answers differently from the legacy, and why.
+///
+/// `SubHeader` - the legacy accepts a declared size of 2..=4, which cannot
+/// hold the 5-byte header (BUG-013); this port refuses. `RingCapacity` - a
+/// frame larger than the link's receive ring, which the legacy overwrites
+/// mid-frame (BUG-014); this port, having no ring, delivers what was sent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Divergence {
+    SubHeader,
+    RingCapacity,
+}
+
+/// Every deliberately divergent case, with the reason it diverges.
+pub static DIVERGENT: &[(&str, Divergence)] = &[
+    ("declared_2", Divergence::SubHeader),
+    ("declared_3", Divergence::SubHeader),
+    ("declared_4", Divergence::SubHeader),
+    ("ring_smaller_than_frame", Divergence::RingCapacity),
+];
