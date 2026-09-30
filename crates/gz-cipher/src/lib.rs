@@ -97,6 +97,12 @@ impl Cipher {
     /// already in the freshly allocated memory; zero is this port's defined
     /// choice. The two configured instances are [`Cipher::session_cipher`] and
     /// [`Cipher::link_cipher`] — always prefer those.
+    ///
+    /// This is not just tidiness. The legacy only ever keys its link cipher from
+    /// `ITZSession::Init`, reached by virtual dispatch through `ITZList::batch`,
+    /// so correctness there depends on a session being promoted into the master
+    /// list before anything decodes on it. (Tracked as BUG-011 in
+    /// `known_legacy_bugs.md`.) Here, a `Cipher` is usable the moment it exists.
     #[must_use]
     pub const fn new() -> Self {
         Self { key1: 0, key2: 0 }
@@ -198,10 +204,17 @@ impl Cipher {
     /// rejected.
     ///
     /// `dest` must be at least `size` bytes. **`dest[2]` is left untouched**,
-    /// because the legacy loop writes its first byte at `dest[3]`. A legacy
-    /// caller passes a reused scratch buffer, so the decoded `ucChk` it goes on to
-    /// read is stale data from the previous packet; this port reproduces that
-    /// rather than hiding it, and callers that care should zero the field.
+    /// because the legacy loop writes its first byte at `dest[3]`. The legacy
+    /// call sites all pass a long-lived member array that is never cleared, so
+    /// that byte is left over from the previous packet — and on the first
+    /// packet, uninitialised memory. (Tracked as BUG-012 in
+    /// `known_legacy_bugs.md`.)
+    ///
+    /// It is currently harmless: nothing in the legacy tree ever reads `ucChk`
+    /// out of a decoded buffer, because the two places that read it read the raw
+    /// *source* instead. Do not assume the byte you find there is a decoded
+    /// `ucChk`, and do not let a reused buffer plus an unwritten field reach a
+    /// struct that message code goes on to read.
     ///
     /// # Errors
     ///

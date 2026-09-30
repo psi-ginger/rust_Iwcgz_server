@@ -60,10 +60,18 @@ transmitted as written.
 
 **`decode` never writes output offset 2.** The legacy loop's first write is
 `dest[3]`, so the decoded `ucChk` is whatever the caller's destination buffer
-already held. Legacy callers pass a reused scratch buffer, meaning the `ucChk`
-they go on to read is *stale data from the previous packet*. This port
-reproduces that rather than hiding it; a caller that cares should zero the field
-after decoding.
+already held. Reproduced here for byte-compatibility, but it is worth knowing
+what that actually costs: all three legacy call sites pass a long-lived member
+array that is never cleared (`m_encRecvBuf`, `m_encrBuf`), so the byte at offset
+2 is left over from the *previous* packet — and on the first packet, whatever
+was in that memory beforehand. Filed as BUG-012 in `known_legacy_bugs.md`.
+
+It is currently harmless. A tree-wide search for `ucChk` finds only two reads
+(`GameProtocol.cpp:82,124`), and both read the **raw source** buffer rather than
+the decoded one; every consumer of a decoded buffer touches offsets 0-1, 3-4 and
+5+ only. So the stale byte is never actually observed. Do not build on the
+assumption that it is a decoded `ucChk`, and do not let buffer-reuse plus
+never-written reach a struct that message code goes on to read.
 
 **Bytes past `usSize` are ignored.** A buffer may hold more than it declares.
 
@@ -82,7 +90,7 @@ blueprint 01 Part A §2.2-§2.3.
 | | `GetEncrypt()` | `GetEncrypt2()` |
 |---|---|---|
 | Key | negotiated from the server | fixed `0x12, 0x34` |
-| Keyed by | client on `FRONTMSG_RESPONSE_SECRETKEY` (`Client-Winsock.cpp:228`), server at `char.cpp:5201` | `ITZSession::Init` (`ITZSession.cpp:56`) |
+| Keyed by | client on `FRONTMSG_RESPONSE_SECRETKEY` (`Client-Winsock.cpp:228`), server at `char.cpp:5201` | `ITZSession::Init` (`ITZSession.cpp:56`) — see the caveat under Unknowns |
 | Applied by | client `Encode` (`Client-Winsock.cpp:146,195,200,242`) | server `Encode` in `ITZSendBuffer::Write` (`ITZSendBuffer.cpp:124`) |
 | Removed by | server `Decode` (`GameProtocol.cpp:76`, `FrontClientProtocol.cpp:85`) | client `Decode` (`Client-Winsock.cpp:872`) |
 | Direction | client → server | server → client |
@@ -101,11 +109,18 @@ Sending is gated on the key having arrived: `SendFrontServerMsg` and
 
 ### Unknowns
 
-- **No caller for `ITZSession::Init` was found in the tree.** That function is
-  what installs `0x12,0x34` on the second instance, and the `ITZEncrypt`
-  constructor is empty, so if `Init` is skipped the legacy link cipher runs on
-  uninitialised memory. Confirm the rewrite's session setup always constructs the
-  link cipher explicitly rather than relying on an init call.
+- **The link cipher is keyed by an implicit path, not an obvious one.**
+  `ITZSession::Init()` is the only place `0x12,0x34` is ever set, and it is
+  reached solely through virtual dispatch: `ITZSessionManager::Update()` →
+  `ITZList::batch()` → `pElem->Init()` on an `ITZObject*` (`ITZList.h:178`),
+  which resolves to `ITZSession::Init()` only because the list is
+  `ITZList< ITZSession >` (`ITZSessionFactory.h:23`). The `ITZEncrypt`
+  constructor is empty, so between pool creation and that `batch()` call the
+  keys are genuinely indeterminate; what keeps it safe is that the session is not
+  yet in `m_masterList` and therefore cannot be reached by the decode path.
+  Filing this as BUG-011. **Consequence for T-006: never depend on an
+  "initialise me first" convention** — construct the cipher with a real key and
+  make the uninitialised state unrepresentable.
 - **`headerType == 1` framing is never combined with encryption.** That mode
   byte-swaps the length (`ntohs(...) + 8` in `ITZSendBuffer::Write`), while the
   cipher always reads and writes little-endian. The only encrypted sessions use
