@@ -2,3 +2,11 @@
 *.rs.bk
 node_modules/
 dist/
+
+# T-006 reference harness: the legacy copies are staged out of the read-only tree
+# at regeneration time (see crates/gz-net/reference/README.md), and the exe is a
+# build artifact. Neither belongs in the repo.
+crates/gz-net/reference/ITZRecvBuffer.cpp
+crates/gz-net/reference/ITZRecvBuffer.h
+crates/gz-net/reference/harness.exe
+crates/gz-net/reference/ground_truth.json
