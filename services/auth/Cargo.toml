@@ -5,3 +5,5 @@ edition.workspace = true
 publish = false
 
 [dependencies]
+gz-db = { path = "../../crates/gz-db" }
+tokio = { version = "1", features = ["full"] }

@@ -1,1 +1,9 @@
-//! SQL Server repositories - plain SQL, no stored procedures (blueprint 03).
+//! SQL repositories — plain SQL, no stored procedures (blueprint 03).
+//!
+//! The storage engine is behind a trait ([`repository::AccountRepository`])
+//! so it can be swapped later (PostgreSQL → MySQL → SQLite) without
+//! touching callers. M1 scope: accounts only.
+
+pub mod repository;
+
+pub use repository::{Account, AccountRepository, PgAccountRepository, RepositoryError};
