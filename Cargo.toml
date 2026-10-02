@@ -19,6 +19,9 @@ members = [
     "tools/codegen",
     "tools/capture",
 ]
+# The fuzz crate is built by `cargo fuzz` against nightly (it needs libFuzzer
+# coverage instrumentation), so it must stay out of the stable workspace build.
+exclude = ["fuzz"]
 
 [workspace.package]
 version = "0.0.1"

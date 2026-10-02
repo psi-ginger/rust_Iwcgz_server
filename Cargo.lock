@@ -393,6 +393,10 @@ version = "0.0.1"
 [[package]]
 name = "gz-net"
 version = "0.0.1"
+dependencies = [
+ "gz-cipher",
+ "gz-lzf",
+]
 
 [[package]]
 name = "gz-ops"

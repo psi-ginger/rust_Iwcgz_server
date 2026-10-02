@@ -1,0 +1,70 @@
+# cargo-fuzz targets - M0 T-009
+#
+# Built with `cargo fuzz`, which requires the nightly toolchain (libFuzzer
+# coverage instrumentation). This crate is `exclude`d from the workspace
+# (see ../../Cargo.toml) so `cargo build`/`cargo test` on stable never touches it.
+#
+#   cargo +nightly fuzz run frame_parser          # indefinite
+#   cargo +nightly fuzz run frame_parser - -runs=0  # build only
+#   cargo +nightly fuzz run frame_parser - -max_total_time=30
+#
+# Corruptions live in ../corpus/<target>/ and are committed.
+
+[package]
+name = "goonzu-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+# ASan is ON (cargo-fuzz's default). This needs LLVM's x64 clang_rt runtime
+# libs on the link path, which the stock MSVC install does NOT ship -- it has
+# them for x86 only, so the target fails with LNK1104 out of the box.
+#
+# LLVM 23.1.2 is installed at C:\Program Files\LLVM. `scripts/check.ps1` and
+# fuzz/README.md put its lib\clang\*\lib\windows directory on LIBPATH before
+# building. On Linux this is a non-issue: rustup's bundled LLVM ships the
+# asan runtime, which is the deployment target for this project anyway.
+#
+# If you ever need to build without ASan, set `sanitizer = false` here -- but
+# note that libFuzzer then has no entry point on MSVC and the link fails with
+# LNK1561, so it is not a supported configuration on this platform.
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.gz-net]
+path = "../crates/gz-net"
+
+[dependencies.gz-cipher]
+path = "../crates/gz-cipher"
+
+[dependencies.gz-lzf]
+path = "../crates/gz-lzf"
+
+# Seeds and mutations are shaped, not purely random: see each target's docs.
+[[bin]]
+name = "frame_parser"
+path = "fuzz_targets/frame_parser.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "cipher_decrypt"
+path = "fuzz_targets/cipher_decrypt.rs"
+test = false
+doc = false
+bench = false
+
+# The seam that actually exists on the wire: framed, THEN enciphered.
+# See README.md - fuzzing the two halves separately misses the
+# framed-then-deciphers composition that the services use.
+[[bin]]
+name = "frame_then_decipher"
+path = "fuzz_targets/frame_then_decipher.rs"
+test = false
+doc = false
+bench = false

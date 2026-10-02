@@ -5,3 +5,9 @@ edition.workspace = true
 publish = false
 
 [dependencies]
+
+[dev-dependencies]
+# The composition tests need the other two parsers on the receive path. Neither
+# depends on gz-net, so this is not a cycle.
+gz-cipher = { path = "../gz-cipher" }
+gz-lzf = { path = "../gz-lzf" }
