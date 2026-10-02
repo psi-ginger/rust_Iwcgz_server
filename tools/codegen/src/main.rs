@@ -19,9 +19,15 @@ use std::process::ExitCode;
 use emit::EmitSpec;
 
 /// Legacy source root; override with `GOONZU_LEGACY_ROOT`.
+///
+/// This default was stale until 2026-10-02: it still pointed at the pre-move
+/// path under `C:\Users\Home\Documents\Online_work`, so every header lookup
+/// failed and `codegen --check` reported the committed opcode tables as stale
+/// for entirely the wrong reason. If the legacy tree moves again, update this
+/// and `scripts/check.ps1`, which carries its own copy of the same default.
 const LEGACY_ROOT_ENV: &str = "GOONZU_LEGACY_ROOT";
 const DEFAULT_LEGACY_ROOT: &str =
-    r"C:\Users\Home\Documents\Online_work\Goonzu Source Code\Server_Core\GoonZu_Source";
+    r"C:\Data\04_Server_Goonzu\GoonZu Source Code\Server_Core\GoonZu_Source";
 
 /// One generated module.
 struct Target {

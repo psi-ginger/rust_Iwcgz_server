@@ -6,8 +6,8 @@
 //! and inventory repositories come in M2/M3.
 
 use async_trait::async_trait;
-use sqlx::postgres::PgPool;
 use sqlx::Row;
+use sqlx::postgres::PgPool;
 
 /// A row from the `accounts` table.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -60,11 +60,8 @@ pub trait AccountRepository: Send + Sync {
 
     /// Create a new account. Returns `DuplicateUsername` if the name is
     /// already taken.
-    async fn create(
-        &self,
-        username: &str,
-        password_hash: &str,
-    ) -> Result<Account, RepositoryError>;
+    async fn create(&self, username: &str, password_hash: &str)
+    -> Result<Account, RepositoryError>;
 
     /// Update the password hash for an existing account.
     async fn update_password(
@@ -74,11 +71,7 @@ pub trait AccountRepository: Send + Sync {
     ) -> Result<(), RepositoryError>;
 
     /// Update account status (active, blocked, etc.).
-    async fn update_status(
-        &self,
-        account_id: i32,
-        status: i32,
-    ) -> Result<(), RepositoryError>;
+    async fn update_status(&self, account_id: i32, status: i32) -> Result<(), RepositoryError>;
 
     /// Delete an account by id.
     async fn delete(&self, account_id: i32) -> Result<(), RepositoryError>;
@@ -193,11 +186,7 @@ impl AccountRepository for PgAccountRepository {
         Ok(())
     }
 
-    async fn update_status(
-        &self,
-        account_id: i32,
-        status: i32,
-    ) -> Result<(), RepositoryError> {
+    async fn update_status(&self, account_id: i32, status: i32) -> Result<(), RepositoryError> {
         let result = sqlx::query("UPDATE accounts SET status = $1 WHERE account_id = $2")
             .bind(status)
             .bind(account_id)

@@ -1,0 +1,18 @@
+# Keep the working tree LF everywhere.
+#
+# core.autocrlf=false in the local git config stops git from rewriting line
+# endings, but it does not stop other tools. PowerShell's Set-Content and
+# [System.IO.File]::WriteAllLines both emit CRLF on Windows, and that silently
+# turned one 267-line file into a 540-line diff on 2026-10-02. Pinning eol=lf
+# makes the repository authoritative instead of relying on every editor and
+# script behaving.
+* text=auto eol=lf
+
+# The committed legacy snapshots must stay byte-identical to the originals.
+tools/lzf-oracle/lzf_c.c text eol=lf
+tools/lzf-oracle/lzf_d.c text eol=lf
+tools/lzf-oracle/lzf.h   text eol=lf
+tools/lzf-oracle/lzfP.h  text eol=lf
+
+# Fuzz corpora are opaque byte blobs named by content hash; never touch them.
+fuzz/corpus/** -text

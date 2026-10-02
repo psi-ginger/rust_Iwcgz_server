@@ -9,8 +9,8 @@
 //! NOTE: Requires a running PostgreSQL instance. See README.md for
 //! connection patterns and setup instructions.
 
-use sqlx::postgres::PgPoolOptions;
 use sqlx::Row;
+use sqlx::postgres::PgPoolOptions;
 
 /// Default connection string — used when DATABASE_URL is not set.
 /// Format: postgres://user:password@host:port/database
@@ -22,7 +22,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // --- 1. Connect to PostgreSQL ---
     let database_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
-        println!("    DATABASE_URL not set, using default: {}", DEFAULT_DATABASE_URL);
+        println!(
+            "    DATABASE_URL not set, using default: {}",
+            DEFAULT_DATABASE_URL
+        );
         DEFAULT_DATABASE_URL.to_string()
     });
 
@@ -87,10 +90,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     .bind("1")
     .execute(&pool)
     .await?;
-    println!(
-        "    Inserted {} row(s)",
-        insert_result.rows_affected()
-    );
+    println!("    Inserted {} row(s)", insert_result.rows_affected());
 
     // Read it back
     let rows = sqlx::query(

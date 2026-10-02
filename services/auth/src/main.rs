@@ -9,16 +9,18 @@ use gz_db::{AccountRepository, PgAccountRepository};
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("auth: starting (M1 wiring)");
 
-    let database_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
-        "postgres://postgres:Moon@2020@localhost:5432/goonzu".to_string()
-    });
+    let database_url = std::env::var("DATABASE_URL")
+        .unwrap_or_else(|_| "postgres://postgres:Moon@2020@localhost:5432/goonzu".to_string());
 
     let repo = PgAccountRepository::connect(&database_url).await?;
     println!("auth: connected to database");
 
     // Smoke test: look up a known account
     match repo.find_by_username("admin").await {
-        Ok(account) => println!("auth: found account {} (id={})", account.username, account.account_id),
+        Ok(account) => println!(
+            "auth: found account {} (id={})",
+            account.username, account.account_id
+        ),
         Err(gz_db::RepositoryError::NotFound) => println!("auth: no 'admin' account yet"),
         Err(e) => eprintln!("auth: lookup error: {e}"),
     }
