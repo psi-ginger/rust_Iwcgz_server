@@ -1,0 +1,1578 @@
+{
+  "$defs": {
+    "Ack": {
+      "description": "An empty success payload, for methods whose only effect is the absence of\nan error.",
+      "type": "object"
+    },
+    "Call": {
+      "description": "A request: method name plus typed parameters.\n\n`tag = \"method\"` with `content = \"params\"` gives the flat wire shape\n`{\"method\":\"status.get\",\"params\":{}}` rather than serde's default\nnesting, because a frontend reading a log of traffic should not have to\nknow that `method` is a serde implementation detail.",
+      "oneOf": [
+        {
+          "properties": {
+            "method": {
+              "const": "ops.hello",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/$defs/HelloParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "status.get",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/$defs/NoParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "services.list",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/$defs/NoParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "logs.tail",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/$defs/LogsTailParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "logs.tail.stop",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/$defs/LogsTailStopParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "config.get",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/$defs/ConfigGetParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "config.set",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/$defs/ConfigSetParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "db.ping",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/$defs/NoParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "players.list",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/$defs/PlayersListParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "service.start",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/$defs/ServiceActionParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "service.stop",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/$defs/ServiceActionParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "service.restart",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/$defs/ServiceActionParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "session.kick",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/$defs/SessionKickParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "ConfigEntry": {
+      "properties": {
+        "comment": {
+          "description": "Doc comment from the config file, if any.",
+          "type": "string"
+        },
+        "key": {
+          "description": "Dotted path, e.g. `server.game.tick_hz`.",
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/ConfigKind",
+          "description": "TOML type."
+        },
+        "read_only": {
+          "description": "Whether the server will accept a write to this key.",
+          "type": "boolean"
+        },
+        "secret": {
+          "description": "Value is sensitive (a DB password, a link-cipher key).\n\nPlan §9 requires DB credentials to live in the OS keychain rather than\nin config. So a `secret` entry's `value` is always `None` here no\nmatter what the server has: the frontend gets a key name and a\n\"set a new value\" affordance, never the current one. Config is\nreadable by every local process that can reach this socket, and\nanything with root on the box can read the keychain anyway -- so\npretending to hide it in the response would only move the leak from a\ndocumented place into an undocumented one.",
+          "type": "boolean"
+        },
+        "value": {
+          "description": "Rendered value. **Always `None` when `secret` is true** -- see the\nfield docs.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "key",
+        "kind",
+        "secret",
+        "read_only"
+      ],
+      "type": "object"
+    },
+    "ConfigGetParams": {
+      "properties": {
+        "prefix": {
+          "description": "Dotted key prefix to restrict to, e.g. `server.game`. `None` is all.",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "ConfigGetResult": {
+      "properties": {
+        "entries": {
+          "description": "Matching entries, ordered by key.",
+          "items": {
+            "$ref": "#/$defs/ConfigEntry"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "entries"
+      ],
+      "type": "object"
+    },
+    "ConfigKind": {
+      "description": "TOML value type, so the frontend can render an editor rather than a\ntext box with everything as a string.",
+      "oneOf": [
+        {
+          "enum": [
+            "string",
+            "integer",
+            "float",
+            "boolean"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "list",
+          "description": "TOML array. Rendered as a list, not as a TOML inline table.",
+          "type": "string"
+        },
+        {
+          "const": "table",
+          "description": "Nested table. Rendered as a group, not as a leaf.",
+          "type": "string"
+        }
+      ]
+    },
+    "ConfigSetEntry": {
+      "properties": {
+        "key": {
+          "description": "Dotted path.",
+          "type": "string"
+        },
+        "value": {
+          "description": "New value, as a string. Parsed according to the existing entry's\n[`ConfigKind`], or as a string if the key is new.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "key",
+        "value"
+      ],
+      "type": "object"
+    },
+    "ConfigSetParams": {
+      "properties": {
+        "entries": {
+          "description": "Entries to write. The server applies them as one transaction: either\nevery key is valid and written, or none is.",
+          "items": {
+            "$ref": "#/$defs/ConfigSetEntry"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "entries"
+      ],
+      "type": "object"
+    },
+    "ConfigSetResult": {
+      "properties": {
+        "applied": {
+          "description": "How many entries were written.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "needs_restart": {
+          "description": "Services that need a restart to pick the change up. The server does\n**not** restart them: that is a deliberate, separate action, so an\noperator never gets an unexpected restart from an unrelated edit.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "applied",
+        "needs_restart"
+      ],
+      "type": "object"
+    },
+    "DbPingResult": {
+      "properties": {
+        "driver": {
+          "description": "Driver name and version, e.g. `postgresql/18.6`. Diagnostic.",
+          "type": "string"
+        },
+        "error": {
+          "description": "Why it failed. Operator-facing; carries no credentials.",
+          "type": "string"
+        },
+        "latency_ms": {
+          "description": "Round-trip time of that query.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "reachable": {
+          "description": "Whether a trivial query succeeded.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "reachable",
+        "driver"
+      ],
+      "type": "object"
+    },
+    "EventFrame": {
+      "description": "A server-initiated push. Only ever arrives after a successful `subscribe`.",
+      "oneOf": [
+        {
+          "description": "A new log line. See [`LogLine`].",
+          "properties": {
+            "data": {
+              "$ref": "#/$defs/LogLine"
+            },
+            "event": {
+              "const": "logs_line",
+              "type": "string"
+            }
+          },
+          "required": [
+            "event",
+            "data"
+          ],
+          "type": "object"
+        }
+      ],
+      "properties": {
+        "subscription": {
+          "description": "The `subscription` returned by the method that opened the stream.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "subscription"
+      ],
+      "type": "object"
+    },
+    "HelloParams": {
+      "properties": {
+        "client": {
+          "description": "Client name, e.g. `control-panel`.",
+          "type": "string"
+        },
+        "client_version": {
+          "description": "Client version, for the operator's support log.",
+          "type": "string"
+        },
+        "min_api_version": {
+          "description": "Oldest API version this client can speak. The server refuses with\n`invalid_params` if the server's version is below this.\n\nThere is no upper bound check: a newer server is expected to keep\nolder methods working, and to add rather than change.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "token": {
+          "description": "Shared secret from the token file. Required on TCP; recommended on a\nUnix socket, where filesystem permissions are the real control. See\nthe crate README.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "client",
+        "client_version",
+        "min_api_version"
+      ],
+      "type": "object"
+    },
+    "HelloResult": {
+      "properties": {
+        "api_version": {
+          "description": "The contract version this server implements.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "features": {
+          "description": "Optional capabilities the client may use, e.g. `config.set`,\n`service.restart`. Empty means \"read-only server\".",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "server": {
+          "description": "Server-side identifier, e.g. `goonzu-rs-supervisor`.",
+          "type": "string"
+        },
+        "server_version": {
+          "description": "Build version of the server binary.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "api_version",
+        "server",
+        "server_version",
+        "features"
+      ],
+      "type": "object"
+    },
+    "LogLevel": {
+      "description": "Severity, ordered least to most verbose.\n\nDeliberately a closed set rather than a passthrough string: a legacy log\nline uses its own severities, and the supervisor has to map them onto\nsomething the frontend can filter on. A closed set makes it a compile-time\nobligation to handle every legacy severity, instead of a string that\nsilently arrives unfiltered.",
+      "oneOf": [
+        {
+          "const": "error",
+          "description": "Fatal or unrecoverable.",
+          "type": "string"
+        },
+        {
+          "const": "warn",
+          "description": "Recoverable problem worth attention.",
+          "type": "string"
+        },
+        {
+          "const": "info",
+          "description": "Normal operational message.",
+          "type": "string"
+        },
+        {
+          "const": "debug",
+          "description": "Diagnostic detail.",
+          "type": "string"
+        },
+        {
+          "const": "trace",
+          "description": "Very fine-grained tracing, usually off in production.",
+          "type": "string"
+        }
+      ]
+    },
+    "LogLine": {
+      "description": "One log line.",
+      "properties": {
+        "level": {
+          "$ref": "#/$defs/LogLevel",
+          "description": "Severity after mapping from the legacy severity."
+        },
+        "lossy": {
+          "description": "Some bytes could not be decoded from the source encoding.",
+          "type": "boolean"
+        },
+        "message": {
+          "description": "The message, decoded to UTF-8.",
+          "type": "string"
+        },
+        "seq": {
+          "description": "Monotonic per-subscription sequence number.\n\nGaps are meaningful: a sequence that jumps means lines were dropped\nbecause the client fell behind, and the UI must say so rather than\npresent a hole as if it were the whole story.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "stream": {
+          "description": "Which log stream: `game`, `front`, `auth`, `logd`, `db`, ...",
+          "type": "string"
+        },
+        "target": {
+          "description": "Emitting module, e.g. `GoonZuWorld::Char::Attack`.",
+          "type": "string"
+        },
+        "truncated": {
+          "description": "The line was cut at the per-line budget.",
+          "type": "boolean"
+        },
+        "ts_ms": {
+          "description": "Unix epoch milliseconds, UTC. Always present so the frontend never has\nto guess a timezone.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "seq",
+        "ts_ms",
+        "level",
+        "stream",
+        "target",
+        "message",
+        "truncated",
+        "lossy"
+      ],
+      "type": "object"
+    },
+    "LogsTailParams": {
+      "properties": {
+        "contains": {
+          "description": "Case-insensitive substring the message must contain.",
+          "type": "string"
+        },
+        "min_level": {
+          "$ref": "#/$defs/LogLevel",
+          "description": "Minimum severity. `None` means everything, including `trace`."
+        },
+        "replay": {
+          "description": "How many recent matching lines to replay before streaming live.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "stream": {
+          "description": "Restrict to one stream, e.g. `game`. `None` means all streams.",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "LogsTailResult": {
+      "properties": {
+        "replayed": {
+          "description": "How many lines were actually replayed. May be fewer than `replay` if\nfewer were available, or zero.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "subscription": {
+          "description": "Id to pass to `logs.tail.stop`, and the `subscription` on every\npushed event.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "subscription",
+        "replayed"
+      ],
+      "type": "object"
+    },
+    "LogsTailStopParams": {
+      "properties": {
+        "subscription": {
+          "description": "Subscription to close. Closing an unknown id is a no-op, not an error:\nthe subscription may already have ended.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "subscription"
+      ],
+      "type": "object"
+    },
+    "Method": {
+      "description": "Every method name in the contract.",
+      "oneOf": [
+        {
+          "const": "ops.hello",
+          "description": "Handshake and capability exchange.",
+          "type": "string"
+        },
+        {
+          "const": "status.get",
+          "description": "Overall cluster identity and health.",
+          "type": "string"
+        },
+        {
+          "const": "services.list",
+          "description": "Per-service status.",
+          "type": "string"
+        },
+        {
+          "const": "logs.tail",
+          "description": "Open a log subscription.",
+          "type": "string"
+        },
+        {
+          "const": "logs.tail.stop",
+          "description": "Close a log subscription.",
+          "type": "string"
+        },
+        {
+          "const": "config.get",
+          "description": "Read configuration.",
+          "type": "string"
+        },
+        {
+          "const": "config.set",
+          "description": "Write configuration. Mutating; see the module note.",
+          "type": "string"
+        },
+        {
+          "const": "db.ping",
+          "description": "Check database reachability.",
+          "type": "string"
+        },
+        {
+          "const": "players.list",
+          "description": "List characters. Needs the character repository (M2/M3).",
+          "type": "string"
+        },
+        {
+          "const": "service.start",
+          "description": "Start a service. Mutating.",
+          "type": "string"
+        },
+        {
+          "const": "service.stop",
+          "description": "Stop a service. Mutating.",
+          "type": "string"
+        },
+        {
+          "const": "service.restart",
+          "description": "Restart a service. Mutating.",
+          "type": "string"
+        },
+        {
+          "const": "session.kick",
+          "description": "Disconnect a player's session. Mutating.",
+          "type": "string"
+        }
+      ]
+    },
+    "NoParams": {
+      "description": "The empty parameter object, for methods that take nothing.\n\nExplicit rather than omitted so every request has a `params` member and the\nshape does not change when a method later gains an optional argument.",
+      "type": "object"
+    },
+    "OpsError": {
+      "description": "A failure. `code` is stable, `message` is not.",
+      "properties": {
+        "code": {
+          "$ref": "#/$defs/OpsErrorCode",
+          "description": "Stable machine-readable code."
+        },
+        "message": {
+          "description": "Human-readable detail. May change between server versions; do not\nparse it.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "message"
+      ],
+      "type": "object"
+    },
+    "OpsErrorCode": {
+      "description": "Stable machine-readable failure codes.\n\nThese are part of the contract: a frontend may branch on them. The human\ntext goes in [`OpsError::message`] and may change freely.",
+      "oneOf": [
+        {
+          "const": "unauthorized",
+          "description": "Token missing or wrong. Always fatal to the connection -- a client that\ngets this once should not retry the same token.",
+          "type": "string"
+        },
+        {
+          "const": "method_not_found",
+          "description": "The `method` member named something not in [`crate::methods::Method`].",
+          "type": "string"
+        },
+        {
+          "const": "invalid_params",
+          "description": "Parameters were well-formed JSON but not valid for the method, e.g. a\n`limit` of zero or a `service` that is not in the registry.",
+          "type": "string"
+        },
+        {
+          "const": "not_implemented",
+          "description": "The method exists in this contract but the server has not implemented it\nyet. Expected for everything in the reserved phase.",
+          "type": "string"
+        },
+        {
+          "const": "unavailable",
+          "description": "The server is up but the thing the method needs is down, e.g. `db.ping`\nwhen the database is unreachable.",
+          "type": "string"
+        },
+        {
+          "const": "timeout",
+          "description": "The method exceeded its deadline.",
+          "type": "string"
+        },
+        {
+          "const": "internal",
+          "description": "Internal failure. `message` is for logs, not for end users.",
+          "type": "string"
+        }
+      ]
+    },
+    "Phase": {
+      "description": "When a method becomes implementable.",
+      "oneOf": [
+        {
+          "const": "read_only",
+          "description": "Inspects state only. Targetable at M1.",
+          "type": "string"
+        },
+        {
+          "const": "reserved",
+          "description": "Changes state. Blocked on the supervisor (M5).",
+          "type": "string"
+        }
+      ]
+    },
+    "PlayerSummary": {
+      "description": "One row of the character list.\n\n**Provisional, and deliberately minimal.** The legacy character schema has\nnot been surveyed yet -- that is the M2/M3 character repository work -- so\nthis type carries only the two fields needed to render a list row\nunambiguously. Adding fields is a breaking change to this type, so they\nshould be added once, when the real columns are known, rather than guessed\nat now and corrected later. `gz-db` currently models only\n[`gz_db::repository::Account`]; see the crate README.",
+      "properties": {
+        "name": {
+          "description": "Character name, already decoded from CP949 to UTF-8.",
+          "type": "string"
+        },
+        "online": {
+          "description": "Whether the character currently has a live session.",
+          "type": "boolean"
+        },
+        "player_id": {
+          "description": "Character identifier.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "player_id",
+        "name",
+        "online"
+      ],
+      "type": "object"
+    },
+    "PlayersListParams": {
+      "properties": {
+        "limit": {
+          "description": "Page size. Server clamps to its own maximum.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "offset": {
+          "description": "Rows to skip.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "online_only": {
+          "description": "Only currently connected characters.",
+          "type": "boolean"
+        },
+        "search": {
+          "description": "Case-insensitive substring match on the character name.",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "PlayersListResult": {
+      "properties": {
+        "players": {
+          "description": "Matching characters.",
+          "items": {
+            "$ref": "#/$defs/PlayerSummary"
+          },
+          "type": "array"
+        },
+        "total": {
+          "description": "Total matches before `limit`/`offset`, for paging.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "players",
+        "total"
+      ],
+      "type": "object"
+    },
+    "Request": {
+      "description": "A request from client to server.\n\n`id` is client-assigned and is the only correlation the protocol needs:\nthe server echoes it on the response, and uses it as the subscription id\nfor pushed events.",
+      "oneOf": [
+        {
+          "properties": {
+            "method": {
+              "const": "ops.hello",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/$defs/HelloParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "status.get",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/$defs/NoParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "services.list",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/$defs/NoParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "logs.tail",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/$defs/LogsTailParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "logs.tail.stop",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/$defs/LogsTailStopParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "config.get",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/$defs/ConfigGetParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "config.set",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/$defs/ConfigSetParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "db.ping",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/$defs/NoParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "players.list",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/$defs/PlayersListParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "service.start",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/$defs/ServiceActionParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "service.stop",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/$defs/ServiceActionParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "service.restart",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/$defs/ServiceActionParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "session.kick",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/$defs/SessionKickParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        }
+      ],
+      "properties": {
+        "id": {
+          "description": "Client-assigned correlation id, echoed verbatim on the response.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "type": "object"
+    },
+    "Response": {
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "ok": {
+                "const": true
+              }
+            },
+            "required": [
+              "ok"
+            ]
+          },
+          "then": {
+            "not": {
+              "required": [
+                "error"
+              ]
+            },
+            "required": [
+              "result"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "ok": {
+                "const": false
+              }
+            },
+            "required": [
+              "ok"
+            ]
+          },
+          "then": {
+            "not": {
+              "required": [
+                "result"
+              ]
+            },
+            "required": [
+              "error"
+            ]
+          }
+        }
+      ],
+      "description": "A response to exactly one [`Request`].\n\nThe schema carries the `ok`/`result`/`error` invariant as an `if`/`then`\nrather than leaving it to convention. `required` in JSON Schema is\nunconditional, so the coupling between `ok` and its companions is only\nexpressible conditionally -- and without it the schema accepts\n`{\"ok\":true}` with no result, `{\"ok\":false}` carrying a result, and a frame\nwith both. A frontend generated from that schema would treat all three as\npossible and would fail on a null deref rather than on a rejected frame.",
+      "properties": {
+        "error": {
+          "$ref": "#/$defs/OpsError",
+          "description": "Failure detail. Present iff `!ok`."
+        },
+        "id": {
+          "description": "Echo of the request's `id`.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "ok": {
+          "description": "`true` when `result` is present and `error` is absent.",
+          "type": "boolean"
+        },
+        "result": {
+          "$ref": "#/$defs/ResponseData",
+          "description": "Method-specific payload. Present iff `ok`."
+        }
+      },
+      "required": [
+        "id",
+        "ok"
+      ],
+      "type": "object"
+    },
+    "ResponseData": {
+      "description": "A method's success payload, discriminated by method name.",
+      "oneOf": [
+        {
+          "properties": {
+            "data": {
+              "$ref": "#/$defs/HelloResult"
+            },
+            "method": {
+              "const": "ops.hello",
+              "type": "string"
+            }
+          },
+          "required": [
+            "method",
+            "data"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "data": {
+              "$ref": "#/$defs/StatusResult"
+            },
+            "method": {
+              "const": "status.get",
+              "type": "string"
+            }
+          },
+          "required": [
+            "method",
+            "data"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "data": {
+              "$ref": "#/$defs/ServicesListResult"
+            },
+            "method": {
+              "const": "services.list",
+              "type": "string"
+            }
+          },
+          "required": [
+            "method",
+            "data"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "data": {
+              "$ref": "#/$defs/LogsTailResult"
+            },
+            "method": {
+              "const": "logs.tail",
+              "type": "string"
+            }
+          },
+          "required": [
+            "method",
+            "data"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "data": {
+              "$ref": "#/$defs/Ack"
+            },
+            "method": {
+              "const": "logs.tail.stop",
+              "type": "string"
+            }
+          },
+          "required": [
+            "method",
+            "data"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "data": {
+              "$ref": "#/$defs/ConfigGetResult"
+            },
+            "method": {
+              "const": "config.get",
+              "type": "string"
+            }
+          },
+          "required": [
+            "method",
+            "data"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "data": {
+              "$ref": "#/$defs/ConfigSetResult"
+            },
+            "method": {
+              "const": "config.set",
+              "type": "string"
+            }
+          },
+          "required": [
+            "method",
+            "data"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "data": {
+              "$ref": "#/$defs/DbPingResult"
+            },
+            "method": {
+              "const": "db.ping",
+              "type": "string"
+            }
+          },
+          "required": [
+            "method",
+            "data"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "data": {
+              "$ref": "#/$defs/PlayersListResult"
+            },
+            "method": {
+              "const": "players.list",
+              "type": "string"
+            }
+          },
+          "required": [
+            "method",
+            "data"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "data": {
+              "$ref": "#/$defs/ServiceActionResult"
+            },
+            "method": {
+              "const": "service.start",
+              "type": "string"
+            }
+          },
+          "required": [
+            "method",
+            "data"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "data": {
+              "$ref": "#/$defs/ServiceActionResult"
+            },
+            "method": {
+              "const": "service.stop",
+              "type": "string"
+            }
+          },
+          "required": [
+            "method",
+            "data"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "data": {
+              "$ref": "#/$defs/ServiceActionResult"
+            },
+            "method": {
+              "const": "service.restart",
+              "type": "string"
+            }
+          },
+          "required": [
+            "method",
+            "data"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "data": {
+              "$ref": "#/$defs/SessionKickResult"
+            },
+            "method": {
+              "const": "session.kick",
+              "type": "string"
+            }
+          },
+          "required": [
+            "method",
+            "data"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "ServiceActionParams": {
+      "properties": {
+        "service": {
+          "description": "Registry name from `services.list`.",
+          "type": "string"
+        },
+        "timeout_s": {
+          "description": "Give up after this many seconds. The server picks its own default when\nabsent.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "service"
+      ],
+      "type": "object"
+    },
+    "ServiceActionResult": {
+      "properties": {
+        "changed": {
+          "description": "Whether the requested transition actually happened. `false` with\n`state` already correct is success, not failure -- stopping a stopped\nservice is what the operator asked for.",
+          "type": "boolean"
+        },
+        "service": {
+          "description": "The service acted on.",
+          "type": "string"
+        },
+        "state": {
+          "$ref": "#/$defs/ServiceState",
+          "description": "State after the action."
+        }
+      },
+      "required": [
+        "service",
+        "changed",
+        "state"
+      ],
+      "type": "object"
+    },
+    "ServiceState": {
+      "description": "Coarse service state. The supervisor maps process state onto this.",
+      "oneOf": [
+        {
+          "const": "stopped",
+          "description": "Not running.",
+          "type": "string"
+        },
+        {
+          "const": "starting",
+          "description": "Spawned but not yet serving.",
+          "type": "string"
+        },
+        {
+          "const": "running",
+          "description": "Serving.",
+          "type": "string"
+        },
+        {
+          "const": "stopping",
+          "description": "Asked to stop, still draining.",
+          "type": "string"
+        },
+        {
+          "const": "failed",
+          "description": "Exited with an error.",
+          "type": "string"
+        },
+        {
+          "const": "unknown",
+          "description": "The supervisor cannot determine the state.",
+          "type": "string"
+        }
+      ]
+    },
+    "ServiceStatus": {
+      "properties": {
+        "connections": {
+          "description": "Currently connected clients.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "cpu_pct": {
+          "description": "CPU percent since the last sample, or `None` if unavailable.",
+          "format": "double",
+          "type": "number"
+        },
+        "name": {
+          "description": "Registry name, e.g. `game`. These are the Rust workspace's service\nnames, not the legacy `.vcproj` names; the mapping is in the README.",
+          "type": "string"
+        },
+        "pid": {
+          "description": "OS process id, absent when stopped or unknown.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "rss_bytes": {
+          "description": "Resident set size in bytes, or `None` if unavailable.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "since_ms": {
+          "description": "Unix epoch ms at which the service entered its current state.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "state": {
+          "$ref": "#/$defs/ServiceState",
+          "description": "Coarse state."
+        },
+        "uptime_s": {
+          "description": "Seconds since the process started.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "name",
+        "state"
+      ],
+      "type": "object"
+    },
+    "ServicesListResult": {
+      "properties": {
+        "services": {
+          "description": "One entry per registered service, ordered by name.",
+          "items": {
+            "$ref": "#/$defs/ServiceStatus"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "services"
+      ],
+      "type": "object"
+    },
+    "SessionKickParams": {
+      "properties": {
+        "account_id": {
+          "description": "Or every session on this account.",
+          "format": "int32",
+          "type": "integer"
+        },
+        "player_id": {
+          "description": "Kick this character.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "reason": {
+          "description": "Reason shown to the player and written to the log. Strongly\nrecommended; an unexplained kick is indistinguishable from a bug.",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "SessionKickResult": {
+      "properties": {
+        "kicked": {
+          "description": "How many sessions were disconnected.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "not_found": {
+          "description": "How many targets matched no live session. Not an error: the operator\nasked to kick an offline character, and the honest answer is zero.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "kicked",
+        "not_found"
+      ],
+      "type": "object"
+    },
+    "StatusResult": {
+      "properties": {
+        "api_version": {
+          "description": "Contract version the server implements.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "server_version": {
+          "description": "Server build version.",
+          "type": "string"
+        },
+        "services_running": {
+          "description": "How many registered services are running.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "services_total": {
+          "description": "How many services are registered in total.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "uptime_s": {
+          "description": "Seconds since the server started.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "api_version",
+        "server_version",
+        "uptime_s",
+        "services_running",
+        "services_total"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "https://goonzu.rs/schemas/ops-api.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Frame on the wire: a 4-byte big-endian length followed by that many bytes of UTF-8 JSON. Frames are NOT newline-delimited: log lines and player names are untrusted text that can contain newlines, and splitting on one would desynchronise the stream. A frame is a Response if and only if it has an `ok` member; anything else is an EventFrame routed by `subscription`. `ops.hello` must be the first request. An absent optional member is OMITTED, never sent as null. Integer members carry the non-standard `format` values `uint32` and `uint64`, which record the Rust source width. They are annotations, not registered JSON Schema formats, so a strict validator will warn about them; register them as no-ops before compiling. The width matters to a consumer because a u64 above 2^53 does not survive a round trip through a JavaScript Number.",
+  "title": "GoonZu local ops API",
+  "x-contract-version": 1
+}

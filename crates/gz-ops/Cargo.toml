@@ -4,4 +4,23 @@ version.workspace = true
 edition.workspace = true
 publish = false
 
+# Deliberately dependency-light. This crate is the *contract* that the
+# Tauri apps, the supervisor and the eventual ops server all agree on, so it
+# must stay consumable from a plain frontend core crate. Nothing here should
+# ever pull in a database driver, a game-protocol codec or a UI toolkit --
+# those belong to whoever *implements* the contract.
 [dependencies]
+serde = { version = "1", features = ["derive"] }
+# Schema is derived from the types, never hand-written, so it cannot drift
+# from the Rust definitions. `schema.json` is a committed artifact that a test
+# re-derives and compares, the same way codegen --check compares the opcode
+# tables.
+schemars = "1"
+serde_json = "1"
+
+[[bin]]
+name = "export-schema"
+path = "src/bin/export_schema.rs"
+
+[dev-dependencies]
+serde_json = "1"

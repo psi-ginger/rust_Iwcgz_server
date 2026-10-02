@@ -1,4 +1,5 @@
-# goonzu-rs CI check: formatting, lints, tests, generated-code drift, fuzz smoke.
+# goonzu-rs CI check: formatting, lints, tests, generated-code drift, contract
+# drift, fuzz smoke.
 # Run:  powershell -NoProfile -ExecutionPolicy Bypass -File scripts\check.ps1
 #
 #   -Fuzz              also run the libFuzzer smoke pass (needs nightly + LLVM;
@@ -13,15 +14,15 @@ param(
 $ErrorActionPreference = "Stop"
 Set-Location (Split-Path -Parent $PSScriptRoot)
 
-Write-Host "[1/5] cargo fmt --check" -ForegroundColor Cyan
+Write-Host "[1/6] cargo fmt --check" -ForegroundColor Cyan
 cargo fmt --check
 if ($LASTEXITCODE -ne 0) { throw "cargo fmt failed" }
 
-Write-Host "[2/5] cargo clippy" -ForegroundColor Cyan
+Write-Host "[2/6] cargo clippy" -ForegroundColor Cyan
 cargo clippy --workspace --all-targets -- -D warnings
 if ($LASTEXITCODE -ne 0) { throw "cargo clippy failed" }
 
-Write-Host "[3/5] cargo test" -ForegroundColor Cyan
+Write-Host "[3/6] cargo test" -ForegroundColor Cyan
 cargo test --workspace
 if ($LASTEXITCODE -ne 0) { throw "cargo test failed" }
 
@@ -39,7 +40,7 @@ $legacyRoot = if ($env:GOONZU_LEGACY_ROOT) {
 } else {
     "C:\Data\04_Server_Goonzu\GoonZu Source Code\Server_Core\GoonZu_Source"
 }
-Write-Host "[4/5] codegen --check" -ForegroundColor Cyan
+Write-Host "[4/6] codegen --check" -ForegroundColor Cyan
 if (Test-Path -LiteralPath (Join-Path $legacyRoot "GoonZuWorld\CommonLogic\MsgType.h")) {
     Write-Host "  legacy tree: $legacyRoot"
     cargo run -q -p codegen -- all --check
@@ -48,6 +49,28 @@ if (Test-Path -LiteralPath (Join-Path $legacyRoot "GoonZuWorld\CommonLogic\MsgTy
     Write-Host "  legacy tree not found at $legacyRoot - skipping drift check" -ForegroundColor Yellow
     Write-Host "  (set GOONZU_LEGACY_ROOT to point at the read-only legacy source)" -ForegroundColor Yellow
 }
+
+# --- gz-ops contract drift -------------------------------------------------------
+#
+# crates/gz-ops/schema.json, schema-examples.json and the README's method table
+# are committed artifacts derived from the Rust message types. Step 3 already
+# asserts they match (tests/contract.rs); this step names the failure clearly
+# instead of leaving it as one red test among thirty.
+#
+# `export-schema --check` compares the files against what the types derive to
+# right now, rather than asking git. That is deliberate: a git-diff-based drift
+# check silently passes for any file that is not yet tracked, which is exactly
+# the state a newly generated artifact is in. An earlier version of this step
+# did use `git diff --quiet` and would have stayed green forever.
+#
+# Unlike step 4 this needs no legacy tree and cannot be skipped.
+Write-Host "[5/6] gz-ops contract artifacts" -ForegroundColor Cyan
+cargo run -q -p gz-ops --bin export-schema -- --check
+if ($LASTEXITCODE -eq 2) {
+    throw "gz-ops committed artifacts are stale - see the message above; re-run cargo run -p gz-ops --bin export-schema"
+}
+if ($LASTEXITCODE -ne 0) { throw "export-schema --check failed with exit code $LASTEXITCODE" }
+Write-Host "  schema.json, schema-examples.json and the README method table are current" -ForegroundColor Green
 
 # --- fuzz smoke (opt-in) --------------------------------------------------------
 #
@@ -64,7 +87,7 @@ if (Test-Path -LiteralPath (Join-Path $legacyRoot "GoonZuWorld\CommonLogic\MsgTy
 # The stock MSVC install ships those runtimes for x86 only, so without LLVM the
 # link fails with LNK1104 (missing clang_rt.asan_dynamic_runtime_thunk-x86_64.lib).
 # On Linux neither is a problem: rustup's bundled LLVM provides the runtime.
-Write-Host "[5/5] fuzz smoke" -ForegroundColor Cyan
+Write-Host "[6/6] fuzz smoke" -ForegroundColor Cyan
 if (-not $Fuzz) {
     Write-Host "  skipped (pass -Fuzz to run; invariants are still covered by step 3)" -ForegroundColor Yellow
 } else {

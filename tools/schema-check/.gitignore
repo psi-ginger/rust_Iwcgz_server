@@ -1,0 +1,7 @@
+# ajv is installed on demand; only its resolved tree is ignored.
+#
+# package-lock.json IS committed. This tool's checks were verified against
+# ajv 8.20.0 / ajv-formats 3.0.1 specifically, and a validator major bump is
+# exactly the kind of change that could silently alter which malformed frames
+# are rejected. Pinning the resolution is the point.
+node_modules/
