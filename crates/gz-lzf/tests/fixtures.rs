@@ -4,7 +4,7 @@
 //! 1. Decompressing the .lzf file produces the .bin file
 //! 2. Compressing the .bin file produces the .lzf file (wire compatibility)
 
-use gz_lzf::{compress, decompress, LzfError};
+use gz_lzf::{LzfError, compress, decompress};
 use std::fs;
 use std::path::Path;
 
@@ -50,7 +50,11 @@ fn fixture_decompress_matches_original() {
     for (name, bin_data, lzf_data) in &fixtures {
         if bin_data.is_empty() {
             // Empty input: compressed should also be empty
-            assert!(lzf_data.is_empty(), "fixture {}: empty input should have empty compressed", name);
+            assert!(
+                lzf_data.is_empty(),
+                "fixture {}: empty input should have empty compressed",
+                name
+            );
             continue;
         }
 
@@ -63,14 +67,22 @@ fn fixture_decompress_matches_original() {
         match decompress(lzf_data, &mut decompressed) {
             Ok(n) => {
                 decompressed.truncate(n);
-                assert_eq!(&decompressed, bin_data, "fixture {}: decompressed data doesn't match original", name);
+                assert_eq!(
+                    &decompressed, bin_data,
+                    "fixture {}: decompressed data doesn't match original",
+                    name
+                );
             }
             Err(LzfError::OutputTooSmall) => {
                 // Try with a larger buffer
                 let mut decompressed = vec![0u8; bin_data.len() * 2];
                 let n = decompress(lzf_data, &mut decompressed).expect("decompress failed");
                 decompressed.truncate(n);
-                assert_eq!(&decompressed, bin_data, "fixture {}: decompressed data doesn't match original", name);
+                assert_eq!(
+                    &decompressed, bin_data,
+                    "fixture {}: decompressed data doesn't match original",
+                    name
+                );
             }
             Err(e) => {
                 panic!("fixture {}: decompress failed: {}", name, e);
@@ -98,7 +110,11 @@ fn fixture_compress_matches_compressed() {
         let n = compress(bin_data, &mut compressed).expect("compress failed");
         compressed.truncate(n);
 
-        assert_eq!(&compressed, lzf_data, "fixture {}: compressed data doesn't match fixture", name);
+        assert_eq!(
+            &compressed, lzf_data,
+            "fixture {}: compressed data doesn't match fixture",
+            name
+        );
     }
 }
 
@@ -120,7 +136,11 @@ fn fixture_round_trip() {
         let m = decompress(&compressed, &mut decompressed).expect("decompress failed");
         decompressed.truncate(m);
 
-        assert_eq!(&decompressed, bin_data, "fixture {}: round-trip failed", name);
+        assert_eq!(
+            &decompressed, bin_data,
+            "fixture {}: round-trip failed",
+            name
+        );
     }
 }
 

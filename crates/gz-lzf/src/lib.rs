@@ -130,28 +130,103 @@ pub fn compress(input: &[u8], output: &mut [u8]) -> Result<usize, LzfError> {
                 }
 
                 // Extend match
+                //
+                // clippy::never_loop fires here and it is wrong. The legacy is
+                // `for (;;) { ... break; }` with that trailing `break;` at
+                // lzf_c.c:208, so the body genuinely runs exactly once.
+                // Restructuring it would diverge from the source this crate
+                // exists to mirror byte for byte, which is the point of the
+                // port. examples/diff_oracle.rs holds that fidelity claim to
+                // account against the compiled original.
+                #[allow(clippy::never_loop)]
                 loop {
                     if maxlen > 16 {
                         // Unrolled 16 bytes
-                        len += 1; if ref_slice[len] != ip_slice[len] { break; }
-                        len += 1; if ref_slice[len] != ip_slice[len] { break; }
-                        len += 1; if ref_slice[len] != ip_slice[len] { break; }
-                        len += 1; if ref_slice[len] != ip_slice[len] { break; }
-                        len += 1; if ref_slice[len] != ip_slice[len] { break; }
-                        len += 1; if ref_slice[len] != ip_slice[len] { break; }
-                        len += 1; if ref_slice[len] != ip_slice[len] { break; }
-                        len += 1; if ref_slice[len] != ip_slice[len] { break; }
-                        len += 1; if ref_slice[len] != ip_slice[len] { break; }
-                        len += 1; if ref_slice[len] != ip_slice[len] { break; }
-                        len += 1; if ref_slice[len] != ip_slice[len] { break; }
-                        len += 1; if ref_slice[len] != ip_slice[len] { break; }
-                        len += 1; if ref_slice[len] != ip_slice[len] { break; }
-                        len += 1; if ref_slice[len] != ip_slice[len] { break; }
-                        len += 1; if ref_slice[len] != ip_slice[len] { break; }
-                        len += 1; if ref_slice[len] != ip_slice[len] { break; }
+                        len += 1;
+                        if ref_slice[len] != ip_slice[len] {
+                            break;
+                        }
+                        len += 1;
+                        if ref_slice[len] != ip_slice[len] {
+                            break;
+                        }
+                        len += 1;
+                        if ref_slice[len] != ip_slice[len] {
+                            break;
+                        }
+                        len += 1;
+                        if ref_slice[len] != ip_slice[len] {
+                            break;
+                        }
+                        len += 1;
+                        if ref_slice[len] != ip_slice[len] {
+                            break;
+                        }
+                        len += 1;
+                        if ref_slice[len] != ip_slice[len] {
+                            break;
+                        }
+                        len += 1;
+                        if ref_slice[len] != ip_slice[len] {
+                            break;
+                        }
+                        len += 1;
+                        if ref_slice[len] != ip_slice[len] {
+                            break;
+                        }
+                        len += 1;
+                        if ref_slice[len] != ip_slice[len] {
+                            break;
+                        }
+                        len += 1;
+                        if ref_slice[len] != ip_slice[len] {
+                            break;
+                        }
+                        len += 1;
+                        if ref_slice[len] != ip_slice[len] {
+                            break;
+                        }
+                        len += 1;
+                        if ref_slice[len] != ip_slice[len] {
+                            break;
+                        }
+                        len += 1;
+                        if ref_slice[len] != ip_slice[len] {
+                            break;
+                        }
+                        len += 1;
+                        if ref_slice[len] != ip_slice[len] {
+                            break;
+                        }
+                        len += 1;
+                        if ref_slice[len] != ip_slice[len] {
+                            break;
+                        }
+                        len += 1;
+                        if ref_slice[len] != ip_slice[len] {
+                            break;
+                        }
                     }
 
-                    // Remaining bytes
+                    // Remaining bytes.
+                    //
+                    // Faithful to legacy lzf_c.c:204-206, which is a do-while:
+                    //     do len++; while (len < maxlen && ref[len] == ip[len]);
+                    // The increment is unconditional, so the legacy always
+                    // consumes one more octet *before* testing the bound. A
+                    // plain `while` here lands one octet short, and the port
+                    // then has to emit the leftover as its own literal run --
+                    // two extra bytes on the wire for any match that ends on
+                    // the bound. Measured against the compiled legacy: this input
+                    // produced 26 bytes with a plain `while` and 24 bytes with
+                    // the do-while, which is what lzf_c.c emits. See
+                    // crates/gz-lzf/examples/diff_oracle.rs.
+                    //
+                    // The unconditional increment cannot read out of bounds: it
+                    // dereferences only on the following test, which is guarded
+                    // by `len < maxlen`, and maxlen = in_end - ip - 2, so the
+                    // largest index ever touched is maxlen - 1.
+                    len += 1;
                     while len < maxlen && ref_slice[len] == ip_slice[len] {
                         len += 1;
                     }
@@ -323,6 +398,50 @@ pub fn decompress(input: &[u8], output: &mut [u8]) -> Result<usize, LzfError> {
 mod tests {
     use super::*;
 
+    /// Regression test for the `do`-while in the match-extension loop.
+    ///
+    /// The legacy extends a match with `do len++; while (len < maxlen && ...)`
+    /// (lzf_c.c:204-206). The unconditional increment is load-bearing: the
+    /// legacy always consumes one more octet *before* testing the bound. An
+    /// earlier port of this function used a plain `while`, which ended the
+    /// match one octet early and then had to spill the leftover into its own
+    /// literal run -- two extra bytes on the wire for any match that finished
+    /// exactly on the bound.
+    ///
+    /// This input is the smallest shape in `examples/diff_oracle.rs` that
+    /// exposed it: a 300-byte period-16 ramp. The expected bytes below are
+    /// not hand-derived -- they are what the *compiled* `lzf_compress` from the
+    /// legacy tree emits for this exact input, captured via
+    /// `tools/lzf-oracle` (see `build_oracle.bat`).
+    #[test]
+    fn compress_matches_legacy_bytes_on_bound_length_match() {
+        // Period-16 ramp: value[i] = (i % 16) * 7 + 13.
+        let input: Vec<u8> = (0..300).map(|i| ((i % 16) * 7 + 13) as u8).collect();
+
+        // Verified against legacy lzf_c.c, not against our own output.
+        let expected: Vec<u8> = vec![
+            0x10, 0x0d, 0x14, 0x1b, 0x22, 0x29, 0x30, 0x37, 0x3e, 0x45, 0x4c, 0x53, 0x5a, 0x61,
+            0x68, 0x6f, 0x76, 0x0d, 0xe0, 0xff, 0x0f, 0xe1, 0x0a, 0x0f,
+        ];
+
+        // lzf_compress_bound from lzfP.c, which the crate does not export:
+        // the legacy body is `length + length / 16 + 4 + 3`.
+        let bound = input.len() + input.len() / 16 + 4 + 3;
+        let mut out = vec![0u8; bound];
+        let n = compress(&input, &mut out).expect("compress");
+        assert_eq!(
+            &out[..n],
+            expected.as_slice(),
+            "compressed bytes diverged from the legacy lzf_compress"
+        );
+
+        // And it must still round-trip.
+        let mut back = vec![0u8; input.len()];
+        let m = decompress(&out[..n], &mut back).expect("decompress");
+        assert_eq!(m, input.len());
+        assert_eq!(&back[..m], input.as_slice());
+    }
+
     #[test]
     fn compress_empty_input_returns_error() {
         let input: &[u8] = b"";
@@ -462,7 +581,10 @@ mod tests {
         compressed.truncate(compressed_len);
 
         let mut output = [0u8; 5]; // Too small
-        assert_eq!(decompress(&compressed, &mut output), Err(LzfError::OutputTooSmall));
+        assert_eq!(
+            decompress(&compressed, &mut output),
+            Err(LzfError::OutputTooSmall)
+        );
     }
 
     #[test]

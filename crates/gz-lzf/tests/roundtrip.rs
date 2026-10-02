@@ -1,6 +1,6 @@
 //! Integration tests for gz-lzf: round-trip, edge cases, and known vectors.
 
-use gz_lzf::{compress, decompress, LzfError};
+use gz_lzf::{LzfError, compress, decompress};
 
 // ============================================================
 // Round-trip tests
@@ -258,7 +258,10 @@ fn decompress_output_too_small() {
     compressed.truncate(n);
 
     let mut output = [0u8; 3];
-    assert_eq!(decompress(&compressed, &mut output), Err(LzfError::OutputTooSmall));
+    assert_eq!(
+        decompress(&compressed, &mut output),
+        Err(LzfError::OutputTooSmall)
+    );
 }
 
 #[test]
@@ -355,7 +358,10 @@ fn known_vector_abab() {
 
 #[test]
 fn round_trip_various_sizes() {
-    for size in [1, 2, 3, 4, 5, 7, 8, 15, 16, 17, 31, 32, 33, 63, 64, 65, 127, 128, 129, 255, 256, 257, 511, 512, 513, 1023, 1024, 1025] {
+    for size in [
+        1, 2, 3, 4, 5, 7, 8, 15, 16, 17, 31, 32, 33, 63, 64, 65, 127, 128, 129, 255, 256, 257, 511,
+        512, 513, 1023, 1024, 1025,
+    ] {
         let input: Vec<u8> = (0..size).map(|i| (i % 256) as u8).collect();
         let mut compressed = vec![0u8; size * 2 + 100];
         let n = compress(&input, &mut compressed).unwrap();
@@ -382,7 +388,11 @@ fn round_trip_various_patterns() {
         let m = decompress(&compressed, &mut decompressed).unwrap();
         decompressed.truncate(m);
 
-        assert_eq!(decompressed, input, "zeros round-trip failed for size {}", size);
+        assert_eq!(
+            decompressed, input,
+            "zeros round-trip failed for size {}",
+            size
+        );
     }
 
     // All same byte
@@ -396,12 +406,18 @@ fn round_trip_various_patterns() {
         let m = decompress(&compressed, &mut decompressed).unwrap();
         decompressed.truncate(m);
 
-        assert_eq!(decompressed, input, "same-byte round-trip failed for size {}", size);
+        assert_eq!(
+            decompressed, input,
+            "same-byte round-trip failed for size {}",
+            size
+        );
     }
 
     // Alternating pattern
     for size in [1, 10, 100, 1000] {
-        let input: Vec<u8> = (0..size).map(|i| if i % 2 == 0 { b'A' } else { b'B' }).collect();
+        let input: Vec<u8> = (0..size)
+            .map(|i| if i % 2 == 0 { b'A' } else { b'B' })
+            .collect();
         let mut compressed = vec![0u8; size * 2 + 100];
         let n = compress(&input, &mut compressed).unwrap();
         compressed.truncate(n);
@@ -410,7 +426,11 @@ fn round_trip_various_patterns() {
         let m = decompress(&compressed, &mut decompressed).unwrap();
         decompressed.truncate(m);
 
-        assert_eq!(decompressed, input, "alternating round-trip failed for size {}", size);
+        assert_eq!(
+            decompressed, input,
+            "alternating round-trip failed for size {}",
+            size
+        );
     }
 }
 
@@ -422,7 +442,12 @@ fn compress_never_expands_beyond_input_plus_overhead() {
     let n = compress(&input, &mut compressed).unwrap();
 
     // Compressed should not exceed input + 104% (per lzf.h docs)
-    assert!(n <= input.len() + input.len() / 16 + 64, "compressed too large: {} vs input {}", n, input.len());
+    assert!(
+        n <= input.len() + input.len() / 16 + 64,
+        "compressed too large: {} vs input {}",
+        n,
+        input.len()
+    );
 }
 
 #[test]
