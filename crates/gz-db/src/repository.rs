@@ -78,6 +78,10 @@ pub trait AccountRepository: Send + Sync {
 }
 
 /// PostgreSQL implementation of [`AccountRepository`].
+///
+/// Cheap to clone: `sqlx::PgPool` is itself an `Arc` around the connection
+/// pool, so cloning shares it. The front service clones one per connection.
+#[derive(Clone)]
 pub struct PgAccountRepository {
     pool: PgPool,
 }

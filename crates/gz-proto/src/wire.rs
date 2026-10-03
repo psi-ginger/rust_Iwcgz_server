@@ -307,12 +307,6 @@ mod tests {
     #[test]
     fn reader_reports_truncation() {
         let mut r = Reader::new(&[1, 2, 3]);
-        assert_eq!(
-            r.i32(),
-            Err(WireError::Truncated {
-                needed: 4,
-                have: 3
-            })
-        );
+        assert_eq!(r.i32(), Err(WireError::Truncated { needed: 4, have: 3 }));
     }
 }

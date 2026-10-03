@@ -274,6 +274,13 @@ dependencies = [
 [[package]]
 name = "front"
 version = "0.0.1"
+dependencies = [
+ "gz-cipher",
+ "gz-db",
+ "gz-net",
+ "gz-proto",
+ "tokio",
+]
 
 [[package]]
 name = "futures-channel"
@@ -388,6 +395,7 @@ name = "gz-db"
 version = "0.0.1"
 dependencies = [
  "async-trait",
+ "sha2",
  "sqlx",
  "tokio",
 ]
@@ -863,6 +871,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "985e7ec9bb745e6ce6535b544d84d6cd6f7ad8bd711c398938ae983b91a766d9"
 dependencies = [
  "unicode-ident",
+]
+
+[[package]]
+name = "protoclient"
+version = "0.0.1"
+dependencies = [
+ "gz-cipher",
+ "gz-net",
+ "gz-proto",
+ "tokio",
 ]
 
 [[package]]

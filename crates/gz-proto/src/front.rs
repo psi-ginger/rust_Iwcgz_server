@@ -256,7 +256,11 @@ mod tests {
 
     #[test]
     fn secret_key_is_ten_bytes_on_the_wire() {
-        let payload = SecretKey { key1: 0xAA, key2: 0xBB }.encode();
+        let payload = SecretKey {
+            key1: 0xAA,
+            key2: 0xBB,
+        }
+        .encode();
         assert_eq!(payload.len(), SECRET_KEY_PAYLOAD_LEN);
         assert_eq!(payload, vec![0, 0, 0xAA, 0, 0xBB]);
         assert_eq!(payload.len() + HEADER_SIZE, 10);

@@ -1,0 +1,11 @@
+[package]
+name = "protoclient"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[dependencies]
+gz-cipher = { path = "../../crates/gz-cipher" }
+gz-net = { path = "../../crates/gz-net" }
+gz-proto = { path = "../../crates/gz-proto" }
+tokio = { version = "1", features = ["full"] }
