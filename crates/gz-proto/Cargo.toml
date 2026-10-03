@@ -5,3 +5,6 @@ edition.workspace = true
 publish = false
 
 [dependencies]
+# Only for `HEADER_SIZE`, so the payload codecs and the framing layer cannot
+# drift apart. gz-net does not depend on gz-proto, so this is acyclic.
+gz-net = { path = "../gz-net" }

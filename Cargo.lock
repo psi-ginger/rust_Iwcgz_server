@@ -416,6 +416,9 @@ dependencies = [
 [[package]]
 name = "gz-proto"
 version = "0.0.1"
+dependencies = [
+ "gz-net",
+]
 
 [[package]]
 name = "gz-sim"
