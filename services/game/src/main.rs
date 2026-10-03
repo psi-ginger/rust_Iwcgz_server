@@ -20,6 +20,7 @@
 //!
 //! Environment: `DATABASE_URL`, `GAME_LISTEN`.
 
+use std::borrow::Cow;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use gz_cipher::Cipher;
@@ -27,7 +28,7 @@ use gz_db::{
     AccountRepository, CharacterRepository, PgAccountRepository, PgCharacterRepository,
     RepositoryError,
 };
-use gz_net::{Frame, FrameParser, HEADER_SIZE};
+use gz_net::{COMPRESSION_FLAG, Frame, FrameParser, HEADER_SIZE, MAX_FRAME_SIZE};
 use gz_proto::game::{CharListEntry, CharUnique, GameLogin, decode_select_char};
 use gz_proto::opcodes_game::GameMsg;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -119,18 +120,17 @@ async fn handle_client(
                 return Ok(());
             }
 
-            let cmd = u16::from_le_bytes([plain[3], plain[4]]);
-            let payload = &plain[HEADER_SIZE..];
+            let (cmd, payload) = deframe(&plain)?;
             println!("game: {peer}: recv opcode {cmd} ({} bytes)", payload.len());
 
             match cmd {
                 c if c == GameMsg::RequestLogin as u16 => {
-                    let login = GameLogin::decode(payload)?;
+                    let login = GameLogin::decode(payload.as_ref())?;
                     handle_game_login(&mut stream, &mut outbound, &accounts, &characters, &login)
                         .await?;
                 }
                 c if c == GameMsg::RequestSelectchar as u16 => {
-                    let slot = decode_select_char(payload)?;
+                    let slot = decode_select_char(payload.as_ref())?;
                     // World entry (serverinfo + make-char-info + village
                     // structure) is Stage 4; log so the gap is visible.
                     println!("game: {peer}: selectchar slot {slot} (world entry pending)");
@@ -139,6 +139,34 @@ async fn handle_client(
             }
         }
     }
+}
+
+/// Splits a decrypted frame into `(opcode, payload)`, decompressing when asked.
+///
+/// The client LZF-compresses every game-link frame of 200 bytes or more and
+/// marks it with bit 15 of `usCmd` (`Client-Winsock.cpp:178-196`). The legacy
+/// consumer decompresses and clears the flag before dispatch
+/// (`GameProtocol.cpp:109-141`); without this the opcode reads as
+/// `real | 0x8000` (e.g. `MAKENEWCHAR` 7 arrives as 32775). The front link
+/// never compresses (`SendFrontServerMsg` has no LZF step), so only the game
+/// service needs this.
+///
+/// # Errors
+///
+/// [`gz_lzf::LzfError`] if a flagged body is not a valid LZF stream, which the
+/// caller treats as a fatal desync like a cipher failure.
+fn deframe(plain: &[u8]) -> Result<(u16, Cow<'_, [u8]>), AnyError> {
+    let cmd = u16::from_le_bytes([plain[3], plain[4]]);
+    if cmd & COMPRESSION_FLAG == 0 {
+        return Ok((cmd, Cow::Borrowed(&plain[HEADER_SIZE..])));
+    }
+
+    // A decompressed body can be no larger than the biggest frame a peer may
+    // send, so size the scratch from the framing ceiling rather than guessing.
+    let mut body = vec![0u8; MAX_FRAME_SIZE - HEADER_SIZE];
+    let n = gz_lzf::decompress(&plain[HEADER_SIZE..], &mut body)?;
+    body.truncate(n);
+    Ok((cmd & !COMPRESSION_FLAG, Cow::Owned(body)))
 }
 
 /// S9–S11: verify the game login and answer with one char-list packet per slot.
@@ -250,4 +278,45 @@ fn hash_now() -> u64 {
         .hash(&mut hasher);
     std::thread::current().id().hash(&mut hasher);
     hasher.finish()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn deframe_leaves_an_uncompressed_body_alone() {
+        let plain = Frame::new(GameMsg::RequestSelectchar as u16, &7i32.to_le_bytes())
+            .unwrap()
+            .into_bytes();
+        let (cmd, payload) = deframe(&plain).unwrap();
+        assert_eq!(cmd, GameMsg::RequestSelectchar as u16);
+        assert_eq!(payload.as_ref(), 7i32.to_le_bytes().as_slice());
+    }
+
+    #[test]
+    fn deframe_decompresses_and_clears_the_flag() {
+        // The client compresses game frames >= 200 bytes and sets bit 15
+        // (`Client-Winsock.cpp:178-196`); the real client's MAKENEWCHAR arrived
+        // as opcode 32775, i.e. 7 | 0x8000.
+        let body = vec![0x41u8; 400];
+        let mut compressed = vec![0u8; body.len() * 2];
+        let n = gz_lzf::compress(&body, &mut compressed).unwrap();
+        compressed.truncate(n);
+
+        assert!(compressed.len() < 200, "test body should compress");
+
+        let total = HEADER_SIZE + compressed.len();
+        let mut plain = vec![0u8; total];
+        plain[..2].copy_from_slice(&(total as u16).to_le_bytes());
+        plain[2] = 0;
+        plain[3..5].copy_from_slice(
+            &(GameMsg::RequestMakenewchar as u16 | COMPRESSION_FLAG).to_le_bytes(),
+        );
+        plain[HEADER_SIZE..].copy_from_slice(&compressed);
+
+        let (cmd, payload) = deframe(&plain).unwrap();
+        assert_eq!(cmd, GameMsg::RequestMakenewchar as u16);
+        assert_eq!(payload.as_ref(), body.as_slice());
+    }
 }

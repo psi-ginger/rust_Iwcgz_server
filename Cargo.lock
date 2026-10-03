@@ -359,6 +359,7 @@ version = "0.0.1"
 dependencies = [
  "gz-cipher",
  "gz-db",
+ "gz-lzf",
  "gz-net",
  "gz-proto",
  "tokio",

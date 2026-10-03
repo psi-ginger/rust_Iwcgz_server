@@ -16,8 +16,12 @@ ON CONFLICT (username) DO UPDATE
       gender        = EXCLUDED.gender,
       status        = EXCLUDED.status;
 
+-- class_kind must be non-zero. The client's char-select treats a slot as
+-- occupied only when `clBI.GetKind()` (`uiKind` @ offset 26) is > 0
+-- (`NSelectChar.cpp:736,923`); kind 0 renders as an empty slot even though the
+-- server sent a character. 1 = KIND_HERO1 (male), matching gender 1.
 INSERT INTO characters (account_id, slot, name, class_kind, gender, map_id, pos_x, pos_y)
-SELECT account_id, 0, 'Tester', 0, 0, 1, 100, 100
+SELECT account_id, 0, 'Tester', 1, 1, 1, 100, 100
 FROM accounts
 WHERE username = 'test'
 ON CONFLICT (account_id, slot) DO UPDATE
