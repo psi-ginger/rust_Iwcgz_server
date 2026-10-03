@@ -1,0 +1,8 @@
+﻿case,atk_level,def_level,atk_agi,def_agi,legacy_hit_pct,legacy_dodge_pct,legacy_effective_hit_pct,proposed_effective_hit_pct
+even,10,10,15,15,73.3,3.3,73.3,70.0
+even,50,50,30,30,78.4,8.4,78.4,70.0
+player -50 lv,50,100,30,30,58.8,14.25,58.8,67.0
+player +50 lv,100,50,30,30,100.0,6.3,100.0,73.0
+player -100 lv,100,200,50,50,42.5,31.5,42.5,64.0
+low agi vs heavy dodge,50,85,20,60,63.19,18.68,63.19,60.7
+high agi vs low dodge,50,85,60,20,69.13,10.22,69.13,75.1

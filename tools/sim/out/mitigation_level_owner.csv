@@ -1,0 +1,7 @@
+﻿case,def_value,level_reading,level_used,proposed_rate_pct
+L100 player DEF=771 vs L78 monster,771,Level=0 (ignored),0,52.41
+L100 player DEF=771 vs L78 monster,771,monster level,78,14.35
+L100 player DEF=771 vs L78 monster,771,player level,100,11.91
+L80 R8 target vs AC=550,550,Level=0 (ignored),0,44.0
+L80 R8 target vs AC=550,550,monster level 80,80,10.47
+L80 R8 target vs AC=550,550,player level 80,80,10.47

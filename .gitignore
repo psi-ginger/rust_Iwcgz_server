@@ -16,3 +16,7 @@ crates/gz-net/reference/ground_truth.json
 # legacy source snapshots next to it ARE committed, so a later change to the
 # legacy tree cannot silently invalidate a comparison.
 tools/lzf-oracle/build/
+
+# T-014 combat simulator: Python bytecode cache is a build artifact.
+__pycache__/
+*.pyc
