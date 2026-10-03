@@ -4,7 +4,9 @@
 //! so it can be swapped later (PostgreSQL → MySQL → SQLite) without
 //! touching callers. M1 scope: accounts only.
 
+pub mod character;
 pub mod password;
 pub mod repository;
 
+pub use character::{CharacterRepository, CharacterSummary, PgCharacterRepository};
 pub use repository::{Account, AccountRepository, PgAccountRepository, RepositoryError};

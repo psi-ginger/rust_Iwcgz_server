@@ -356,6 +356,13 @@ dependencies = [
 [[package]]
 name = "game"
 version = "0.0.1"
+dependencies = [
+ "gz-cipher",
+ "gz-db",
+ "gz-net",
+ "gz-proto",
+ "tokio",
+]
 
 [[package]]
 name = "generic-array"

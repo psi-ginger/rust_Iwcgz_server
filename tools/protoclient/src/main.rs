@@ -10,8 +10,9 @@
 //! Defaults: `127.0.0.1:5700 test test`.
 
 use gz_cipher::Cipher;
-use gz_net::{Frame, FrameParser};
+use gz_net::{Frame, FrameParser, HEADER_SIZE};
 use gz_proto::opcodes_front::FrontMsg;
+use gz_proto::opcodes_game::GameMsg;
 use gz_proto::wire::{Reader, Writer};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -90,7 +91,79 @@ async fn main() -> Result<(), AnyError> {
     let port = u16::from_le_bytes([entry[44], entry[45]]);
     println!("probe: world {world_id} {world_name:?} -> {ip}:{port}");
 
-    println!("probe: front path OK");
+    // S7: reconnect to the game server the world list advertised.
+    let game_addr = format!("{ip}:{port}");
+    println!("probe: connecting to game server {game_addr}");
+    let mut game = TcpStream::connect(&game_addr).await?;
+    let mut gparser = FrameParser::new();
+    let mut gbuf = [0u8; 8192];
+    // Server->client is encoded with the fixed link cipher; client->server uses
+    // the session cipher keyed by CLIENTCHARUNIQUE.
+    let mut link_rx = Cipher::link_cipher();
+
+    // S8: CLIENTCHARUNIQUE.
+    let (cmd, plain) = read_game_frame(&mut game, &mut gparser, &mut gbuf, &mut link_rx).await?;
+    expect_game_cmd(cmd, GameMsg::ResponseClientcharunique)?;
+    let mut r = Reader::new(&plain[HEADER_SIZE..]);
+    let char_unique = r.i32()?;
+    let gkey1 = r.u8()?;
+    let gkey2 = r.u8()?;
+    let gversion = r.i16()?;
+    println!("probe: charunique={char_unique} key=({gkey1:#04x}, {gkey2:#04x}) version={gversion}");
+    if gversion > 1 {
+        return Err(format!("server advertises version {gversion}; client is 1").into());
+    }
+    let mut session_tx = Cipher::session_cipher(gkey1, gkey2);
+
+    // S9: game login.
+    let mut w = Writer::with_capacity(48);
+    w.i32(auth_key);
+    w.fixed_str(&user, 20);
+    w.fixed_str(&password, 20);
+    w.u8(0);
+    w.pad(3);
+    send_game_encoded(
+        &mut game,
+        &mut session_tx,
+        GameMsg::RequestLogin,
+        &w.finish(),
+    )
+    .await?;
+
+    // S10/S11: one char-list packet per slot (occupied or empty).
+    let mut occupied = 0;
+    for _ in 0..3 {
+        let (cmd, plain) =
+            read_game_frame(&mut game, &mut gparser, &mut gbuf, &mut link_rx).await?;
+        expect_game_cmd(cmd, GameMsg::ResponseCharlist)?;
+        let p = &plain[HEADER_SIZE..];
+        let slot = p[24];
+        let character_id = i32::from_le_bytes([p[76], p[77], p[78], p[79]]);
+        let name = Reader::new(&p[80..100]).fixed_str(20).unwrap_or_default();
+        let level = i16::from_le_bytes([p[844], p[845]]);
+        if character_id != 0 {
+            occupied += 1;
+            println!("probe: slot {slot}: char {character_id} {name:?} level {level}");
+        } else {
+            println!("probe: slot {slot}: empty");
+        }
+    }
+    println!("probe: character list has {occupied} character(s)");
+
+    // S12: select the first character. The world-entry response (serverinfo +
+    // make-char-info + village structure) is Stage 4, so nothing comes back.
+    let mut w = Writer::with_capacity(4);
+    w.i32(0);
+    send_game_encoded(
+        &mut game,
+        &mut session_tx,
+        GameMsg::RequestSelectchar,
+        &w.finish(),
+    )
+    .await?;
+    println!("probe: selectchar sent (world entry pending)");
+
+    println!("probe: front + game login path OK");
     Ok(())
 }
 
@@ -140,5 +213,43 @@ fn expect_cmd(frame: &Frame, expected: FrontMsg) -> Result<(), AnyError> {
         Ok(())
     } else {
         Err(format!("expected opcode {}, got {}", expected as u16, frame.cmd()).into())
+    }
+}
+
+async fn read_game_frame(
+    stream: &mut TcpStream,
+    parser: &mut FrameParser,
+    buf: &mut [u8],
+    link: &mut Cipher,
+) -> Result<(u16, Vec<u8>), AnyError> {
+    let frame = read_frame(stream, parser, buf).await?;
+    let wire = frame.as_bytes();
+    let mut plain = vec![0u8; wire.len()];
+    if !link.decode(wire, &mut plain)? {
+        return Err("game link cipher integrity mismatch".into());
+    }
+    let cmd = u16::from_le_bytes([plain[3], plain[4]]);
+    Ok((cmd, plain))
+}
+
+async fn send_game_encoded(
+    stream: &mut TcpStream,
+    cipher: &mut Cipher,
+    cmd: GameMsg,
+    payload: &[u8],
+) -> Result<(), AnyError> {
+    let frame = Frame::new(cmd as u16, payload)?;
+    let wire = frame.into_bytes();
+    let enciphered = cipher.encode(&wire)?;
+    stream.write_all(&enciphered).await?;
+    stream.flush().await?;
+    Ok(())
+}
+
+fn expect_game_cmd(cmd: u16, expected: GameMsg) -> Result<(), AnyError> {
+    if cmd == expected as u16 {
+        Ok(())
+    } else {
+        Err(format!("expected game opcode {}, got {}", expected as u16, cmd).into())
     }
 }
