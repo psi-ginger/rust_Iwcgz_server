@@ -35,6 +35,37 @@ pub struct CharacterSummary {
     pub exp: i64,
 }
 
+/// The character fields world entry (`GAMEMSG_RESPONSE_LOGIN`'s
+/// `clMakeCharInfo`) needs beyond the char-list summary: the save position and
+/// home village. Kept separate so the 984-byte char-list path stays lean.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CharacterFull {
+    /// `clPerson.siPersonID`.
+    pub character_id: i32,
+    /// `szName[20]`.
+    pub name: String,
+    /// `clBI.uiKind`.
+    pub class_kind: i16,
+    /// `clBI.uiSex` (`1` male, `0` female).
+    pub gender: i16,
+    /// `cltPIPInfo.siLevel`.
+    pub level: i16,
+    /// `cltPIPInfo.Life`.
+    pub max_life: i32,
+    /// `cltPIPInfo.Mana`.
+    pub max_mana: i32,
+    /// `cltPIPInfo.siExp`.
+    pub exp: i64,
+    /// Last saved map (the `MapData` index sent as `uiMapIndex`).
+    pub map_id: i32,
+    /// Last saved tile x (`uiX`, 10 bits).
+    pub pos_x: i32,
+    /// Last saved tile y (`uiY`, 10 bits).
+    pub pos_y: i32,
+    /// Home village (`siHomeVillageUnique`).
+    pub school_id: i16,
+}
+
 /// The character storage interface.
 #[async_trait]
 pub trait CharacterRepository: Send + Sync {
@@ -43,6 +74,17 @@ pub trait CharacterRepository: Send + Sync {
         &self,
         account_id: i32,
     ) -> Result<Vec<CharacterSummary>, RepositoryError>;
+
+    /// Returns the live character occupying `slot`, for world entry.
+    ///
+    /// # Errors
+    ///
+    /// [`RepositoryError::Database`] if the query fails.
+    async fn find_by_slot(
+        &self,
+        account_id: i32,
+        slot: i16,
+    ) -> Result<Option<CharacterFull>, RepositoryError>;
 }
 
 /// PostgreSQL implementation. Cheap to clone (shares the pool).
@@ -115,5 +157,67 @@ impl CharacterRepository for PgCharacterRepository {
                 },
             )
             .collect())
+    }
+
+    async fn find_by_slot(
+        &self,
+        account_id: i32,
+        slot: i16,
+    ) -> Result<Option<CharacterFull>, RepositoryError> {
+        type Row = (
+            i32,
+            String,
+            i16,
+            i16,
+            i16,
+            i32,
+            i32,
+            i64,
+            i32,
+            i32,
+            i32,
+            i16,
+        );
+        let row = sqlx::query_as::<_, Row>(
+            "SELECT c.character_id, c.name, c.class_kind, c.gender, s.level, \
+                    s.max_life, s.max_mana, s.exp, c.map_id, c.pos_x, c.pos_y, c.school_id \
+             FROM characters c \
+             JOIN character_stats s ON s.character_id = c.character_id \
+             WHERE c.account_id = $1 AND c.slot = $2 AND c.deleted_at IS NULL",
+        )
+        .bind(account_id)
+        .bind(slot)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(row.map(
+            |(
+                character_id,
+                name,
+                class_kind,
+                gender,
+                level,
+                max_life,
+                max_mana,
+                exp,
+                map_id,
+                pos_x,
+                pos_y,
+                school_id,
+            )| CharacterFull {
+                character_id,
+                name,
+                class_kind,
+                gender,
+                level,
+                max_life,
+                max_mana,
+                exp,
+                map_id,
+                pos_x,
+                pos_y,
+                school_id,
+            },
+        ))
     }
 }

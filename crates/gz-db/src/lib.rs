@@ -8,5 +8,5 @@ pub mod character;
 pub mod password;
 pub mod repository;
 
-pub use character::{CharacterRepository, CharacterSummary, PgCharacterRepository};
+pub use character::{CharacterFull, CharacterRepository, CharacterSummary, PgCharacterRepository};
 pub use repository::{Account, AccountRepository, PgAccountRepository, RepositoryError};

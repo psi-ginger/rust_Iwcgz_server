@@ -11,6 +11,7 @@
 
 use gz_cipher::Cipher;
 use gz_net::{Frame, FrameParser, HEADER_SIZE};
+use gz_proto::game::MAKE_CHAR_INFO_PAYLOAD_LEN;
 use gz_proto::opcodes_front::FrontMsg;
 use gz_proto::opcodes_game::GameMsg;
 use gz_proto::wire::{Reader, Writer};
@@ -152,8 +153,7 @@ async fn main() -> Result<(), AnyError> {
     }
     println!("probe: character list has {occupied} character(s)");
 
-    // S12: select the first character. The world-entry response (serverinfo +
-    // make-char-info + village structure) is Stage 4, so nothing comes back.
+    // S12/S13: select the first character and drive world entry.
     let mut w = Writer::with_capacity(4);
     w.i32(0);
     send_game_encoded(
@@ -163,9 +163,63 @@ async fn main() -> Result<(), AnyError> {
         &w.finish(),
     )
     .await?;
-    println!("probe: selectchar sent (world entry pending)");
 
-    println!("probe: front + game login path OK");
+    // SERVERINFO, then RESPONSE_LOGIN carrying the 592-byte clMakeCharInfo.
+    let (cmd, plain) = read_game_frame(&mut game, &mut gparser, &mut gbuf, &mut link_rx).await?;
+    expect_game_cmd(cmd, GameMsg::ResponseServerinfo)?;
+    let service_area = i16::from_le_bytes([plain[HEADER_SIZE], plain[HEADER_SIZE + 1]]);
+    println!(
+        "probe: serverinfo ({} bytes) service_area={service_area}",
+        plain.len() - HEADER_SIZE
+    );
+
+    let (cmd, plain) = read_game_frame(&mut game, &mut gparser, &mut gbuf, &mut link_rx).await?;
+    expect_game_cmd(cmd, GameMsg::ResponseLogin)?;
+    let p = &plain[HEADER_SIZE..];
+    if p.len() != MAKE_CHAR_INFO_PAYLOAD_LEN {
+        return Err(format!(
+            "response-login body is {} bytes, expected {MAKE_CHAR_INFO_PAYLOAD_LEN}",
+            p.len()
+        )
+        .into());
+    }
+    let type_kind = u32::from_le_bytes([p[0], p[1], p[2], p[3]]);
+    let make_char_unique = u16::from_le_bytes([p[4], p[5]]);
+    let level = p[6];
+    let life_x = u32::from_le_bytes([p[8], p[9], p[10], p[11]]);
+    let y_map_speed = u32::from_le_bytes([p[12], p[13], p[14], p[15]]);
+    let life = life_x & 0xF_FFFF;
+    let x = (life_x >> 20) & 0x3FF;
+    let y = y_map_speed & 0x3FF;
+    let map_index = (y_map_speed >> 10) & 0x3FF;
+    println!(
+        "probe: login char unique={make_char_unique} kind={} level={level} life={life} map={map_index} ({x},{y})",
+        type_kind >> 1
+    );
+    if u16::try_from(char_unique).unwrap_or(0) != make_char_unique {
+        return Err("make-char unique does not match the session charunique".into());
+    }
+
+    // The dev character sits in Village01 (map index 1), whose client-side
+    // `siVillageUnique` is 1; the client blocks movement until this reply.
+    let mut w = Writer::with_capacity(4);
+    w.i32(1);
+    send_game_encoded(
+        &mut game,
+        &mut session_tx,
+        GameMsg::RequestVillagestruct,
+        &w.finish(),
+    )
+    .await?;
+    let (cmd, plain) = read_game_frame(&mut game, &mut gparser, &mut gbuf, &mut link_rx).await?;
+    expect_game_cmd(cmd, GameMsg::ResponseVillagestruct)?;
+    let village = i16::from_le_bytes([plain[HEADER_SIZE], plain[HEADER_SIZE + 1]]);
+    println!(
+        "probe: village {village} structure ({} bytes) received",
+        plain.len() - HEADER_SIZE
+    );
+
+    println!("probe: front + game login path OK; world entry OK");
     Ok(())
 }
 

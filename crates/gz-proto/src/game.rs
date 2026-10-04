@@ -33,6 +33,31 @@ pub const CHAR_LIST_PAYLOAD_LEN: usize = 984;
 /// `sizeof(cltGameMsgResponse_ServerInfo)`. `MsgType-System.h:1168-1233`.
 pub const SERVER_INFO_PAYLOAD_LEN: usize = 48;
 
+/// `sizeof(cltMakeCharInfo)`, the `GAMEMSG_RESPONSE_LOGIN` (opcode 5) body.
+///
+/// **Binary-authoritative = 592 (`0x250`).** The shipped client's `PushChar`
+/// (`0x4697A0`) copies `0x94` dwords and `PopChar` (`0x469720`) walks the buffer
+/// with stride `0x250`. The source snapshot's `cltMakeCharInfo` derives 524 from
+/// an older revision, so it must not be trusted here.
+pub const MAKE_CHAR_INFO_PAYLOAD_LEN: usize = 592;
+
+/// `sizeof(cltGameMsgResponse_VillageStruct)`: `SI16 VillageUnique` +
+/// `SI16 siVillageStructureInfo[MAX_CONSTRUCTION_NUM]` = `2 + 10*2`.
+/// `MsgType.h:3085-3104`.
+pub const VILLAGE_STRUCT_PAYLOAD_LEN: usize = 22;
+
+/// `MAX_CONSTRUCTION_NUM` (`CommonHeader.h:590`) — building slots per village.
+pub const MAX_CONSTRUCTION_NUM: usize = 10;
+
+/// `MAX_VILLAGE_NUMBER` (`CommonHeader.h:583`). The legacy server rejects a
+/// village-structure request unless `1 <= ref < MAX_VILLAGE_NUMBER`
+/// (`Server-System.cpp:2998`).
+pub const MAX_VILLAGE_NUMBER: i16 = 100;
+
+/// `MAKECHARTYPE_PC` (`CommonHeader.h:1893`) — `cltMakeCharInfo.uiType` for a
+/// player character.
+pub const MAKECHARTYPE_PC: u32 = 1;
+
 /// `GAMEMSG_RESPONSE_CLIENTCHARUNIQUE` (opcode 1). `char.cpp:5212-5219`.
 ///
 /// The advertised version is `CLIENT_COMPAT_VERSION = 1`, **not** the build
@@ -253,6 +278,143 @@ impl ServerInfo {
     }
 }
 
+/// `cltMakeCharInfo` (opcode 5 `GAMEMSG_RESPONSE_LOGIN`) — the full character
+/// record that makes the client create its avatar and enter the world.
+///
+/// **Field offsets are the shipped binary's, not the source snapshot's.** The
+/// struct is 592 bytes; `PushChar` (`0x4697A0`) copies `0x94` dwords and
+/// `PopChar` (`0x469720`) strides `0x250`. Confirmed offsets:
+///
+/// | offset | field |
+/// |--------|-------|
+/// | `0x00` | `uiType:1` (bit 0), `uiMakeCharKind:16` (bits 1–16) |
+/// | `0x04` | `uiMakeCharUnique:16`, `uiLevel:8` (bits 16–23) |
+/// | `0x08` | `uiLife:20` (bits 0–19), `uiX:10` (bits 20–29) |
+/// | `0x0C` | `uiY:10` (bits 0–9), `uiMapIndex:10` (bits 10–19), `uiTotalMoveSpeed:6` (bits 20–25) |
+/// | `0x10` | `siHomeVillageUnique` |
+/// | `0x12` | `siJimCharUnique` |
+/// | `0x50` | `siCurrentShowHorse` |
+/// | `0x51` | `siGameMasterLevel` |
+/// | `0x52` | `siMapUnique` |
+/// | `0x54` | `clShapeEquip` |
+/// | `0x84` | `clRank` |
+/// | `0x92` | `siMakeAniType` |
+/// | `0x94` | `clGuildRank` |
+///
+/// Unset fields are zero. All-zero `clShapeEquip` means "nothing equipped"; the
+/// avatar appearance comes from `uiMakeCharKind` (the character's class kind).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MakeCharInfo {
+    /// `uiMakeCharUnique` — must equal the session `char_unique` the client got
+    /// in opcode 1, and be `< MAX_SETCHAR_RESERVE_NUMBER` (the client indexes
+    /// `CharUniqueInfo[uiMakeCharUnique]`).
+    pub make_char_unique: u16,
+    /// `uiMakeCharKind` — the class/kind id (same as the char-list `uiKind`).
+    pub make_char_kind: u16,
+    /// `uiLevel`.
+    pub level: u8,
+    /// `uiLife` — current life (20 bits).
+    pub life: u32,
+    /// `uiX` — map tile x (10 bits).
+    pub x: u16,
+    /// `uiY` — map tile y (10 bits).
+    pub y: u16,
+    /// `uiMapIndex` — the `MapData` index the client loads (10 bits). Must
+    /// match the client's `clUnitMapInfo` row or `SetCharReservedChar` skips it.
+    pub map_index: u16,
+    /// `uiTotalMoveSpeed` — base movement speed (6 bits).
+    pub total_move_speed: u8,
+    /// `siHomeVillageUnique`.
+    pub home_village_unique: u8,
+    /// `siGameMasterLevel`.
+    pub game_master_level: u8,
+    /// `siMapUnique` — 0 lets the client resolve it from its own `MapData`
+    /// (`MapManager.cpp:958`).
+    pub map_unique: i16,
+    /// `siMakeAniType` — personal make-item animation type.
+    pub make_ani_type: i16,
+}
+
+impl MakeCharInfo {
+    /// Encodes the 592-byte body.
+    #[must_use]
+    pub fn encode(&self) -> Vec<u8> {
+        let mut w = Writer::with_capacity(MAKE_CHAR_INFO_PAYLOAD_LEN);
+
+        // 0x00: uiType:1 | uiMakeCharKind:16 (declared order = low bits first).
+        let type_kind = (MAKECHARTYPE_PC & 0x1) | ((u32::from(self.make_char_kind) & 0xFFFF) << 1);
+        w.u32(type_kind);
+
+        // 0x04: uiMakeCharUnique:16 | uiLevel:8.
+        w.u16(self.make_char_unique);
+        w.u8(self.level);
+        w.pad(1); // 0x07
+
+        // 0x08: uiLife:20 | uiX:10.
+        let life_x = (self.life & 0xF_FFFF) | ((u32::from(self.x) & 0x3FF) << 20);
+        w.u32(life_x);
+
+        // 0x0C: uiY:10 | uiMapIndex:10 | uiTotalMoveSpeed:6.
+        let y_map_speed = (u32::from(self.y) & 0x3FF)
+            | ((u32::from(self.map_index) & 0x3FF) << 10)
+            | ((u32::from(self.total_move_speed) & 0x3F) << 20);
+        w.u32(y_map_speed);
+
+        w.u8(self.home_village_unique); // 0x10
+        w.pad(1); // 0x11
+        w.u16(0); // 0x12: siJimCharUnique
+        w.pad(0x50 - 0x14); // 0x14..0x50
+
+        w.u8(0); // 0x50: siCurrentShowHorse
+        w.u8(self.game_master_level); // 0x51
+        w.i16(self.map_unique); // 0x52
+        w.pad(0x92 - 0x54); // 0x54..0x92: clShapeEquip + clRank
+
+        w.i16(self.make_ani_type); // 0x92
+        w.pad(MAKE_CHAR_INFO_PAYLOAD_LEN - 0x94); // 0x94..0x250: clGuildRank + tail
+
+        debug_assert_eq!(w.len(), MAKE_CHAR_INFO_PAYLOAD_LEN);
+        w.finish()
+    }
+}
+
+/// `cltGameMsgResponse_VillageStruct` (opcode 1102). Sent in answer to
+/// `GAMEMSG_REQUEST_VILLAGESTRUCT` (1101) so the client stops waiting
+/// (`SetCharReservedChar` refuses to pop while `bWaitVillageStructureInfoSwitch`
+/// is set, `Client-SetChar.cpp:66`). All-zero structure info renders an empty
+/// village. `MsgType.h:3085-3104`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VillageStruct {
+    /// `VillageUnique` — the requested village ref.
+    pub village_unique: i16,
+    /// `siVillageStructureInfo[MAX_CONSTRUCTION_NUM]`.
+    pub structure_info: [i16; MAX_CONSTRUCTION_NUM],
+}
+
+impl VillageStruct {
+    /// Encodes the 22-byte body.
+    #[must_use]
+    pub fn encode(&self) -> Vec<u8> {
+        let mut w = Writer::with_capacity(VILLAGE_STRUCT_PAYLOAD_LEN);
+        w.i16(self.village_unique);
+        for slot in self.structure_info {
+            w.i16(slot);
+        }
+        debug_assert_eq!(w.len(), VILLAGE_STRUCT_PAYLOAD_LEN);
+        w.finish()
+    }
+}
+
+/// `GAMEMSG_REQUEST_VILLAGESTRUCT` (opcode 1101) — a bare `SI32` village ref
+/// (`Server-System.cpp:2997` reads `siData32[0]`).
+///
+/// # Errors
+///
+/// [`WireError::Truncated`] if fewer than 4 bytes are present.
+pub fn decode_village_struct_request(payload: &[u8]) -> Result<i32, WireError> {
+    Reader::new(payload).i32()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -347,6 +509,63 @@ mod tests {
         assert_eq!(
             i64::from_le_bytes(payload[16..24].try_into().unwrap()),
             1000
+        );
+    }
+
+    #[test]
+    fn make_char_info_places_binary_confirmed_offsets() {
+        let info = MakeCharInfo {
+            make_char_unique: 1234,
+            make_char_kind: 1,
+            level: 10,
+            life: 40,
+            x: 25,
+            y: 13,
+            map_index: 1,
+            total_move_speed: 8,
+            home_village_unique: 0,
+            game_master_level: 0,
+            map_unique: 0,
+            make_ani_type: 0,
+        };
+        let payload = info.encode();
+        assert_eq!(payload.len(), MAKE_CHAR_INFO_PAYLOAD_LEN);
+        assert_eq!(payload.len() + HEADER_SIZE, 597);
+
+        // 0x00: uiType=1 (bit0) | uiMakeCharKind=1 (bits1-16).
+        let type_kind = u32::from_le_bytes(payload[0..4].try_into().unwrap());
+        assert_eq!(type_kind & 0x1, MAKECHARTYPE_PC);
+        assert_eq!(type_kind >> 1, 1);
+
+        // 0x04: uiMakeCharUnique:16 | uiLevel:8.
+        assert_eq!(u16::from_le_bytes([payload[4], payload[5]]), 1234);
+        assert_eq!(payload[6], 10);
+
+        // 0x08: uiLife:20 | uiX:10.
+        let life_x = u32::from_le_bytes(payload[8..12].try_into().unwrap());
+        assert_eq!(life_x & 0xF_FFFF, 40);
+        assert_eq!(life_x >> 20, 25);
+
+        // 0x0C: uiY:10 | uiMapIndex:10 | uiTotalMoveSpeed:6.
+        let y_map_speed = u32::from_le_bytes(payload[12..16].try_into().unwrap());
+        assert_eq!(y_map_speed & 0x3FF, 13);
+        assert_eq!((y_map_speed >> 10) & 0x3FF, 1);
+        assert_eq!((y_map_speed >> 20) & 0x3F, 8);
+    }
+
+    #[test]
+    fn village_struct_is_27_bytes_on_the_wire() {
+        let body = VillageStruct {
+            village_unique: 1,
+            structure_info: [0; MAX_CONSTRUCTION_NUM],
+        }
+        .encode();
+        assert_eq!(body.len(), VILLAGE_STRUCT_PAYLOAD_LEN);
+        assert_eq!(body.len() + HEADER_SIZE, 27);
+        assert_eq!(i16::from_le_bytes([body[0], body[1]]), 1);
+        assert_eq!(
+            decode_village_struct_request(&3i32.to_le_bytes()).unwrap(),
+            3
         );
     }
 
