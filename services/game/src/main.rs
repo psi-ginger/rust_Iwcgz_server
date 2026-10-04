@@ -39,9 +39,14 @@ type AnyError = Box<dyn std::error::Error + Send + Sync>;
 const DEFAULT_DATABASE_URL: &str = "postgres://postgres:Moon@2020@localhost:5432/goonzu";
 const DEFAULT_LISTEN: &str = "0.0.0.0:4010";
 
-/// `MAX_TOTAL_CHAR_PER_USER` — the legacy sends one char-list packet for every
-/// slot, occupied or not (`ServerDB-Person.cpp:1560-1606`).
-const CHAR_SLOTS: i16 = 3;
+/// `MAX_TOTAL_CHAR_PER_USER` (3 main + 12 char-house) — the legacy sends one
+/// char-list packet for every slot, occupied or not
+/// (`ServerDB-Person.cpp:1560-1606`). **All 15 are required:** the shipped
+/// client's `IsReadyCharList` (`0x737120`) AND-reduces `clBI.GetIndex() == i`
+/// across `i in 0..0xF` and only self-heals the missing slots after a long
+/// timeout — sending fewer than 15 is what makes char-select stall. The array
+/// is 15 entries (`PutCharList` `0x48D040` rejects `GetIndex() > 14`).
+const CHAR_SLOTS: i16 = 15;
 
 /// `CLIENT_COMPAT_VERSION` (`char.cpp:5180`). The client quits if this is
 /// higher than its own build, so it must not track the real build number.

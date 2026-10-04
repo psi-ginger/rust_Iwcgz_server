@@ -22,7 +22,13 @@ pub const GAME_LOGIN_PAYLOAD_LEN: usize = 48;
 pub const SELECT_CHAR_PAYLOAD_LEN: usize = 4;
 
 /// `sizeof(cltCharListInfo)`. `Char-Common.h:453-471`.
-pub const CHAR_LIST_PAYLOAD_LEN: usize = 896;
+///
+/// **Binary-authoritative = 984.** The shipped `New Era.exe` indexes this array
+/// with stride `0x3D8` (`imul ..., 0x3D8` at `0x48D000`, `0x48D05A`, `0x68E094`,
+/// `0x68FAF6`, `0x73714F`, …) and `PutCharList` (`0x48D040`) copies `0xF6`
+/// dwords = 984 bytes. The source snapshot derives 832 for `cltPBasicInfo`
+/// (old revision); the binary's is 904, so this supersedes the old 896/912.
+pub const CHAR_LIST_PAYLOAD_LEN: usize = 984;
 
 /// `sizeof(cltGameMsgResponse_ServerInfo)`. `MsgType-System.h:1168-1233`.
 pub const SERVER_INFO_PAYLOAD_LEN: usize = 48;
@@ -92,7 +98,7 @@ impl GameLogin {
     }
 }
 
-/// One `cltCharListInfo` (opcode 3), sent once per occupied slot.
+/// One `cltCharListInfo` (opcode 3), sent once per slot (15 total).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CharListEntry {
     /// `clBI.siIDNum` — the owning account's `idnum`.
@@ -120,13 +126,18 @@ pub struct CharListEntry {
 }
 
 impl CharListEntry {
-    /// Encodes the 896-byte body. Unset fields are zero, which the client reads
+    /// Encodes the 984-byte body. Unset fields are zero, which the client reads
     /// as "no deletion pending" (`DelCharTime == 0`) and "no wealth/guild".
+    ///
+    /// Offsets are the shipped binary's, not the source's: `cltPBasicInfo` is
+    /// 904 bytes so `clIP` begins at 904, which puts `siLevel` at 932 (the
+    /// `%s(Lv.%d)` render reads `[&clBI + 0x3A4]` = `[clIP + 0x1C]`, `0x68F265`
+    /// / `0x6905A9`) and `DelCharTime` at 968 (`[&clBI + 0x3C8]`, `0x68E15C`).
     #[must_use]
     pub fn encode(&self) -> Vec<u8> {
         let mut w = Writer::with_capacity(CHAR_LIST_PAYLOAD_LEN);
 
-        // cltPBasicInfo (816 bytes, align 8).
+        // cltPBasicInfo (904 bytes, align 8).
         w.i32(self.account_idnum); // 0..4
         w.fixed_str(&self.account_id, 20); // 4..24
         w.u8(self.slot); // 24
@@ -135,22 +146,22 @@ impl CharListEntry {
         w.pad(76 - 28); // 28..76: home village, rank, switches, clPos, school, wealth
         w.i32(self.character_id); // 76..80
         w.fixed_str(&self.name, 20); // 80..100
-        w.pad(816 - 100); // 100..816: father/recommender, services, PVP, naming...
+        w.pad(904 - 100); // 100..904: father/recommender, services, PVP, naming, attendance, empire...
 
-        // cltPIPInfo (64 bytes, align 8).
-        w.pad(28); // 816..844: seven basic abilities
-        w.i16(self.level); // 844..846
-        w.i16(0); // 846: siBonus
-        w.i32(self.life); // 848..852
-        w.i32(self.mana); // 852..856
-        w.i64(self.exp); // 856..864
-        w.i16(0); // 864: siFameLevel
-        w.i16(0); // 866: siSkillBonus
-        w.i32(0); // 868..872: siFameExp
-        w.i64(0); // 872..880: siMoney
+        // cltPIPInfo (64 bytes, align 8) @ 904.
+        w.pad(28); // 904..932: seven basic abilities
+        w.i16(self.level); // 932..934
+        w.i16(0); // 934: siBonus
+        w.i32(self.life); // 936..940
+        w.i32(self.mana); // 940..944
+        w.i64(self.exp); // 944..952
+        w.i16(0); // 952: siFameLevel
+        w.i16(0); // 954: siSkillBonus
+        w.i32(0); // 956..960: siFameExp
+        w.i64(0); // 960..968: siMoney
 
         // DelCharTime SYSTEMTIME (16 bytes; all-zero = not delete-pending).
-        w.pad(16); // 880..896
+        w.pad(16); // 968..984
 
         debug_assert_eq!(w.len(), CHAR_LIST_PAYLOAD_LEN);
         w.finish()
@@ -278,22 +289,22 @@ mod tests {
     }
 
     #[test]
-    fn char_list_entry_is_896_bytes_with_name_and_level_placed() {
+    fn char_list_entry_is_984_bytes_with_name_and_level_placed() {
         let entry = sample_entry();
         let bytes = entry.encode();
         assert_eq!(bytes.len(), CHAR_LIST_PAYLOAD_LEN);
-        assert_eq!(bytes.len() + HEADER_SIZE, 901);
+        assert_eq!(bytes.len() + HEADER_SIZE, 989);
         assert_eq!(&bytes[4..13], b"test_acct");
         assert_eq!(bytes[24], 3); // slot
         assert_eq!(u16::from_le_bytes([bytes[26], bytes[27]]), 7); // kind
         assert_eq!(&bytes[80..91], b"Hero Person");
-        assert_eq!(i16::from_le_bytes([bytes[844], bytes[845]]), 12); // level
+        assert_eq!(i16::from_le_bytes([bytes[932], bytes[933]]), 12); // level
         assert_eq!(
-            i32::from_le_bytes([bytes[848], bytes[849], bytes[850], bytes[851]]),
+            i32::from_le_bytes([bytes[936], bytes[937], bytes[938], bytes[939]]),
             40
         );
         assert_eq!(
-            i64::from_le_bytes(bytes[856..864].try_into().unwrap()),
+            i64::from_le_bytes(bytes[944..952].try_into().unwrap()),
             1234
         );
     }

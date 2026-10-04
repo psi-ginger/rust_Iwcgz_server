@@ -130,9 +130,10 @@ async fn main() -> Result<(), AnyError> {
     )
     .await?;
 
-    // S10/S11: one char-list packet per slot (occupied or empty).
+    // S10/S11: one char-list packet per slot (occupied or empty). The client
+    // requires all `MAX_TOTAL_CHAR_PER_USER` = 15 (`IsReadyCharList`, 0x737120).
     let mut occupied = 0;
-    for _ in 0..3 {
+    for _ in 0..15 {
         let (cmd, plain) =
             read_game_frame(&mut game, &mut gparser, &mut gbuf, &mut link_rx).await?;
         expect_game_cmd(cmd, GameMsg::ResponseCharlist)?;
@@ -140,7 +141,8 @@ async fn main() -> Result<(), AnyError> {
         let slot = p[24];
         let character_id = i32::from_le_bytes([p[76], p[77], p[78], p[79]]);
         let name = Reader::new(&p[80..100]).fixed_str(20).unwrap_or_default();
-        let level = i16::from_le_bytes([p[844], p[845]]);
+        // `clIP.siLevel` sits at &clBI + 0x3A4 = 932 (binary-authoritative).
+        let level = i16::from_le_bytes([p[932], p[933]]);
         if character_id != 0 {
             occupied += 1;
             println!("probe: slot {slot}: char {character_id} {name:?} level {level}");

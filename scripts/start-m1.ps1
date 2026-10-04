@@ -19,8 +19,18 @@ foreach ($exe in @("front.exe", "game.exe")) {
     }
 }
 
-Start-Process -FilePath (Join-Path $bin "front.exe") -WorkingDirectory $root
-Start-Process -FilePath (Join-Path $bin "game.exe") -WorkingDirectory $root
+# Each service writes its stdout/stderr to a file under target\m1-logs so the
+# opcode trace survives after the windows are closed (target\ is git-ignored).
+$logDir = Join-Path $root "target\m1-logs"
+New-Item -ItemType Directory -Force -Path $logDir | Out-Null
 
-Write-Host "front listening on :5700, game on :4010."
+$front = Start-Process -FilePath (Join-Path $bin "front.exe") -WorkingDirectory $root `
+    -RedirectStandardOutput (Join-Path $logDir "front.log") `
+    -RedirectStandardError (Join-Path $logDir "front.err.log") -PassThru
+$game = Start-Process -FilePath (Join-Path $bin "game.exe") -WorkingDirectory $root `
+    -RedirectStandardOutput (Join-Path $logDir "game.log") `
+    -RedirectStandardError (Join-Path $logDir "game.err.log") -PassThru
+
+Write-Host "front pid $($front.Id) listening on :5700, game pid $($game.Id) on :4010."
+Write-Host "Logs: $logDir\front.log, $logDir\game.log (+ .err.log)."
 Write-Host "Point the client at 127.0.0.1 and log in as test / test."
