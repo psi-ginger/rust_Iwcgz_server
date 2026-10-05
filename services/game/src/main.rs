@@ -62,6 +62,7 @@ mod config;
 mod generated_capture;
 mod generated_frames;
 mod import_capture;
+mod world_entry;
 
 use config::{GameConfig, Prologue};
 
@@ -442,21 +443,33 @@ async fn handle_client(
                     }
                     live.character_id = Some(character_id.character_id);
                     // The world bulk after char-select. Capture mode replays it;
-                    // live mode sends nothing yet, because generating it from
-                    // `characters.map_id`/`pos_x`/`pos_y` is T-017's card. See
-                    // `Prologue` for why the two cannot be mixed today.
-                    if cfg.prologue == Prologue::Capture {
-                        replay(
-                            &mut stream,
-                            &mut outbound,
-                            generated_capture::PROLOGUE_TAIL,
-                            "world-entry prologue",
-                            &live,
-                            // The character's first delivery of these frames, and
-                            // the prologue carries no ALLCHARINFOONE anyway.
-                            false,
-                        )
-                        .await?;
+                    // live mode generates it (T-017). See `Prologue` for why the
+                    // two cannot be mixed today.
+                    match cfg.prologue {
+                        Prologue::Capture => {
+                            replay(
+                                &mut stream,
+                                &mut outbound,
+                                generated_capture::PROLOGUE_TAIL,
+                                "world-entry prologue",
+                                &live,
+                                // The character's first delivery of these frames,
+                                // and the prologue carries no ALLCHARINFOONE
+                                // anyway.
+                                false,
+                            )
+                            .await?
+                        }
+                        Prologue::Live => {
+                            send_world_entry(
+                                &mut stream,
+                                &mut outbound,
+                                char_unique,
+                                &items,
+                                character_id.character_id,
+                            )
+                            .await?
+                        }
                     }
                 }
                 c if c == GameMsg::RequestItemsplit as u16 => {
@@ -1585,6 +1598,57 @@ async fn replay(
             Some(generated) => send_raw(stream, cipher, cmd, &generated).await?,
             None => send_raw(stream, cipher, cmd, body).await?,
         }
+    }
+    Ok(())
+}
+
+/// Sends the generated world-entry sequence. The `Prologue::Live` counterpart
+/// to [`replay`].
+///
+/// # Errors
+///
+/// Propagates any cipher or socket failure from [`send_raw`]; a write failure
+/// ends the session. [`world_entry::prologue`] itself panics only on a
+/// programmer error in the frame it is handed.
+async fn send_world_entry(
+    stream: &mut TcpStream,
+    cipher: &mut Cipher,
+    char_unique: i32,
+    items: &PgItemRepository,
+    character_id: i32,
+) -> Result<(), AnyError> {
+    // `clMakeCharInfo.uiMakeCharUnique` is a 16-bit field, so the session id has
+    // to fit one; the same narrowing `handle_select_char` does.
+    let char_unique = u16::try_from(char_unique)
+        .map_err(|_| format!("session char_unique {char_unique} does not fit u16"))?;
+    // The one frame still taken from the capture: PERSONITEMINFO's item-array
+    // stride is not mapped yet. See `WorldEntry::person_item_info`. Its length
+    // is pinned by a test, so a wrong frame here fails at build time rather than
+    // desyncing the client.
+    let Some((_, captured_item_info)) = generated_capture::frames_in(63, 64).next() else {
+        return Err("the capture should hold PERSONITEMINFO at index 63".into());
+    };
+
+    let seconds = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
+    let sequence = world_entry::prologue(&world_entry::WorldEntry {
+        char_unique,
+        now: world_entry::ServerTime::from_unix_seconds(seconds),
+        person_item_info: captured_item_info,
+    });
+
+    let total: usize = sequence.iter().map(|(_, body)| body.len()).sum();
+    println!(
+        "game: generating world-entry prologue: {} frames, {total} payload bytes",
+        sequence.len()
+    );
+    let _ = (items, character_id); // used by the next slice of T-017
+
+    for (cmd, body) in sequence {
+        send_raw(stream, cipher, cmd, &body).await?;
     }
     Ok(())
 }
