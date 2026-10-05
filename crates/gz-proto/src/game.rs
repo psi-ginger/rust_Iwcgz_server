@@ -123,6 +123,50 @@ impl GameLogin {
     }
 }
 
+/// Per-slot decode of a creation request body.
+///
+/// The client sends a complete 984-byte `cltCharListInfo`; only the
+/// identity half-half of the struct's public fields are honored here
+/// because `clIP` is always re-initialized server-side (`Server-Login.cpp:260`
+/// resets clIP with default values before persisting). Offsets match
+/// [`CharListEntry::encode`].
+///
+/// # Errors
+///
+/// [`WireError::Truncated`] when the payload is shorter than the identity block.
+pub fn decode_make_new_char(payload: &[u8]) -> Result<(String, u8, u16, u8), WireError> {
+    if payload.len() < CHAR_LIST_IDENTITY_END {
+        return Err(WireError::Truncated {
+            have: payload.len(),
+            needed: CHAR_LIST_IDENTITY_END,
+        });
+    }
+    let slot = payload[24];
+    let sex = payload[25];
+    let class_kind = u16::from_le_bytes([payload[26], payload[27]]);
+    let name = decode_fixed_str(&payload[80..100])?;
+    Ok((name, sex, class_kind, slot))
+}
+
+/// `cltCharListInfo` identity region ends: `clBI.clPerson.szName[20]` occupies
+/// [80..100), so a truncated payload cannot legitimately cut inside it.
+const CHAR_LIST_IDENTITY_END: usize = 100;
+
+fn decode_fixed_str(bytes: &[u8]) -> Result<String, WireError> {
+    let end = bytes.iter().position(|b| *b == 0).unwrap_or(bytes.len());
+    // The client feeds CP949 names here; on free development, UTF-8 is lossless
+    // for ASCII names and lossy-replaces anything else instead of severing the
+    // connection.
+    Ok(String::from_utf8_lossy(&bytes[..end]).into_owned())
+}
+
+/// The 3-byte result body shared by opcode 10 and 84
+/// (`cltGameMsgResponse_DelUserChar` == `cltGameMsgResponse_PreDelUserChar`).
+#[must_use]
+pub fn encode_del_result(result: i8, reason: i8, slot: i8) -> Vec<u8> {
+    vec![result as u8, reason as u8, slot as u8]
+}
+
 /// One `cltCharListInfo` (opcode 3), sent once per slot (15 total).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CharListEntry {

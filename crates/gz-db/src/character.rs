@@ -96,6 +96,54 @@ pub trait CharacterRepository: Send + Sync {
     /// [`RepositoryError::Database`] if the query fails.
     async fn find_by_name(&self, name: &str) -> Result<Option<CharacterFull>, RepositoryError>;
 
+    /// Create a new character row for `account_id`.
+    ///
+    /// `name`, `class_kind`, `gender`, and `slot` come straight from the client's
+    /// `GAMEMSG_REQUEST_MAKENEWCHAR` (opcode 7). Returns the generated
+    /// `characters.character_id`.
+    ///
+    /// # Errors
+    ///
+    /// [`RepositoryError::Database`] if the insert fails.
+    async fn create_character(
+        &self,
+        account_id: i32,
+        name: &str,
+        class_kind: i16,
+        gender: i16,
+        slot: i16,
+    ) -> Result<i32, RepositoryError>;
+
+    /// Permanently remove the character in `slot`, cascading to child tables.
+    ///
+    /// Used by `GAMEMSG_REQUEST_DELUSERCHAR` (opcode 9), the final confirmation
+    /// step in the character-deletion dialog.
+    ///
+    /// # Errors
+    ///
+    /// [`RepositoryError::Database`] if the query fails.
+    async fn delete_character(
+        &self,
+        account_id: i32,
+        slot: i16,
+    ) -> Result<Option<i32>, RepositoryError>;
+
+    /// Set or clear the grace-period marker (`characters.deleted_at`).
+    ///
+    /// This is `GAMEMSG_REQUEST_PREDELUSERCHAR` (opcode 83) semantics in the
+    /// legacy: `predeltype = 1` marks the character for deletion, and `0`
+    /// restores it. Returns the affected character id when a row was updated.
+    ///
+    /// # Errors
+    ///
+    /// [`RepositoryError::Database`] if the query fails.
+    async fn set_delete_pending(
+        &self,
+        account_id: i32,
+        slot: i16,
+        pending: bool,
+    ) -> Result<Option<i32>, RepositoryError>;
+
     /// Returns `character_id`'s `game_unique`, allocating and persisting one the
     /// first time the character enters a world.
     ///
@@ -263,14 +311,80 @@ impl CharacterRepository for PgCharacterRepository {
         Ok(row.map(CharacterFull::from))
     }
 
+    async fn create_character(
+        &self,
+        account_id: i32,
+        name: &str,
+        class_kind: i16,
+        gender: i16,
+        slot: i16,
+    ) -> Result<i32, RepositoryError> {
+        let character_id: i32 = sqlx::query_scalar(
+            "INSERT INTO characters (account_id, slot, name, class_kind, gender) \
+             VALUES ($1, $2, $3, $4, $5) \
+             RETURNING character_id",
+        )
+        .bind(account_id)
+        .bind(slot)
+        .bind(name)
+        .bind(class_kind)
+        .bind(gender)
+        .fetch_one(&self.pool)
+        .await?;
+
+        sqlx::query("INSERT INTO character_stats (character_id) VALUES ($1)")
+            .bind(character_id)
+            .execute(&self.pool)
+            .await?;
+
+        Ok(character_id)
+    }
+
+    async fn delete_character(
+        &self,
+        account_id: i32,
+        slot: i16,
+    ) -> Result<Option<i32>, RepositoryError> {
+        let character_id: Option<i32> = sqlx::query_scalar(
+            "DELETE FROM characters WHERE account_id = $1 AND slot = $2 \
+             RETURNING character_id",
+        )
+        .bind(account_id)
+        .bind(slot)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(character_id)
+    }
+
+    async fn set_delete_pending(
+        &self,
+        account_id: i32,
+        slot: i16,
+        pending: bool,
+    ) -> Result<Option<i32>, RepositoryError> {
+        let character_id: Option<i32> = sqlx::query_scalar(
+            "UPDATE characters SET deleted_at = CASE WHEN $3 THEN now() ELSE NULL END \
+             WHERE account_id = $1 AND slot = $2 \
+             RETURNING character_id",
+        )
+        .bind(account_id)
+        .bind(slot)
+        .bind(pending)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(character_id)
+    }
+
     async fn resolve_game_unique(&self, character_id: i32) -> Result<i32, RepositoryError> {
-        if let Some(existing) = sqlx::query_scalar::<_, i32>(
+        let existing = sqlx::query_scalar::<_, Option<i32>>(
             "SELECT game_unique FROM characters WHERE character_id = $1",
         )
         .bind(character_id)
         .fetch_optional(&self.pool)
-        .await?
-        {
+        .await?;
+        if let Some(Some(existing)) = existing {
             return Ok(existing);
         }
 

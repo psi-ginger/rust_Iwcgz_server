@@ -33,7 +33,8 @@ use gz_db::{
 use gz_net::{COMPRESSION_FLAG, Frame, FrameParser, HEADER_SIZE, MAX_FRAME_SIZE};
 use gz_proto::game::{
     CharListEntry, CharUnique, GameLogin, MAX_CONSTRUCTION_NUM, MAX_VILLAGE_NUMBER, MakeCharInfo,
-    ServerInfo, VillageStruct, client_map_index, decode_select_char, decode_village_struct_request,
+    ServerInfo, VillageStruct, client_map_index, decode_make_new_char, decode_select_char,
+    decode_village_struct_request, encode_del_result,
 };
 use gz_proto::item::{
     Item, MAX_ITEM_PER_PERSON, MAX_ITEM_UNIQUE, decode_inv_drop, decode_inv_pickup,
@@ -285,6 +286,55 @@ async fn handle_client(
                     )
                     .await?;
                 }
+                c if c == GameMsg::RequestMakenewchar as u16 => {
+                    let (account_id, account_name) = login
+                        .as_ref()
+                        .map(|s| (s.account_id, s.username.clone()))
+                        .ok_or("char create before a successful game login")?;
+                    handle_make_new_char(
+                        &mut stream,
+                        &mut outbound,
+                        &characters,
+                        account_id,
+                        &account_name,
+                        payload.as_ref(),
+                    )
+                    .await?;
+                }
+                c if c == GameMsg::RequestDeluserchar as u16 => {
+                    let (account_id, account_name) = login
+                        .as_ref()
+                        .map(|s| (s.account_id, s.username.clone()))
+                        .ok_or("char delete before a successful game login")?;
+                    handle_userchar_deletion(
+                        &mut stream,
+                        &mut outbound,
+                        &characters,
+                        account_id,
+                        &account_name,
+                        GameMsg::ResponseDeluserchar,
+                        true,
+                        payload.as_ref(),
+                    )
+                    .await?;
+                }
+                c if c == GameMsg::RequestPredeluserchar as u16 => {
+                    let (account_id, account_name) = login
+                        .as_ref()
+                        .map(|s| (s.account_id, s.username.clone()))
+                        .ok_or("char predelete before a successful game login")?;
+                    handle_userchar_deletion(
+                        &mut stream,
+                        &mut outbound,
+                        &characters,
+                        account_id,
+                        &account_name,
+                        GameMsg::ResponsePredeluserchar,
+                        false,
+                        payload.as_ref(),
+                    )
+                    .await?;
+                }
                 c if c == GameMsg::RequestVillagestruct as u16 => {
                     let village_ref = decode_village_struct_request(payload.as_ref())?;
                     handle_village_struct(&mut stream, &mut outbound, village_ref).await?;
@@ -414,6 +464,9 @@ struct GameSession {
     /// The world-entered character. `None` until `REQUEST_SELECTCHAR` names one,
     /// because the client picks a slot after logging in.
     character_id: Option<i32>,
+    /// The logged-in account's name (`accounts.username`). Char-list/create
+    /// messages echo this back to the client inside `cltCharListInfo.clBI.szAccountID`.
+    username: String,
     /// Where the character stood on entering the world, used as the cell for
     /// `GAMEMSG_REQUEST_INVDROP`.
     ///
@@ -421,6 +474,58 @@ struct GameSession {
     /// movement, so it stays at the entry coordinates no matter where the player
     /// walks. A dropped item therefore lands where the character spawned.
     entry_cell: Option<DropLocation>,
+}
+
+/// Sends every slot's `cltCharListInfo` (opcode 3), zeroed for empty slots, so
+/// the client's `PutCharList` writes 15 copies and the roster dialog repaints.
+async fn send_char_list(
+    stream: &mut TcpStream,
+    outbound: &mut Cipher,
+    characters: &PgCharacterRepository,
+    account_id: i32,
+    account_name: &str,
+) -> Result<usize, AnyError> {
+    let rows = characters.list_for_account(account_id).await?;
+    let mut occupied = 0usize;
+    for slot in 0..CHAR_SLOTS {
+        let character = rows.iter().find(|c| c.slot == slot);
+        if character.is_some() {
+            occupied += 1;
+        }
+        // Empty slots are sent too, zeroed except for the index: the client's
+        // `PutCharList` copies each packet into `clCharListInfo[slot]`
+        // unconditionally (`Client.cpp:4591-4599`).
+        let entry = match character {
+            Some(c) => CharListEntry {
+                account_idnum: account_id,
+                account_id: account_name.to_owned(),
+                slot: slot as u8,
+                sex: (c.gender != 0) as u8,
+                class_kind: c.class_kind as u16,
+                character_id: c.character_id,
+                name: c.name.clone(),
+                level: c.level,
+                life: c.max_life,
+                mana: c.max_mana,
+                exp: c.exp,
+            },
+            None => CharListEntry {
+                account_idnum: 0,
+                account_id: String::new(),
+                slot: slot as u8,
+                sex: 0,
+                class_kind: 0,
+                character_id: 0,
+                name: String::new(),
+                level: 0,
+                life: 0,
+                mana: 0,
+                exp: 0,
+            },
+        };
+        send_encoded(stream, outbound, GameMsg::ResponseCharlist, &entry.encode()).await?;
+    }
+    Ok(occupied)
 }
 
 /// S9–S11: verify the game login and answer with one char-list packet per slot.
@@ -448,46 +553,14 @@ async fn handle_game_login(
         .into());
     }
 
-    let rows = characters.list_for_account(account.account_id).await?;
-    let mut occupied = 0;
-    for slot in 0..CHAR_SLOTS {
-        let character = rows.iter().find(|c| c.slot == slot);
-        if character.is_some() {
-            occupied += 1;
-        }
-        // Empty slots are sent too, zeroed except for the index: the client's
-        // `PutCharList` copies each packet into `clCharListInfo[slot]`
-        // unconditionally (`Client.cpp:4591-4599`).
-        let entry = match character {
-            Some(c) => CharListEntry {
-                account_idnum: account.account_id,
-                account_id: account.username.clone(),
-                slot: slot as u8,
-                sex: (c.gender != 0) as u8,
-                class_kind: c.class_kind as u16,
-                character_id: c.character_id,
-                name: c.name.clone(),
-                level: c.level,
-                life: c.max_life,
-                mana: c.max_mana,
-                exp: c.exp,
-            },
-            None => CharListEntry {
-                account_idnum: 0,
-                account_id: String::new(),
-                slot: slot as u8,
-                sex: 0,
-                class_kind: 0,
-                character_id: 0,
-                name: String::new(),
-                level: 0,
-                life: 0,
-                mana: 0,
-                exp: 0,
-            },
-        };
-        send_encoded(stream, outbound, GameMsg::ResponseCharlist, &entry.encode()).await?;
-    }
+    let occupied = send_char_list(
+        stream,
+        outbound,
+        characters,
+        account.account_id,
+        &account.username,
+    )
+    .await?;
 
     println!(
         "game: login ok for {:?} (account {}, auth_key {}): {occupied} character(s)",
@@ -497,6 +570,7 @@ async fn handle_game_login(
         account_id: account.account_id,
         gm_level: account.gm_level,
         character_id: None,
+        username: account.username,
         entry_cell: None,
     })
 }
@@ -699,6 +773,126 @@ async fn handle_item_split(
             &encode_person_item_info(to, &outcome.to),
         )
         .await?;
+    }
+    Ok(())
+}
+
+/// Applies `GAMEMSG_REQUEST_MAKENEWCHAR` (7): persist a new character and
+/// echo its `cltCharListInfo` with a success response (opcode 8).
+async fn handle_make_new_char(
+    stream: &mut TcpStream,
+    outbound: &mut Cipher,
+    characters: &PgCharacterRepository,
+    account_id: i32,
+    account_name: &str,
+    payload: &[u8],
+) -> Result<(), AnyError> {
+    let (name, sex, class_kind, slot) = decode_make_new_char(payload)?;
+    let character_id = characters
+        .create_character(
+            account_id,
+            &name,
+            class_kind as i16,
+            sex as i16,
+            slot as i16,
+        )
+        .await?;
+    let entry = CharListEntry {
+        account_idnum: account_id,
+        account_id: account_name.to_owned(),
+        slot,
+        sex,
+        class_kind,
+        character_id,
+        name: name.clone(),
+        level: 1,
+        life: 40,
+        mana: 20,
+        exp: 0,
+    };
+    send_encoded(
+        stream,
+        outbound,
+        GameMsg::ResponseMakenewchar,
+        &entry.encode(),
+    )
+    .await?;
+    println!("game: created char {name:?} id={character_id} slot={slot} for account {account_id}");
+    Ok(())
+}
+
+/// Applies `GAMEMSG_REQUEST_DELUSERCHAR` (9) and
+/// `GAMEMSG_REQUEST_PREDELUSERCHAR` (83): the final "yes, delete" and the
+/// grace-mark request. Both reach the same slot-clear response (opcodes 10/84).
+#[allow(clippy::too_many_arguments)]
+async fn handle_userchar_deletion(
+    stream: &mut TcpStream,
+    outbound: &mut Cipher,
+    characters: &PgCharacterRepository,
+    account_id: i32,
+    account_name: &str,
+    response_opcode: GameMsg,
+    hard_delete: bool,
+    payload: &[u8],
+) -> Result<(), AnyError> {
+    let slot = payload.first().copied().unwrap_or(0) as i16;
+    if !(0..CHAR_SLOTS).contains(&slot) {
+        println!("game: char-del slot {slot} out of range for account {account_id}");
+        send_encoded(
+            stream,
+            outbound,
+            response_opcode,
+            &encode_del_result(0, 0, slot as i8),
+        )
+        .await?;
+        return Ok(());
+    }
+
+    let affected = if hard_delete {
+        characters.delete_character(account_id, slot).await?
+    } else {
+        // `GAMEMSG_REQUEST_PREDELUSERCHAR` body is `SI08 siCharSlot;
+        // TCHAR szIdentification[12]; SI16 predeltype`. `predeltype = 1`
+        // marks the char for grace removal, `0` cancels the pending grace.
+        let deltype = if payload.len() > 13 {
+            payload[13] as u16 | ((payload.get(14).copied().unwrap_or(0) as u16) << 8)
+        } else {
+            1
+        };
+        characters
+            .set_delete_pending(account_id, slot, deltype != 0)
+            .await?
+    };
+
+    match affected {
+        Some(id) => {
+            send_encoded(
+                stream,
+                outbound,
+                response_opcode,
+                &encode_del_result(1, 0, slot as i8),
+            )
+            .await?;
+            println!("game: char-del slot {slot} id {id} for account {account_id}: done");
+            // The slot is now removed locally but the client's roster dialog
+            // does not repaint until its existing cache is refreshed (no
+            // notification flows with opcode 10/84). Re-emit all 15 char-list
+            // packets so `PutCharList` rebuilds every slot and the dialog
+            // repaints without a user click. This is a dev convenience:
+            // the legacy never emitted opcode 3 outside of login.
+            let _occupied =
+                send_char_list(stream, outbound, characters, account_id, account_name).await?;
+        }
+        None => {
+            send_encoded(
+                stream,
+                outbound,
+                response_opcode,
+                &encode_del_result(0, 0, slot as i8),
+            )
+            .await?;
+            println!("game: char-del slot {slot} for account {account_id}: slot already empty");
+        }
     }
     Ok(())
 }
