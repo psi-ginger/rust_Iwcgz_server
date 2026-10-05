@@ -25,6 +25,11 @@
 //! layer can sit on top and T-009 can fuzz [`validate_size`] and the parser
 //! directly.
 //!
+//! [`session`] is the other half: the `ITZSession` state machine and the three
+//! legacy timings (10 s handshake, 7 s outbound connect, 600 ms close throttle)
+//! that T-006 left as notes and T-016 enforces. It is policy only — no I/O — so
+//! it stays dependency-free too.
+//!
 //! # Deliberate divergence: a frame must be able to hold its own header
 //!
 //! The legacy recv guard is `usPacketSize < 2` (`ITZRecvBuffer.cpp:163`), so it
@@ -45,6 +50,15 @@
 //! server's two client-facing session factories (blueprint 01 Part A §1.6). It is
 //! dead code retained for another product of the library vendor, and implementing
 //! it here would only invite an untested byte-order combination.
+
+/// The `ITZSession` lifecycle: states, the three legacy timings, and
+/// "a rejection is a disconnect". See the module docs for the legacy citations
+/// and for the one place the window differs from the source.
+pub mod session;
+
+pub use session::{
+    CLOSE_THROTTLE, CONNECT_TIMEOUT, HANDSHAKE_TIMEOUT, Rejection, Session, SessionTimeouts, Tick,
+};
 
 /// `sizeof(sPacketHeader)`: `UI16 usSize` + `UI08 ucChk` + `UI16 usCmd` under
 /// `#pragma pack(1)` (`itzbase.h:63-68`).

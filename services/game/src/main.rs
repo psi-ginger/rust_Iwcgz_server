@@ -10,15 +10,26 @@
 //! The game link is **encoded in both directions, but with different keys**
 //! (`char.cpp:5177-5219`, `GameProtocol.cpp:76`, `ITZSendBuffer.cpp:122-124`):
 //!
-//! - server → client uses `GetEncrypt2()`, the fixed link cipher (`0x12,0x34`);
+//! - server → client uses `GetEncrypt2()`, the fixed link cipher
+//!   (`ITZSession.cpp:56`);
 //! - client → server uses `GetEncrypt()`, the session cipher keyed by the two
 //!   bytes carried in `GAMEMSG_RESPONSE_CLIENTCHARUNIQUE`.
 //!
-//! So this service **encodes with [`Cipher::link_cipher`]** and **decodes with
+//! So this service **encodes with the link cipher** and **decodes with
 //! [`Cipher::session_cipher`]** — the exact mirror of the front service, which
 //! encodes with neither and decodes with the session cipher.
 //!
-//! Environment: `DATABASE_URL`, `GAME_LISTEN`.
+//! # Session lifecycle (T-016)
+//!
+//! The four `ITZSession` states, the 10 s / 7 s / 600 ms timings and the rule
+//! that a refusal is a disconnect all live in [`gz_net::session`]; this module
+//! only drives them. Two things that differ from the legacy are called out where
+//! they bite: the handshake window is measured to the first inbound frame
+//! (`gz_net::session` module docs), and the link key comes from configuration
+//! rather than a source literal ([`config`]).
+//!
+//! Environment: see [`config::GameConfig`]. `DATABASE_URL`, `GAME_LISTEN`,
+//! `GAME_LINK_KEY1`, `GAME_LINK_KEY2`.
 
 use std::borrow::Cow;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -30,7 +41,8 @@ use gz_db::{
     ItemRepository, MoveOutcome, PgAccountRepository, PgCharacterRepository, PgItemRepository,
     PickupStatus, RepositoryError, SplitStatus,
 };
-use gz_net::{COMPRESSION_FLAG, Frame, FrameParser, HEADER_SIZE, MAX_FRAME_SIZE};
+use gz_net::session::{Rejection, Session};
+use gz_net::{COMPRESSION_FLAG, Frame, FrameParser, HEADER_SIZE, MAX_FRAME_SIZE, Tick};
 use gz_proto::game::{
     CharListEntry, CharUnique, GameLogin, MAX_CONSTRUCTION_NUM, MAX_VILLAGE_NUMBER, MakeCharInfo,
     ServerInfo, VillageStruct, client_map_index, decode_make_new_char, decode_select_char,
@@ -46,12 +58,12 @@ use tokio::net::{TcpListener, TcpStream};
 
 type AnyError = Box<dyn std::error::Error + Send + Sync>;
 
+mod config;
 mod generated_capture;
 mod generated_frames;
 mod import_capture;
 
-const DEFAULT_DATABASE_URL: &str = "postgres://postgres:Moon@2020@localhost:5432/goonzu";
-const DEFAULT_LISTEN: &str = "0.0.0.0:4010";
+use config::{GameConfig, Prologue};
 
 /// `MAX_TOTAL_CHAR_PER_USER` (3 main + 12 char-house) — the legacy sends one
 /// char-list packet for every slot, occupied or not
@@ -62,18 +74,6 @@ const DEFAULT_LISTEN: &str = "0.0.0.0:4010";
 /// is 15 entries (`PutCharList` `0x48D040` rejects `GetIndex() > 14`).
 const CHAR_SLOTS: i16 = 15;
 
-/// `CLIENT_COMPAT_VERSION` (`char.cpp:5180`). The client quits if this is
-/// higher than its own build, so it must not track the real build number.
-const CLIENT_COMPAT_VERSION: i16 = 1;
-
-/// `ConstServiceArea_English` (`CommonHeader.h:102`). Must match the client's
-/// `ServiceArea.txt` (`SERVICEAREA_ENGLISH`) or `DoMsg_..._SERVERINFO` drops the
-/// packet and world entry stalls.
-const SERVICE_AREA_ENGLISH: i16 = 0x08;
-
-/// `siServerUnique` — arbitrary but stable for this single-world dev server.
-const SERVER_UNIQUE: i16 = 1;
-
 /// Base `uiTotalMoveSpeed` (6 bits).
 const BASE_MOVE_SPEED: u8 = 8;
 
@@ -81,26 +81,83 @@ const BASE_MOVE_SPEED: u8 = 8;
 /// `uiMakeCharUnique` (`SetCharReservedChar`).
 const MAX_SESSION_CHAR_UNIQUE: u64 = 19_999;
 
+/// Hands out per-session character ids in `1..=MAX_SESSION_CHAR_UNIQUE`.
+///
+/// The legacy's equivalent is `m_uiCharID`, a UI16 the session manager assigns
+/// when it binds a session (`CharServer-Session.cpp:58` passes it straight into
+/// `MakeSimpleChar`) — a connection-scoped number, not a database column. Only
+/// [`Prologue::Live`] consults this; see [`GameConfig::char_unique`].
+static NEXT_CHAR_UNIQUE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
+
+/// Next session character id, wrapping inside the client's table bound.
+///
+/// 0 is skipped: the legacy never hands out a zeroed id, and 0 collides with the
+/// "empty" pattern every zeroed capture frame carries.
+fn allocate_char_unique() -> u32 {
+    let bound = MAX_SESSION_CHAR_UNIQUE as u32 + 1;
+    let n = NEXT_CHAR_UNIQUE.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % bound;
+    if n == 0 { 1 } else { n }
+}
+
+/// A millisecond reading for [`gz_net::session::Session`], standing in for
+/// `GetTickCount()`.
+///
+/// The legacy's is a `DWORD` that wraps every 49.7 days; a `u64` millisecond
+/// count off the monotonic clock does not, which is the whole reason `Tick` is
+/// not `u32`.
+fn now_tick() -> Tick {
+    use std::sync::OnceLock;
+    use std::time::Instant;
+    static ORIGIN: OnceLock<Instant> = OnceLock::new();
+    ORIGIN.get_or_init(Instant::now).elapsed().as_millis() as u64
+}
+
 #[tokio::main]
 async fn main() -> Result<(), AnyError> {
     let database_url =
-        std::env::var("DATABASE_URL").unwrap_or_else(|_| DEFAULT_DATABASE_URL.to_string());
-    let listen = std::env::var("GAME_LISTEN").unwrap_or_else(|_| DEFAULT_LISTEN.to_string());
+        std::env::var("DATABASE_URL").unwrap_or_else(|_| config::DEFAULT_DATABASE_URL.to_string());
 
     let mut argv = std::env::args().skip(1);
     match argv.next() {
+        // `import-capture` is a database-seeding tool and touches no link, so it
+        // deliberately does not require the link key. Everything that opens a
+        // socket does.
         Some(command) => run_command(&command, &database_url, argv.collect()).await,
-        None => serve(&database_url, &listen).await,
+        None => {
+            let cfg = GameConfig::from_env()?;
+            serve(&cfg).await
+        }
     }
 }
 
 /// Accepts client connections until the process is stopped.
-async fn serve(database_url: &str, listen: &str) -> Result<(), AnyError> {
-    let accounts = PgAccountRepository::connect(database_url).await?;
-    let characters = PgCharacterRepository::connect(database_url).await?;
-    let items = PgItemRepository::connect(database_url).await?;
-    let listener = TcpListener::bind(listen).await?;
-    println!("game: listening on {listen}");
+async fn serve(cfg: &GameConfig) -> Result<(), AnyError> {
+    let accounts = PgAccountRepository::connect(&cfg.database_url).await?;
+    let characters = PgCharacterRepository::connect(&cfg.database_url).await?;
+    let items = PgItemRepository::connect(&cfg.database_url).await?;
+    let listener = TcpListener::bind(&cfg.listen).await?;
+    println!("game: listening on {}", cfg.listen);
+    println!(
+        "game: session timeouts: handshake {}ms, connect {}ms, close throttle {}ms",
+        cfg.timeouts.handshake.as_millis(),
+        cfg.timeouts.connect.as_millis(),
+        cfg.timeouts.close_throttle.as_millis()
+    );
+    println!(
+        "game: link key from configuration; prologue={:?} char_unique={}",
+        cfg.prologue,
+        match cfg.prologue {
+            Prologue::Capture => "capture-pinned".to_string(),
+            Prologue::Live => "allocated per session".to_string(),
+        }
+    );
+    if cfg.prologue == Prologue::Capture {
+        println!(
+            "game: WARNING replaying the captured world prologue; T-017 replaces this \
+             with payload-driven frames (set GAME_PROLOGUE=live to select the \
+             locally-generated path)"
+        );
+    }
 
     loop {
         let (stream, peer) = listener.accept().await?;
@@ -108,8 +165,9 @@ async fn serve(database_url: &str, listen: &str) -> Result<(), AnyError> {
         let characters = characters.clone();
         let items = items.clone();
         let peer = peer.to_string();
+        let cfg = cfg.clone();
         tokio::spawn(async move {
-            if let Err(e) = handle_client(stream, &peer, accounts, characters, items).await {
+            if let Err(e) = handle_client(stream, &peer, &cfg, accounts, characters, items).await {
                 eprintln!("game: {peer}: {e}");
             }
         });
@@ -150,27 +208,58 @@ async fn run_command(command: &str, database_url: &str, args: Vec<String>) -> Re
     }
 }
 
+/// Drives one client connection through the `ITZSession` lifecycle.
+///
+/// The state machine, the three timings and "a rejection is a disconnect" live
+/// in [`gz_net::session`]; this function supplies the socket and the dispatch.
+/// The shape of the legacy link is preserved throughout:
+///
+/// 1. **S8** — the server opens by pushing `RESPONSE_CLIENTCHARUNIQUE`. It is a
+///    one-sided greeting, not a request/answer: `SecretNCharUniqueSendOperation`
+///    generates two random key bytes, installs them on the *server's* session
+///    encryptor, and unicasts them (`char.cpp:5182-5219`). There is no
+///    `START_FLAG` exchange anywhere in the legacy tree, and nothing the client
+///    sends arrives before this.
+/// 2. **S8 → S9** — the client's `REQUEST_LOGIN` is the first inbound frame,
+///    which is what establishes the session here (see the `gz_net::session`
+///    module docs on where that differs from the legacy).
+/// 3. **S10–S13** — char-select and the world.
+///
+/// Every exit other than a clean disconnect goes through
+/// [`Session::reject`], so a refusal is structurally a disconnect: the cipher
+/// cannot be resynchronised mid-stream in any case, since both key bytes advance
+/// on every call (BUG-011's writeup).
 async fn handle_client(
     mut stream: TcpStream,
     peer: &str,
+    cfg: &GameConfig,
     accounts: PgAccountRepository,
     characters: PgCharacterRepository,
     items: PgItemRepository,
 ) -> Result<(), AnyError> {
+    let mut session_state = Session::new(cfg.timeouts);
+    if !session_state.accept(now_tick()) {
+        // Unreachable: a fresh Session is always None, and ITZSession::SetSocket
+        // has the same guard, so the legacy has the same dead branch.
+        return Err("fresh session refused its own socket".into());
+    }
+    // ITZList::push marks the session live as it enters the master list, which is
+    // what arms the 10 s watchdog.
+    session_state.set_active(true);
+
     let (key1, key2) = random_key_bytes();
 
     // S8: the client cannot send anything until it has this, and it decodes it
-    // with the fixed link cipher (which it already has).
-    let mut outbound = Cipher::link_cipher();
+    // with the link cipher, whose key comes from configuration (SEC-014).
+    let mut outbound = Cipher::session_cipher(cfg.link_key.0, cfg.link_key.1);
     // The character is not known yet — the login request that names it has not
-    // arrived — so this value cannot be read from the database here. It is
-    // pinned to the capture's character id because every per-character frame in
-    // `generated_capture` identifies its subject by this number, and the client
-    // silently discards records that do not match. `characters.game_unique`
-    // already holds the durable per-character id and `handle_select_char`
-    // cross-checks the two; the two stop being forced apart once
-    // `RESPONSE_ALLCHARINFOTWO` is generated instead of replayed.
-    let char_unique = generated_capture::CAPTURED_CHAR_UNIQUE;
+    // arrived — so this cannot be read from the database here. `Prologue::Live`
+    // allocates it per session, the way `m_uiCharID` is a connection-scoped
+    // number in the legacy; `Prologue::Capture` pins it because every replayed
+    // per-character frame identifies its subject by the capture's id and the
+    // client discards records that do not match. `characters.game_unique` holds
+    // the durable per-character id and `handle_select_char` cross-checks the two.
+    let char_unique = cfg.char_unique(allocate_char_unique()) as i32;
     send_encoded(
         &mut stream,
         &mut outbound,
@@ -179,15 +268,16 @@ async fn handle_client(
             char_unique,
             key1,
             key2,
-            version: CLIENT_COMPAT_VERSION,
+            version: cfg.client_compat_version,
         }
         .encode(),
     )
     .await?;
     println!("game: {peer}: charunique={char_unique} -> ({key1:#04x}, {key2:#04x})");
 
-    // Inbound frames use the session cipher, keyed by the bytes just sent.
-    let mut session = Cipher::session_cipher(key1, key2);
+    // Inbound frames use the negotiated session cipher, keyed by the bytes just
+    // sent -- the exact pairing at char.cpp:5177-5219.
+    let mut inbound = Cipher::session_cipher(key1, key2);
     let mut parser = FrameParser::new();
     let mut buf = [0u8; 8192];
     // Set once the game login succeeds; select-char and later opcodes need it.
@@ -202,23 +292,105 @@ async fn handle_client(
     };
 
     loop {
-        let n = stream.read(&mut buf).await?;
+        // The handshake window runs from accept to the first inbound frame. Past
+        // it, a peer that has said nothing is a silent half-open connection and
+        // gets reclaimed rather than parked forever -- the fix the legacy's
+        // 10 s check does not deliver. See gz_net::session.
+        let deadline = if session_state.state().is_active() {
+            None
+        } else {
+            Some(cfg.timeouts.handshake)
+        };
+        let n = match deadline {
+            Some(window) => match tokio::time::timeout(window, stream.read(&mut buf)).await {
+                Ok(result) => result?,
+                Err(_) => {
+                    let now = now_tick();
+                    if let Some(reason) = session_state.handshake_expired(now) {
+                        eprintln!(
+                            "game: {peer}: {} ms with no inbound frame; disconnecting ({:?})",
+                            window.as_millis(),
+                            reason
+                        );
+                    }
+                    session_state.reject(Rejection::HandshakeTimeout, now);
+                    return Ok(());
+                }
+            },
+            None => stream.read(&mut buf).await?,
+        };
         if n == 0 {
-            println!("game: {peer}: disconnected");
+            println!(
+                "game: {peer}: disconnected after {} ms",
+                now_tick().saturating_sub(session_state.since())
+            );
+            session_state.close(now_tick());
             return Ok(());
         }
-        parser.feed(&buf[..n])?;
+        parser.feed(&buf[..n]).map_err(|e| {
+            let reason = session_state.reject(Rejection::Framing(e), now_tick());
+            eprintln!("game: {peer}: framing rejection {reason:?}; disconnecting");
+            AnyError::from(e)
+        })?;
 
-        while let Some(frame) = parser.next_frame()? {
+        loop {
+            // `next_frame` is fallible and *also* reports "buffer exhausted", so
+            // the two outcomes are separated here rather than in a `while let`
+            // that would swallow the error as end-of-iteration.
+            let frame = match parser.next_frame() {
+                Ok(None) => break,
+                Ok(Some(frame)) => frame,
+                Err(e) => {
+                    let reason = session_state.reject(Rejection::Framing(e), now_tick());
+                    eprintln!("game: {peer}: framing rejection {reason:?}; disconnecting");
+                    return Ok(());
+                }
+            };
+            // The legacy promotes CONNECTED -> ESTABLISHED on the first receive,
+            // not on the first *request*; same thing here, and it is what stops
+            // the handshake deadline applying to a live session.
+            session_state.establish();
+
             let wire = frame.as_bytes();
             let mut plain = vec![0u8; wire.len()];
-            let integrity = session.decode(wire, &mut plain)?;
+            let integrity = match inbound.decode(wire, &mut plain) {
+                Ok(integrity) => integrity,
+                Err(e) => {
+                    let reason = session_state.reject(Rejection::Integrity, now_tick());
+                    eprintln!("game: {peer}: cipher error {e} ({reason:?}); disconnecting");
+                    return Ok(());
+                }
+            };
             if !integrity {
-                eprintln!("game: {peer}: cipher desync at opcode {:#06x}", frame.cmd());
+                // No resynchronise is possible: both key bytes advance on every
+                // call, so a single dropped or mis-ordered frame leaves the two
+                // ends irrecoverably out of step. The legacy reaches the same
+                // conclusion -- ITZNetIOCP.cpp:145-150 turns a FALSE from the
+                // recv guard into SESSION_STATE_DISCONNECTED.
+                let reason = session_state.reject(Rejection::Integrity, now_tick());
+                eprintln!(
+                    "game: {peer}: cipher desync at opcode {:#06x} ({reason:?}); disconnecting",
+                    frame.cmd()
+                );
                 return Ok(());
             }
 
-            let (cmd, payload) = deframe(&plain)?;
+            let (cmd, payload) = match deframe(&plain) {
+                Ok(v) => v,
+                Err(e) => {
+                    // A flagged body that is not a valid LZF stream. There is no
+                    // way to recover the stream from here, and no legacy
+                    // recovery to copy: NLZF::Decompress failing means the frame
+                    // was never decodable.
+                    let reason = session_state.reject(Rejection::Integrity, now_tick());
+                    eprintln!(
+                        "game: {peer}: LZF failure at opcode {:#06x} ({reason:?}); \
+                         disconnecting: {e}",
+                        frame.cmd()
+                    );
+                    return Ok(());
+                }
+            };
             println!("game: {peer}: recv opcode {cmd} ({} bytes)", payload.len());
 
             match cmd {
@@ -245,6 +417,7 @@ async fn handle_client(
                             &mut stream,
                             &mut outbound,
                             &characters,
+                            cfg,
                             session,
                             char_unique,
                             slot,
@@ -260,17 +433,23 @@ async fn handle_client(
                         });
                     }
                     live.character_id = Some(character_id.character_id);
-                    replay(
-                        &mut stream,
-                        &mut outbound,
-                        generated_capture::PROLOGUE_TAIL,
-                        "world-entry prologue",
-                        &live,
-                        // The character's first delivery of these frames, and the
-                        // prologue carries no ALLCHARINFOONE anyway.
-                        false,
-                    )
-                    .await?;
+                    // The world bulk after char-select. Capture mode replays it;
+                    // live mode sends nothing yet, because generating it from
+                    // `characters.map_id`/`pos_x`/`pos_y` is T-017's card. See
+                    // `Prologue` for why the two cannot be mixed today.
+                    if cfg.prologue == Prologue::Capture {
+                        replay(
+                            &mut stream,
+                            &mut outbound,
+                            generated_capture::PROLOGUE_TAIL,
+                            "world-entry prologue",
+                            &live,
+                            // The character's first delivery of these frames, and
+                            // the prologue carries no ALLCHARINFOONE anyway.
+                            false,
+                        )
+                        .await?;
+                    }
                 }
                 c if c == GameMsg::RequestItemsplit as u16 => {
                     let character_id = login
@@ -412,9 +591,20 @@ async fn handle_client(
                 c if c == GameMsg::RequestChangestatusinfo as u16 => {
                     // The reference server answers 230 with a 25-frame data
                     // block (map/object bulk, then ALLCHARINFO one/two), not
-                    // with 231. `REPLY_PLAN` mirrors that verbatim.
-                    replay_plan_step(&mut stream, &mut outbound, cmd, &mut plan_step, &live)
-                        .await?;
+                    // with 231. `REPLY_PLAN` mirrors that verbatim. In live mode
+                    // there is nothing to answer with yet -- 231, the "your
+                    // status is current" reply, is T-017's to introduce, and
+                    // sending it now would tell the client a state this server
+                    // has not computed.
+                    if cfg.prologue == Prologue::Capture {
+                        replay_plan_step(&mut stream, &mut outbound, cmd, &mut plan_step, &live)
+                            .await?;
+                    } else {
+                        println!(
+                            "game: {peer}: changestatusinfo -> no reply \
+                             (live mode; payload-driven 230 is T-017)"
+                        );
+                    }
                 }
                 // The reference server sends nothing for 246; the data the client
                 // wants arrives after 230.
@@ -585,6 +775,7 @@ async fn handle_select_char(
     stream: &mut TcpStream,
     outbound: &mut Cipher,
     characters: &PgCharacterRepository,
+    cfg: &GameConfig,
     session: &GameSession,
     char_unique: i32,
     slot: i32,
@@ -618,7 +809,7 @@ async fn handle_select_char(
         stream,
         outbound,
         GameMsg::ResponseServerinfo,
-        &default_server_info().encode(),
+        &server_info(cfg).encode(),
     )
     .await?;
 
@@ -1184,10 +1375,16 @@ async fn handle_village_struct(
 }
 
 /// The `GAMEMSG_RESPONSE_SERVERINFO` body for this single-world dev server.
-fn default_server_info() -> ServerInfo {
+///
+/// `service_area` must match the client's `ServiceArea.txt`
+/// (`SERVICEAREA_ENGLISH` → `0x08`) or `DoMsg_..._SERVERINFO` drops the packet
+/// and world entry stalls — the failure the 2026-10-05 login-alert RE traced to
+/// a *mask byte* rather than to this value. It comes from configuration so a
+/// client built for another region is a config change, not a rebuild.
+fn server_info(cfg: &GameConfig) -> ServerInfo {
     ServerInfo {
-        service_area: SERVICE_AREA_ENGLISH,
-        server_unique: SERVER_UNIQUE,
+        service_area: cfg.service_area,
+        server_unique: cfg.server_unique,
         item_mall_use: false,
         village_war: false,
         bonus_time: false,
