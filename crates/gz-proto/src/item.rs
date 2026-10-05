@@ -294,6 +294,25 @@ pub fn decode_move_item(payload: &[u8]) -> Result<(u16, u16), WireError> {
     Ok((from, to))
 }
 
+/// `cltSplitItemInfo` — the `GAMEMSG_REQUEST_ITEMSPLIT` (341) body.
+///
+/// Two `UI16`s then a signed count of how many items to move out of the source
+/// stack (`cltItem.h:437-455`; `siCount` is `SI32`). The client only sends this
+/// when the destination is empty, so a merge destination never arises in
+/// practice — but like the legacy we accept one, for the same reason the legacy
+/// does: a merge is just a partial move with a shared-unique destination.
+///
+/// # Errors
+///
+/// [`WireError::Truncated`] if the body is shorter than 8 bytes.
+pub fn decode_split_item(payload: &[u8]) -> Result<(u16, u16, i32), WireError> {
+    let mut r = Reader::new(payload);
+    let from = r.u16()?;
+    let to = r.u16()?;
+    let count = r.i32()?;
+    Ok((from, to, count))
+}
+
 /// The `GAMEMSG_RESPONSE_PERSONITEMINFO` (7210) `siOption` values this server
 /// emits. The header defines 45 of them (`MsgType.h:3356`); the drop and
 /// move-rejection paths both use plain `NONE`.

@@ -12,6 +12,6 @@ pub mod repository;
 pub use character::{CharacterFull, CharacterRepository, CharacterSummary, PgCharacterRepository};
 pub use item::{
     CharacterItem, DropLocation, DropOutcome, DropStatus, GroundClaim, ItemRepository, MoveOutcome,
-    PgItemRepository, PickupOutcome, PickupStatus, container_of,
+    PgItemRepository, PickupOutcome, PickupStatus, SplitOutcome, SplitStatus, container_of,
 };
 pub use repository::{Account, AccountRepository, PgAccountRepository, RepositoryError};

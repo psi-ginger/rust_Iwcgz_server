@@ -28,7 +28,7 @@ use gz_db::DropStatus;
 use gz_db::{
     AccountRepository, CharacterFull, CharacterRepository, DropLocation, GroundClaim,
     ItemRepository, MoveOutcome, PgAccountRepository, PgCharacterRepository, PgItemRepository,
-    PickupStatus, RepositoryError,
+    PickupStatus, RepositoryError, SplitStatus,
 };
 use gz_net::{COMPRESSION_FLAG, Frame, FrameParser, HEADER_SIZE, MAX_FRAME_SIZE};
 use gz_proto::game::{
@@ -37,7 +37,7 @@ use gz_proto::game::{
 };
 use gz_proto::item::{
     Item, MAX_ITEM_PER_PERSON, MAX_ITEM_UNIQUE, decode_inv_drop, decode_inv_pickup,
-    decode_move_item, encode_item_array, encode_person_item_info,
+    decode_move_item, decode_split_item, encode_item_array, encode_person_item_info,
 };
 use gz_proto::opcodes_game::GameMsg;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -271,9 +271,41 @@ async fn handle_client(
                     )
                     .await?;
                 }
+                c if c == GameMsg::RequestItemsplit as u16 => {
+                    let character_id = login
+                        .as_ref()
+                        .and_then(|s| s.character_id)
+                        .ok_or("item split before a character was selected")?;
+                    handle_item_split(
+                        &mut stream,
+                        &mut outbound,
+                        &items,
+                        character_id,
+                        payload.as_ref(),
+                    )
+                    .await?;
+                }
                 c if c == GameMsg::RequestVillagestruct as u16 => {
                     let village_ref = decode_village_struct_request(payload.as_ref())?;
                     handle_village_struct(&mut stream, &mut outbound, village_ref).await?;
+                }
+                c if c == GameMsg::RequestItemchange as u16 => {
+                    // The client sends 305 exactly when a drag ends on an
+                    // *occupied* slot — it is the merge/swap gesture. Legacy
+                    // parses the same cltMoveItemInfo and runs the same
+                    // sDBRequest_MoveItem path as 303, so one handler serves both.
+                    let character_id = login
+                        .as_ref()
+                        .and_then(|s| s.character_id)
+                        .ok_or("item change before a character was selected")?;
+                    handle_item_move(
+                        &mut stream,
+                        &mut outbound,
+                        &items,
+                        character_id,
+                        payload.as_ref(),
+                    )
+                    .await?;
                 }
                 c if c == GameMsg::RequestItemmove as u16 => {
                     let character_id = login
@@ -550,8 +582,13 @@ async fn handle_select_char(
     Ok(character)
 }
 
-/// Applies `GAMEMSG_REQUEST_ITEMMOVE` (303) — a drag between two slots of the
-/// character's 80-entry item array.
+/// Applies `GAMEMSG_REQUEST_ITEMMOVE` (303) and `GAMEMSG_REQUEST_ITEMCHANGE`
+/// (305) — a drag between two slots of the character's 80-entry item array.
+///
+/// Both payloads are the same `cltMoveItemInfo { uiFrom, uiTo }` and the
+/// legacy routes both to the same DB move path; the two opcodes are just the
+/// client's way to say "this move landed on an empty slot" versus "...stacked
+/// or overwrote an occupied slot".
 ///
 /// The client applies the move locally by the time it sends
 /// (`MouseOperation.cpp:2247-2249`), but the server still answers the two
@@ -609,6 +646,57 @@ async fn handle_item_move(
             outbound,
             GameMsg::ResponsePersoniteminfo,
             &encode_person_item_info(to, &new_to),
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+/// Applies `GAMEMSG_REQUEST_ITEMSPLIT` (341): moves a chosen count out of one
+/// stack into another slot.
+///
+/// Split and move share a shape because the legacy splits through the same
+/// `sDBRequest_MoveItem` DB path (`Server-Item.cpp:4400-4406`): a split is a
+/// move whose source record carries only the split count, and its reply is the
+/// same `DBMSG_RESPONSE_ITEMMOVE` → two 7210 slot rewrites as an itemmove.
+async fn handle_item_split(
+    stream: &mut TcpStream,
+    outbound: &mut Cipher,
+    items: &PgItemRepository,
+    character_id: i32,
+    payload: &[u8],
+) -> Result<(), AnyError> {
+    let (from, to, count) = decode_split_item(payload)?;
+    let outcome = items.split_slot(character_id, from, to, count).await?;
+    let detail = match outcome.status {
+        SplitStatus::Split => format!("split {count}"),
+        SplitStatus::SourceEmpty => "source slot was empty".to_string(),
+        SplitStatus::BadCount { stored, requested } => {
+            format!("source holds {stored}, cannot split {requested}")
+        }
+        SplitStatus::DestinationMismatch { stored, claimed } => {
+            format!("destination holds item {stored}, source is {claimed}")
+        }
+        SplitStatus::SelfSplit => "from == to, nothing to split".to_string(),
+    };
+    println!("game: itemsplit {from} -> {to} x{count} for character {character_id}: {detail}");
+
+    // Only a real split changes the bag; refusals are logged, matching the
+    // itemmove rules — the client asked for a visible change, and a no-op
+    // leaves its local state exactly as it was.
+    if outcome.status == SplitStatus::Split {
+        send_encoded(
+            stream,
+            outbound,
+            GameMsg::ResponsePersoniteminfo,
+            &encode_person_item_info(from, &outcome.from),
+        )
+        .await?;
+        send_encoded(
+            stream,
+            outbound,
+            GameMsg::ResponsePersoniteminfo,
+            &encode_person_item_info(to, &outcome.to),
         )
         .await?;
     }

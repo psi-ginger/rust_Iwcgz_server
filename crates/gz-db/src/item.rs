@@ -53,6 +53,42 @@ pub struct DropLocation {
     pub y: i32,
 }
 
+/// Why a [`ItemRepository::split_slot`] call was or was not applied.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SplitStatus {
+    /// The count moved into the destination (fresh stack, or a merge).
+    Split,
+    /// The source slot held nothing.
+    SourceEmpty,
+    /// The client sent a non-positive count, or more than the source holds.
+    BadCount {
+        /// Count currently in the source slot.
+        stored: u16,
+        /// Count the client asked to split off.
+        requested: i32,
+    },
+    /// The destination holds a different item; a split cannot swap.
+    DestinationMismatch {
+        /// `siUnique` the destination actually holds.
+        stored: u16,
+        /// `siUnique` the source holds.
+        claimed: u16,
+    },
+    /// `from == to`; there is nothing to split into.
+    SelfSplit,
+}
+
+/// What a [`ItemRepository::split_slot`] call did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SplitOutcome {
+    /// Why the split was or was not applied.
+    pub status: SplitStatus,
+    /// Source slot contents after the call (unchanged on refusal).
+    pub from: Item,
+    /// Destination slot contents after the call (unchanged on refusal).
+    pub to: Item,
+}
+
 /// Why a `GAMEMSG_REQUEST_INVDROP` (307) was or was not applied.
 ///
 /// The legacy names these cases by what it sends rather than by a reason code:
@@ -176,6 +212,38 @@ pub trait ItemRepository: Send + Sync {
         from: u16,
         to: u16,
     ) -> Result<MoveOutcome, RepositoryError>;
+
+    /// Applies a `GAMEMSG_REQUEST_ITEMSPLIT` (341): moves `requested` items out
+    /// of the `from` stack into `to`.
+    ///
+    /// The destination picks up one of the same two cases as an itemmove
+    /// destination: empty, in which case the count goes there wholesale, or
+    /// holding the same item, in which case the two stacks merge with the
+    /// same [`MAX_PILE`] cap and remainder semantics. A destination holding a
+    /// *different* item refuses the split — the legacy reaches the same answer
+    /// through `sDBRequest_MoveItem` with `Canpile = true` (both items
+    /// pileable), and the DB path rejects incompatible pairs instead of
+    /// swapping them.
+    ///
+    /// The client only sends 341 after finding a free destination slot, so the
+    /// merge-destination case is for robustness, not the common path.
+    ///
+    /// Every outcome carries the resulting contents of *both* slots (unchanged
+    /// on refusal), as [`DropOutcome::current`] does for a drop: the caller
+    /// needs the authoritative pair to rewrite the client's bag with the same
+    /// two `GAMEMSG_RESPONSE_PERSONITEMINFO` frames the move path sends.
+    ///
+    /// # Errors
+    ///
+    /// [`RepositoryError::Database`] if the transaction fails, or
+    /// [`RepositoryError::Invalid`] if a slot is out of range.
+    async fn split_slot(
+        &self,
+        character_id: i32,
+        from: u16,
+        to: u16,
+        requested: i32,
+    ) -> Result<SplitOutcome, RepositoryError>;
 
     /// Applies a `GAMEMSG_REQUEST_INVDROP` (307) to the stored array.
     ///
@@ -671,6 +739,175 @@ impl ItemRepository for PgItemRepository {
                 MoveOutcome::Swapped {
                     from: Item::empty(),
                     to: src_item,
+                }
+            }
+        };
+
+        tx.commit().await?;
+        Ok(outcome)
+    }
+
+    async fn split_slot(
+        &self,
+        character_id: i32,
+        from: u16,
+        to: u16,
+        requested: i32,
+    ) -> Result<SplitOutcome, RepositoryError> {
+        let bound = MAX_ITEM_PER_PERSON as u16;
+        if u32::from(from) >= u32::from(bound) || u32::from(to) >= u32::from(bound) {
+            return Err(RepositoryError::Invalid(format!(
+                "item split {from}->{to} is outside 0..{MAX_ITEM_PER_PERSON}"
+            )));
+        }
+
+        let mut tx = self.pool.begin().await?;
+
+        let Some((src_unique, src_count, src_raw)) = read_slot(&mut tx, character_id, from).await?
+        else {
+            tx.rollback().await?;
+            return Ok(SplitOutcome {
+                status: SplitStatus::SourceEmpty,
+                from: Item::empty(),
+                to: Item::empty(),
+            });
+        };
+        let src_item = Item::decode(&src_raw)
+            .map_err(|e| RepositoryError::Invalid(format!("stored record for slot {from}: {e}")))?;
+        let dest_slot = read_slot(&mut tx, character_id, to).await?;
+
+        // A self-split rearranges nothing, but answering it as success would
+        // also double the apparent stack size if the client ever merged
+        // the reply; refuse it cleanly instead.
+        if from == to {
+            tx.rollback().await?;
+            return Ok(SplitOutcome {
+                status: SplitStatus::SelfSplit,
+                from: src_item,
+                to: src_item,
+            });
+        }
+
+        let stored_count = u16::try_from(src_count).unwrap_or(0);
+        if requested <= 0 || requested > i32::from(stored_count) {
+            let current_to = match &dest_slot {
+                Some((_, _, raw)) => Item::decode(raw).map_err(|e| {
+                    RepositoryError::Invalid(format!("stored record for slot {to}: {e}"))
+                })?,
+                None => Item::empty(),
+            };
+            tx.rollback().await?;
+            return Ok(SplitOutcome {
+                status: SplitStatus::BadCount {
+                    stored: stored_count,
+                    requested,
+                },
+                from: src_item,
+                to: current_to,
+            });
+        }
+        let outcome = match dest_slot {
+            Some((dst_unique, dst_count, dst_raw)) => {
+                let dst_unique = u16::try_from(dst_unique).unwrap_or(0);
+                if dst_unique != u16::try_from(src_unique).unwrap_or(0) {
+                    tx.rollback().await?;
+                    return Ok(SplitOutcome {
+                        status: SplitStatus::DestinationMismatch {
+                            stored: dst_unique,
+                            claimed: u16::try_from(src_unique).unwrap_or(0),
+                        },
+                        from: src_item,
+                        to: Item::decode(&dst_raw).map_err(|e| {
+                            RepositoryError::Invalid(format!("stored record for slot {to}: {e}"))
+                        })?,
+                    });
+                }
+
+                // Same-item destination: merge, capped at `MAX_PILE`, the
+                // excess of the split off staying in the source.
+                let dst_item = Item::decode(&dst_raw).map_err(|e| {
+                    RepositoryError::Invalid(format!("stored record for slot {to}: {e}"))
+                })?;
+                let dst_count = u16::try_from(dst_count).unwrap_or(0);
+                let total = i32::from(dst_count) + requested;
+                let dst_new = if total > MAX_PILE { MAX_PILE } else { total };
+                // The destination absorbed only `dst_new - dst_count` from the
+                // source, so that many of the source's stored items leave it.
+                // (`total - MAX_PILE` would undercount the survivor when the
+                // legacy-style whole-stack exception does not apply.)
+                let src_rest = i32::from(stored_count) - (dst_new - i32::from(dst_count));
+
+                let mut merged = dst_item;
+                merged.set_count(dst_new as u16);
+                write_slot(
+                    &mut tx,
+                    character_id,
+                    to,
+                    src_unique,
+                    dst_new,
+                    &merged.encode(),
+                )
+                .await?;
+
+                let from_item = if src_rest == 0 {
+                    clear_slot(&mut tx, character_id, from).await?;
+                    Item::empty()
+                } else {
+                    let mut left = src_item;
+                    left.set_count(src_rest as u16);
+                    write_slot(
+                        &mut tx,
+                        character_id,
+                        from,
+                        src_unique,
+                        src_rest,
+                        &left.encode(),
+                    )
+                    .await?;
+                    left
+                };
+                SplitOutcome {
+                    status: SplitStatus::Split,
+                    from: from_item,
+                    to: merged,
+                }
+            }
+            None => {
+                // Empty destination: the split lands whole there.
+                let mut moved = src_item;
+                moved.set_count(requested as u16);
+                write_slot(
+                    &mut tx,
+                    character_id,
+                    to,
+                    src_unique,
+                    requested,
+                    &moved.encode(),
+                )
+                .await?;
+
+                let remaining = i32::from(stored_count) - requested;
+                let from_item = if remaining == 0 {
+                    clear_slot(&mut tx, character_id, from).await?;
+                    Item::empty()
+                } else {
+                    let mut left = src_item;
+                    left.set_count(remaining as u16);
+                    write_slot(
+                        &mut tx,
+                        character_id,
+                        from,
+                        src_unique,
+                        remaining,
+                        &left.encode(),
+                    )
+                    .await?;
+                    left
+                };
+                SplitOutcome {
+                    status: SplitStatus::Split,
+                    from: from_item,
+                    to: moved,
                 }
             }
         };
