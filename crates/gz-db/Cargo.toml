@@ -5,7 +5,11 @@ edition.workspace = true
 publish = false
 
 [dependencies]
-sqlx = { version = "0.8", features = ["postgres", "runtime-tokio"] }
+# `macros` is for `#[derive(sqlx::FromRow)]` only -- `query!`/`query_as!` are
+# deliberately unused, because they would need a live DATABASE_URL to compile.
+# The derive is what lets `CharacterFull`'s row be a named struct: sqlx's tuple
+# `FromRow` impls stop at 16 elements and this select has 21.
+sqlx = { version = "0.8", features = ["postgres", "runtime-tokio", "macros"] }
 tokio = { version = "1", features = ["full"] }
 async-trait = "0.1"
 sha2 = "0.10"

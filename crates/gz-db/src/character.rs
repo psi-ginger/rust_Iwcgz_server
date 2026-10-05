@@ -62,11 +62,29 @@ pub struct CharacterFull {
     pub pos_x: i32,
     /// Last saved tile y (`uiY`, 10 bits).
     pub pos_y: i32,
+    /// Character slot in the owning account (`clBI.uiIndex`).
+    pub slot: i16,
     /// Home village (`siHomeVillageUnique`).
     pub school_id: i16,
     /// The id the client knows this character by (`MyCharUnique`), or `None`
     /// until it has been taken into a world for the first time.
     pub game_unique: Option<i32>,
+    /// `cltPIPInfo.siStr`.
+    pub str: i32,
+    /// `cltPIPInfo.siDex`.
+    pub dex: i32,
+    /// `cltPIPInfo.siVit`.
+    pub vit: i32,
+    /// `cltPIPInfo.siMag`.
+    pub mag: i32,
+    /// `cltPIPInfo.siHnd`.
+    pub hnd: i32,
+    /// `cltPIPInfo.siLuk`.
+    pub luk: i32,
+    /// `cltPIPInfo.siWis`.
+    pub wis: i32,
+    /// `cltPIPInfo.siBonus` — unspent stat points.
+    pub bonus_points: i16,
 }
 
 /// The character storage interface.
@@ -191,60 +209,68 @@ impl PgCharacterRepository {
     }
 }
 
-/// The 13 columns every `CharacterFull` needs, in the order [`FULL_SELECT`]
+/// The 21 columns every [`CharacterFull`] needs, in the order [`FULL_SELECT`]
 /// lists them.
-type FullRow = (
-    i32,
-    String,
-    i16,
-    i16,
-    i16,
-    i32,
-    i32,
-    i64,
-    i32,
-    i32,
-    i32,
-    i16,
-    Option<i32>,
-);
+///
+/// A named struct rather than a tuple because sqlx's tuple `FromRow` impls stop
+/// at 16 elements. `str_` carries the `str` column, which is a Rust keyword.
+#[derive(sqlx::FromRow)]
+struct FullRow {
+    character_id: i32,
+    name: String,
+    class_kind: i16,
+    gender: i16,
+    level: i16,
+    max_life: i32,
+    max_mana: i32,
+    exp: i64,
+    map_id: i32,
+    pos_x: i32,
+    pos_y: i32,
+    slot: i16,
+    school_id: i16,
+    game_unique: Option<i32>,
+    #[sqlx(rename = "str")]
+    str_: i32,
+    dex: i32,
+    vit: i32,
+    mag: i32,
+    hnd: i32,
+    luk: i32,
+    wis: i32,
+    bonus_points: i16,
+}
 
 const FULL_SELECT: &str = "SELECT c.character_id, c.name, c.class_kind, c.gender, s.level, \
-     s.max_life, s.max_mana, s.exp, c.map_id, c.pos_x, c.pos_y, c.school_id, c.game_unique \
+     s.max_life, s.max_mana, s.exp, c.map_id, c.pos_x, c.pos_y, c.slot, c.school_id, c.game_unique, \
+     s.str, s.dex, s.vit, s.mag, s.hnd, s.luk, s.wis, s.bonus_points \
      FROM characters c JOIN character_stats s ON s.character_id = c.character_id";
 
 impl From<FullRow> for CharacterFull {
-    fn from(
-        (
-            character_id,
-            name,
-            class_kind,
-            gender,
-            level,
-            max_life,
-            max_mana,
-            exp,
-            map_id,
-            pos_x,
-            pos_y,
-            school_id,
-            game_unique,
-        ): FullRow,
-    ) -> Self {
+    fn from(row: FullRow) -> Self {
         Self {
-            character_id,
-            name,
-            class_kind,
-            gender,
-            level,
-            max_life,
-            max_mana,
-            exp,
-            map_id,
-            pos_x,
-            pos_y,
-            school_id,
-            game_unique,
+            character_id: row.character_id,
+            name: row.name,
+            class_kind: row.class_kind,
+            gender: row.gender,
+            level: row.level,
+            max_life: row.max_life,
+            max_mana: row.max_mana,
+            exp: row.exp,
+            map_id: row.map_id,
+            pos_x: row.pos_x,
+            pos_y: row.pos_y,
+            slot: row.slot,
+            school_id: row.school_id,
+            game_unique: row.game_unique,
+            str: row.str_,
+            dex: row.dex,
+            vit: row.vit,
+            mag: row.mag,
+            hnd: row.hnd,
+            luk: row.luk,
+            wis: row.wis,
+            bonus_points: row.bonus_points,
         }
     }
 }

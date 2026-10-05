@@ -9,6 +9,7 @@
 //! every payload struct here is declared outside it and therefore uses MSVC
 //! default (`/Zp8`). The explicit `pad`/zero-fill calls reproduce that.
 
+use crate::item::{CLT_ITEM_SIZE, Item, ItemArrayError, MAX_ITEM_PER_PERSON, encode_item_array};
 use crate::wire::{Reader, WireError, Writer};
 
 /// `sizeof(cltGameMsgResponse_ClientCharUnique)`. `MsgType.h:3013-3027`.
@@ -198,13 +199,132 @@ impl CharListEntry {
     /// Encodes the 984-byte body. Unset fields are zero, which the client reads
     /// as "no deletion pending" (`DelCharTime == 0`) and "no wealth/guild".
     ///
-    /// Offsets are the shipped binary's, not the source's: `cltPBasicInfo` is
-    /// 904 bytes so `clIP` begins at 904, which puts `siLevel` at 932 (the
+    /// The first [`BASIC_INFO_LEN`] bytes come from [`BasicInfo`], the same
+    /// encoder `ALLCHARINFOONE` uses, so the two frames cannot drift apart on an
+    /// offset. Offsets are the shipped binary's, not the source's: `cltPBasicInfo`
+    /// is 904 bytes so `clIP` begins at 904, which puts `siLevel` at 932 (the
     /// `%s(Lv.%d)` render reads `[&clBI + 0x3A4]` = `[clIP + 0x1C]`, `0x68F265`
     /// / `0x6905A9`) and `DelCharTime` at 968 (`[&clBI + 0x3C8]`, `0x68E15C`).
+    ///
+    /// The seven abilities and `siBonus` are deliberately left zero rather than
+    /// seeded from `cltPIPInfoCommon::Init()` (`parametabox.h:95`, which sets
+    /// `str..luk = 5` but not `siHnd`/`siWis`). The char list is a summary and the
+    /// client does not render abilities from it; `ALLCHARINFOONE` is where they
+    /// matter, and that frame carries the real values.
     #[must_use]
     pub fn encode(&self) -> Vec<u8> {
-        let mut w = Writer::with_capacity(CHAR_LIST_PAYLOAD_LEN);
+        let mut out = BasicInfo {
+            account_idnum: self.account_idnum,
+            account_id: self.account_id.clone(),
+            slot: self.slot,
+            sex: self.sex,
+            class_kind: self.class_kind,
+            home_village: 0,
+            map_index: 0,
+            x: 0,
+            y: 0,
+            character_id: self.character_id,
+            name: self.name.clone(),
+            str_: 0,
+            dex: 0,
+            vit: 0,
+            mag: 0,
+            hnd: 0,
+            luk: 0,
+            wis: 0,
+            level: self.level,
+            bonus: 0,
+            life: self.life,
+            mana: self.mana,
+            exp: self.exp,
+        }
+        .encode();
+
+        debug_assert_eq!(out.len(), BASIC_INFO_LEN);
+        // DelCharTime SYSTEMTIME (16 bytes; all-zero = not delete-pending).
+        out.resize(CHAR_LIST_PAYLOAD_LEN, 0);
+        debug_assert_eq!(out.len(), CHAR_LIST_PAYLOAD_LEN);
+        out
+    }
+}
+
+/// `cltPBasicInfo` (904) + `cltPIPInfo` (64): the identity-and-stats block that
+/// both the char list and `ALLCHARINFOONE` open with.
+///
+/// `cltPBasicInfo` is `CommonHeader.h:2565` and `cltPIPInfo` is
+/// `Char\ParametaBox\parametabox.h`; `cltPersonInfoOne` leads with the pair in
+/// that order (`PersonInfo.h:289-290`), which is why one encoder serves both.
+pub const BASIC_INFO_LEN: usize = 904 + 64;
+
+/// The `cltPBasicInfo` + `cltPIPInfo` pair.
+///
+/// Every field here is read by the client: `clBI` is the sole thing
+/// `DoMsg_GAMEMSG_RESPONSE_ALLCHARINFOONE` writes through `SetOne`
+/// (`Client-Person.cpp:774-776` -> `PersonInfo.h:589`), and `clPos` is where the
+/// client reads its own coordinates back out of (`Char-Common.cpp:1206` ->
+/// `Common.cpp:2917`). `clIP` is `cltPIPInfoCommon`, whose `Init()` seeds
+/// `str..luk = 5` but leaves `siHnd`/`siWis` at zero (`parametabox.h:95`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BasicInfo {
+    /// `clBI.siIDNum` — the owning account's `idnum`.
+    pub account_idnum: i32,
+    /// `clBI.szAccountID[20]`.
+    pub account_id: String,
+    /// `clBI.uiIndex` — the character slot.
+    pub slot: u8,
+    /// `clBI.uiSex` (`1` male, `0` female).
+    pub sex: u8,
+    /// `clBI.uiKind` — the class/avatar id.
+    pub class_kind: u16,
+    /// `clBI.siHomeVillage`.
+    pub home_village: i8,
+    /// `clBI.clPos.siMapIndex` — the map index the client holds, not `map_id`.
+    pub map_index: i16,
+    /// `clBI.clPos.siX`.
+    pub x: i16,
+    /// `clBI.clPos.siY`.
+    pub y: i16,
+    /// `clBI.clPerson.siPersonID` — the character's own id.
+    pub character_id: i32,
+    /// `clBI.clPerson.szName[20]`.
+    pub name: String,
+    /// `clIP.siStr`.
+    pub str_: i32,
+    /// `clIP.siDex`.
+    pub dex: i32,
+    /// `clIP.siVit`.
+    pub vit: i32,
+    /// `clIP.siMag`.
+    pub mag: i32,
+    /// `clIP.siHnd`.
+    pub hnd: i32,
+    /// `clIP.siLuk`.
+    pub luk: i32,
+    /// `clIP.siWis`.
+    pub wis: i32,
+    /// `clIP.siLevel`.
+    pub level: i16,
+    /// `clIP.siBonus` — unspent stat points.
+    pub bonus: i16,
+    /// `clIP.Life`.
+    pub life: i32,
+    /// `clIP.Mana`.
+    pub mana: i32,
+    /// `clIP.siExp`.
+    pub exp: i64,
+}
+
+impl BasicInfo {
+    /// Encodes the [`BASIC_INFO_LEN`]-byte block.
+    ///
+    /// The 904/968 boundary is the shipped binary's, not the source's — the same
+    /// evidence as [`CHAR_LIST_PAYLOAD_LEN`]: `siLevel` at 932 is read as
+    /// `[&clBI + 0x3A4]` = `[clIP + 0x1C]` (`0x68F265`), and both captured
+    /// frames that carry this block agree on it (`siLevel == 0x22` at 932 in the
+    /// char list *and* in `ALLCHARINFOONE`).
+    #[must_use]
+    pub fn encode(&self) -> Vec<u8> {
+        let mut w = Writer::with_capacity(BASIC_INFO_LEN);
 
         // cltPBasicInfo (904 bytes, align 8).
         w.i32(self.account_idnum); // 0..4
@@ -212,29 +332,109 @@ impl CharListEntry {
         w.u8(self.slot); // 24
         w.u8(self.sex); // 25
         w.u16(self.class_kind); // 26..28
-        w.pad(76 - 28); // 28..76: home village, rank, switches, clPos, school, wealth
+        w.i8(self.home_village); // 28
+        w.pad(3); // 29..32: uiGRank, uiAngelSwitch, uiPoliceSwitch
+        w.i16(self.map_index); // 32..34 clPos.siMapIndex
+        w.i16(self.x); // 34..36 clPos.siX
+        w.i16(self.y); // 36..38 clPos.siY
+        w.i16(0); // 38..40 clPos.siReserved
+        w.pad(76 - 40); // 40..76: play seconds, last main map pos, school, wealth
         w.i32(self.character_id); // 76..80
         w.fixed_str(&self.name, 20); // 80..100
-        w.pad(904 - 100); // 100..904: father/recommender, services, PVP, naming, attendance, empire...
+        w.pad(904 - 100); // 100..904: father/recommender, services, PVP, naming, attendance
 
         // cltPIPInfo (64 bytes, align 8) @ 904.
-        w.pad(28); // 904..932: seven basic abilities
+        w.i32(self.str_); // 904
+        w.i32(self.dex); // 908
+        w.i32(self.vit); // 912
+        w.i32(self.mag); // 916
+        w.i32(self.hnd); // 920
+        w.i32(self.luk); // 924
+        w.i32(self.wis); // 928
         w.i16(self.level); // 932..934
-        w.i16(0); // 934: siBonus
+        w.i16(self.bonus); // 934..936
         w.i32(self.life); // 936..940
         w.i32(self.mana); // 940..944
         w.i64(self.exp); // 944..952
-        w.i16(0); // 952: siFameLevel
-        w.i16(0); // 954: siSkillBonus
-        w.i32(0); // 956..960: siFameExp
-        w.i64(0); // 960..968: siMoney
+        w.pad(BASIC_INFO_LEN - 952); // 952..968: fame, skill bonus, fame exp, money
 
-        // DelCharTime SYSTEMTIME (16 bytes; all-zero = not delete-pending).
-        w.pad(16); // 968..984
-
-        debug_assert_eq!(w.len(), CHAR_LIST_PAYLOAD_LEN);
+        debug_assert_eq!(w.len(), BASIC_INFO_LEN);
         w.finish()
     }
+}
+
+/// `sizeof(cltPersonInfoOne)` — the body of `ALLCHARINFOONE` before its four
+/// trailing `SI16`.
+///
+/// `PersonInfo.h:285-313` declares 21 sub-structs. **1.2% of the captured 9,192
+/// bytes below the identity block is non-zero**, and the rest is genuine data we
+/// hold no table for: a skill list, a horse named `Foal744`, and a passport blob.
+/// So this is emitted as a zero-fill and the identity block carries the
+/// character. See [`encode_all_char_info_one`].
+const PERSON_INFO_ONE_LEN: usize = 10_160;
+
+/// `sizeof(cltGameMsgResponse_AllCharInfoOne)` — opcode 248's body.
+/// `MsgType-Person.h:1928-1947`.
+pub const ALL_CHAR_INFO_ONE_LEN: usize = PERSON_INFO_ONE_LEN + 8;
+
+/// `sizeof(cltGameMsgResponse_AllCharInfoTwo)` — opcode 249's body.
+///
+/// `cltPersonInfoTwo` (`PersonInfo.h:414`) is `cltPItemInfo` + `cltSummonInfo`
+/// (`PersonInfo.h:420-424`), so the item array leads at offset 0.
+pub const ALL_CHAR_INFO_TWO_LEN: usize = MAX_ITEM_PER_PERSON * CLT_ITEM_SIZE + 4_240;
+
+/// Builds `GAMEMSG_RESPONSE_ALLCHARINFOONE` (248), the frame the client's
+/// `SetOne` applies wholesale to its `cltCharCommon`.
+///
+/// # Deviation from the legacy
+///
+/// The 19 sub-structs after `clIP` are zero-filled rather than echoed. That is
+/// not laziness: they hold the skill list, the horse, the summon roster and the
+/// passport, none of which `goonzu-rs` persists yet, so zero is the honest
+/// encoding of "this character has none". The reference server sends them
+/// uninitialised in part — `cltPersonInfoOne`'s constructor initialises only
+/// `uiGachaCnt` (`PersonInfo.h:340`), and the captured body carries a four-byte
+/// `f7 59` in a region it never writes, which is the same value the
+/// `PERSONITEMINFO` padding holds (`MsgType.h:3356`, `siChangedNum`+2). Zeros are
+/// strictly better than that.
+///
+/// [`encode_all_char_info_two`] is the other half of the same
+/// `REQUEST_ALLCHARINFO` burst.
+#[must_use]
+pub fn encode_all_char_info_one(
+    basic: &BasicInfo,
+    set_item_type: i16,
+    set_item_step: i16,
+    set_item_type2: i16,
+    set_item_step2: i16,
+) -> Vec<u8> {
+    let mut out = basic.encode();
+    out.resize(PERSON_INFO_ONE_LEN, 0);
+    let mut w = Writer::with_capacity(8);
+    w.i16(set_item_type);
+    w.i16(set_item_step);
+    w.i16(set_item_type2);
+    w.i16(set_item_step2);
+    out.extend_from_slice(&w.finish());
+    debug_assert_eq!(out.len(), ALL_CHAR_INFO_ONE_LEN);
+    out
+}
+
+/// Builds `GAMEMSG_RESPONSE_ALLCHARINFOTWO` (249): the whole 80-slot item array,
+/// then `cltSummonInfo` zero-filled.
+///
+/// `items` is indexed by slot; a shorter slice leaves the remaining slots empty,
+/// which is how the client's `GetTotalWeight()` (`Char-Common.cpp:2791`) sees a
+/// partially-filled inventory. `clSummonInfo` is zero for the reason given on
+/// [`encode_all_char_info_one`].
+///
+/// # Errors
+///
+/// [`ItemArrayError`] if `items` is longer than [`MAX_ITEM_PER_PERSON`].
+pub fn encode_all_char_info_two(items: &[Item]) -> Result<Vec<u8>, ItemArrayError> {
+    let mut out = vec![0u8; ALL_CHAR_INFO_TWO_LEN];
+    encode_item_array(&mut out, items)?;
+    Ok(out)
 }
 
 /// `GAMEMSG_REQUEST_SELECTCHAR` (opcode 4): a bare `SI32` slot index.

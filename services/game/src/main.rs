@@ -44,13 +44,14 @@ use gz_db::{
 use gz_net::session::{Rejection, Session};
 use gz_net::{COMPRESSION_FLAG, Frame, FrameParser, HEADER_SIZE, MAX_FRAME_SIZE, Tick};
 use gz_proto::game::{
-    CharListEntry, CharUnique, GameLogin, MAX_CONSTRUCTION_NUM, MAX_VILLAGE_NUMBER, MakeCharInfo,
-    ServerInfo, VillageStruct, client_map_index, decode_make_new_char, decode_select_char,
-    decode_village_struct_request, encode_del_result,
+    BasicInfo, CharListEntry, CharUnique, GameLogin, MAX_CONSTRUCTION_NUM, MAX_VILLAGE_NUMBER,
+    MakeCharInfo, ServerInfo, VillageStruct, client_map_index, decode_make_new_char,
+    decode_select_char, decode_village_struct_request, encode_all_char_info_one,
+    encode_all_char_info_two, encode_del_result,
 };
 use gz_proto::item::{
     Item, MAX_ITEM_PER_PERSON, MAX_ITEM_UNIQUE, decode_inv_drop, decode_inv_pickup,
-    decode_move_item, decode_split_item, encode_item_array, encode_person_item_info,
+    decode_move_item, decode_split_item, encode_person_item_info,
 };
 use gz_proto::opcodes_game::GameMsg;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -289,7 +290,9 @@ async fn handle_client(
     // Which captured frames get rebuilt from PostgreSQL on the way out.
     let mut live = LiveFrames {
         items: &items,
-        character_id: None,
+        account_id: 0,
+        account_name: String::new(),
+        character: None,
     };
 
     loop {
@@ -441,7 +444,11 @@ async fn handle_client(
                             y: character_id.pos_y,
                         });
                     }
-                    live.character_id = Some(character_id.character_id);
+                    if let Some(session) = login.as_ref() {
+                        live.account_id = session.account_id;
+                        live.account_name = session.username.clone();
+                    }
+                    live.character = Some(character_id.clone());
                     // The world bulk after char-select. Capture mode replays it;
                     // live mode generates it (T-017). See `Prologue` for why the
                     // two cannot be mixed today.
@@ -1530,11 +1537,16 @@ async fn send_raw(
 /// (`Char-Common.cpp:2791`), summing the item array that 249 carries, not a
 /// cached total held in `clBI`.
 ///
-/// The step's first delivery is untouched, and there the captured position is
-/// the truth: the character is still on the entry cell that `RESPONSE_LOGIN`
-/// placed it on. Tracking movement -- decoding `REQUEST_USERORDER`, whose
-/// `ORDER_MOVE` payload carries the destination as `x | (y << 16)` in `siPara1`
-/// (`order.h:96`) -- is what puts 248 back for re-syncs.
+/// **248 is now generated** (`LiveFrames::regenerate`), so its `clPos` is the
+/// database's `map_id`/`pos_x`/`pos_y` rather than the capture's. That is
+/// strictly better than replaying, but it does *not* retire this withholding:
+/// the database's position is where the character last logged out, not where it
+/// is standing now, so a resync would still drag the player backwards -- to a
+/// different cell than before, which is worse. Untracking is what fixes it:
+/// decoding `REQUEST_USERORDER`, whose `ORDER_MOVE` payload carries the
+/// destination as `x | (y << 16)` in `siPara1` (`order.h:96`), and persisting it,
+/// so that `clPos` is current and 248 can be replayed on re-sync like any other
+/// state frame. That is T-018.
 ///
 /// ## 116 `RESPONSE_LETTER` — it re-shows the memo dialog
 ///
@@ -1594,7 +1606,7 @@ async fn replay(
             println!("game: withholding {what} frame {cmd}: {why}");
             continue;
         }
-        match live.regenerate(cmd, body).await? {
+        match live.regenerate(cmd).await? {
             Some(generated) => send_raw(stream, cipher, cmd, &generated).await?,
             None => send_raw(stream, cipher, cmd, body).await?,
         }
@@ -1621,12 +1633,19 @@ async fn send_world_entry(
     // to fit one; the same narrowing `handle_select_char` does.
     let char_unique = u16::try_from(char_unique)
         .map_err(|_| format!("session char_unique {char_unique} does not fit u16"))?;
-    // The one frame still taken from the capture: PERSONITEMINFO's item-array
-    // stride is not mapped yet. See `WorldEntry::person_item_info`. Its length
-    // is pinned by a test, so a wrong frame here fails at build time rather than
-    // desyncing the client.
-    let Some((_, captured_item_info)) = generated_capture::frames_in(63, 64).next() else {
-        return Err("the capture should hold PERSONITEMINFO at index 63".into());
+    // `PERSONITEMINFO` is a single-slot notification. The captured one announces
+    // slot 8 as empty, so we send whatever the database holds for that slot --
+    // which for the reference character is also empty, and for any other is
+    // correct rather than a replay of someone else's inventory.
+    let slot = world_entry::PERSON_ITEM_INFO_SLOT;
+    let stored = items
+        .list(character_id)
+        .await?
+        .into_iter()
+        .find(|row| row.slot == slot);
+    let announced = match stored {
+        Some(row) => Item::decode(&row.raw)?,
+        None => Item::empty(),
     };
 
     let seconds = SystemTime::now()
@@ -1637,7 +1656,7 @@ async fn send_world_entry(
     let sequence = world_entry::prologue(&world_entry::WorldEntry {
         char_unique,
         now: world_entry::ServerTime::from_unix_seconds(seconds),
-        person_item_info: captured_item_info,
+        person_item_info: encode_person_item_info(slot, &announced).to_vec(),
     });
 
     let total: usize = sequence.iter().map(|(_, body)| body.len()).sum();
@@ -1645,7 +1664,7 @@ async fn send_world_entry(
         "game: generating world-entry prologue: {} frames, {total} payload bytes",
         sequence.len()
     );
-    let _ = (items, character_id); // used by the next slice of T-017
+    let _ = character_id; // 248/249 in the 230 burst; see `LiveFrames::regenerate`
 
     for (cmd, body) in sequence {
         send_raw(stream, cipher, cmd, &body).await?;
@@ -1723,9 +1742,16 @@ async fn replay_plan_step(
 /// accepting the burst.
 struct LiveFrames<'a> {
     items: &'a PgItemRepository,
-    /// `None` until `REQUEST_SELECTCHAR` has named the character, which is when
-    /// the burst carrying the item array is first sent.
-    character_id: Option<i32>,
+    /// Needed for 248's `clBI.siIDNum`, which is the owning account rather than
+    /// the character.
+    account_id: i32,
+    /// `clBI.szAccountID`. Captured once at login, where the account is already
+    /// authenticated, so the 230 burst needs no further lookup.
+    account_name: String,
+    /// The selected character, held from `REQUEST_SELECTCHAR` on. 248 needs its
+    /// slot, name, position and stats, and re-reading them per resync would mean
+    /// a `characters` join on every status request.
+    character: Option<CharacterFull>,
 }
 
 impl LiveFrames<'_> {
@@ -1736,14 +1762,69 @@ impl LiveFrames<'_> {
     ///
     /// [`gz_db::RepositoryError`] from the item read, or a stored record that is
     /// not a whole `cltItem`.
-    async fn regenerate(&self, cmd: u16, body: &'static [u8]) -> Result<Option<Vec<u8>>, AnyError> {
-        if cmd != GameMsg::ResponseAllcharinfotwo as u16 {
+    async fn regenerate(&self, cmd: u16) -> Result<Option<Vec<u8>>, AnyError> {
+        let is_one = cmd == GameMsg::ResponseAllcharinfoone as u16;
+        let is_two = cmd == GameMsg::ResponseAllcharinfotwo as u16;
+        if !is_one && !is_two {
             return Ok(None);
         }
-        let Some(character_id) = self.character_id else {
+        // `None` until `REQUEST_SELECTCHAR` names the character, which is when the
+        // 230 burst carrying these two frames is first sent.
+        let Some(character) = self.character.as_ref() else {
             return Ok(None);
         };
+        let character_id = character.character_id;
 
+        if is_two {
+            return Ok(Some(encode_all_char_info_two(
+                &self.item_array(character_id).await?,
+            )?));
+        }
+
+        // 248: the identity-and-stats block, from `characters` + `character_stats`.
+        let map_index = i16::try_from(client_map_index(character.map_id)).map_err(|_| {
+            format!(
+                "map {} does not fit the SI16 clPos.siMapIndex",
+                character.map_id
+            )
+        })?;
+        let basic = BasicInfo {
+            account_idnum: self.account_id,
+            account_id: self.account_name.clone(),
+            slot: character.slot as u8,
+            sex: character.gender as u8,
+            class_kind: character.class_kind as u16,
+            home_village: character.school_id as i8,
+            map_index,
+            x: character.pos_x as i16,
+            y: character.pos_y as i16,
+            character_id: character.character_id,
+            name: character.name.clone(),
+            str_: character.str,
+            dex: character.dex,
+            vit: character.vit,
+            mag: character.mag,
+            hnd: character.hnd,
+            luk: character.luk,
+            wis: character.wis,
+            level: character.level,
+            bonus: character.bonus_points,
+            life: character.max_life,
+            mana: character.max_mana,
+            exp: character.exp,
+        };
+        // The trailing four `SI16` are the capture's set-item progress: type 20
+        // step 3, both second slots zero. There is no set-item table yet.
+        Ok(Some(encode_all_char_info_one(&basic, 20, 3, 0, 0)))
+    }
+
+    /// The character's 80 slots, decoded from `character_items.raw`.
+    ///
+    /// # Errors
+    ///
+    /// [`gz_db::RepositoryError`] from the read, or a stored record that is not
+    /// a whole `cltItem`.
+    async fn item_array(&self, character_id: i32) -> Result<Vec<Item>, AnyError> {
         let stored = self.items.list(character_id).await?;
         let mut array = vec![Item::empty(); MAX_ITEM_PER_PERSON];
         for row in stored {
@@ -1756,10 +1837,7 @@ impl LiveFrames<'_> {
             };
             *cell = Item::decode(&row.raw)?;
         }
-
-        let mut regenerated = body.to_vec();
-        encode_item_array(&mut regenerated, &array)?;
-        Ok(Some(regenerated))
+        Ok(array)
     }
 }
 
@@ -1859,19 +1937,121 @@ mod tests {
     /// the importer read out of the capture, regenerating it must reproduce the
     /// captured bytes and change nothing else.
     #[test]
-    fn regenerating_the_capture_reproduces_it_byte_for_byte() {
-        use gz_proto::item::{ITEM_ARRAY_LEN, decode_item_array};
+    fn regenerating_the_capture_reproduces_the_item_array_byte_for_byte() {
+        use gz_proto::item::decode_item_array;
 
         let body = generated_capture::frame(GameMsg::ResponseAllcharinfotwo as u16)
             .expect("the capture must contain an ALLCHARINFOTWO frame");
 
         // What `LiveFrames::regenerate` does once the stored rows come back.
         let decoded = decode_item_array(body).unwrap();
-        let mut rebuilt = body.to_vec();
-        encode_item_array(&mut rebuilt, &decoded).unwrap();
+        let regenerated = encode_all_char_info_two(&decoded).unwrap();
 
-        assert_eq!(rebuilt, body);
-        assert_eq!(body.len(), ITEM_ARRAY_LEN + 4240);
+        assert_eq!(regenerated.len(), body.len(), "frame length");
+        // The first `ITEM_ARRAY_LEN` bytes must be identical: the importer read
+        // them out of this very frame, so a round trip that changed any would
+        // mean the encoder and the decoder disagree about the record layout.
+        assert_eq!(
+            &regenerated[..gz_proto::item::ITEM_ARRAY_LEN],
+            &body[..gz_proto::item::ITEM_ARRAY_LEN],
+            "regenerated item array"
+        );
+        // `clSummonInfo` is the documented deviation: the reference character
+        // owned summons (115 non-zero bytes) and we hold no table for them.
+        assert!(
+            regenerated[gz_proto::item::ITEM_ARRAY_LEN..]
+                .iter()
+                .all(|&b| b == 0)
+        );
+    }
+
+    /// The generated 248 must place its identity fields where the client reads
+    /// them, and must not carry the capture's.
+    ///
+    /// Pinned against the capture rather than by review because the failure is
+    /// invisible: every field lands somewhere, the frame is the right length, and
+    /// the client renders a plausible world built from the wrong character.
+    #[test]
+    fn generated_all_char_info_one_places_identity_and_stats() {
+        let basic = BasicInfo {
+            account_idnum: 1471,
+            account_id: "tester".into(),
+            slot: 2,
+            sex: 1,
+            class_kind: 0x1234,
+            home_village: 0,
+            map_index: 35,
+            x: 25,
+            y: 13,
+            character_id: 4242,
+            name: "Tester".into(),
+            str_: 130,
+            dex: 50,
+            vit: 5,
+            mag: 5,
+            hnd: 5,
+            luk: 5,
+            wis: 5,
+            level: 34,
+            bonus: 0,
+            life: 433,
+            mana: 20,
+            exp: 349_415,
+        };
+        let body = encode_all_char_info_one(&basic, 20, 3, 0, 0);
+        assert_eq!(body.len(), 10_168);
+
+        // `clBI.clPos` @ 32..40 -- the field the client reads its own position
+        // back out of (`Char-Common.cpp:1206`).
+        assert_eq!(
+            i16::from_le_bytes([body[32], body[33]]),
+            35,
+            "clPos.siMapIndex"
+        );
+        assert_eq!(i16::from_le_bytes([body[34], body[35]]), 25, "clPos.siX");
+        assert_eq!(i16::from_le_bytes([body[36], body[37]]), 13, "clPos.siY");
+        // `clBI.clPerson` @ 76..100.
+        assert_eq!(i32::from_le_bytes(body[76..80].try_into().unwrap()), 4242);
+        assert_eq!(&body[80..86], b"Tester");
+        // `clIP.siLevel` @ 932 -- the same offset the char list uses, which is
+        // what makes one `BasicInfo` encoder serve both frames.
+        assert_eq!(i16::from_le_bytes([body[932], body[933]]), 34);
+        assert_eq!(
+            i32::from_le_bytes(body[904..908].try_into().unwrap()),
+            130,
+            "siStr"
+        );
+        assert_eq!(
+            i64::from_le_bytes(body[944..952].try_into().unwrap()),
+            349_415
+        );
+        // Trailing set-item fields.
+        assert_eq!(i16::from_le_bytes([body[10_160], body[10_161]]), 20);
+        assert_eq!(i16::from_le_bytes([body[10_162], body[10_163]]), 3);
+
+        // The unmodelled sub-structs are the documented deviation: zero, where
+        // the capture carried the reference character's skills, horse (`Foal744`)
+        // and passport.
+        assert!(body[968..10_160].iter().all(|&b| b == 0));
+    }
+
+    /// The generated `PERSONITEMINFO` must differ from the capture only in the
+    /// two padding bytes the legacy never initialised.
+    #[test]
+    fn generated_person_item_info_differs_from_the_capture_only_in_padding() {
+        let captured = generated_capture::frame(GameMsg::ResponsePersoniteminfo as u16)
+            .expect("the capture must contain a PERSONITEMINFO frame");
+        let generated = encode_person_item_info(world_entry::PERSON_ITEM_INFO_SLOT, &Item::empty());
+
+        assert_eq!(generated.len(), captured.len());
+        let differing: Vec<usize> = (0..generated.len())
+            .filter(|&i| generated[i] != captured[i])
+            .collect();
+        // 6..8 is the `/Zp8` pad between `siChangedNum` and `siExp`; the capture
+        // holds uninitialised stack there.
+        assert_eq!(differing, vec![6, 7], "only the padding may differ");
+        // And the slot is the one the capture announced.
+        assert_eq!(i16::from_le_bytes([captured[0], captured[1]]), 8);
     }
 
     /// A re-sync has to keep the inventory refresh and lose the position reset.

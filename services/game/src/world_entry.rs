@@ -150,7 +150,7 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
 }
 
 /// The inputs the sequence needs that are not world constants.
-pub struct WorldEntry<'a> {
+pub struct WorldEntry {
     /// The session character id, written into every record that carries it.
     ///
     /// This is the **session's** id, not the character's durable
@@ -164,15 +164,20 @@ pub struct WorldEntry<'a> {
     /// The clock behind `SERVERTIME`.
     pub now: ServerTime,
 
-    /// `GAMEMSG_RESPONSE_PERSONITEMINFO`, 104 bytes.
+    /// `GAMEMSG_RESPONSE_PERSONITEMINFO`, 104 bytes, generated from `character_items`.
     ///
-    /// **The one frame still taken from the capture.** The 104-byte body holds
-    /// an item count and a packed item array whose stride is not yet mapped, so
-    /// deriving it from `character_items` is the next slice of this card. It is
-    /// a parameter rather than hidden inside this module so that the remaining
-    /// capture dependency is one named argument rather than a fallback buried
-    /// in a generator, and so the length-pinning test below still covers it.
-    pub person_item_info: &'a [u8],
+    /// The captured frame is a **single-slot** notification, not an inventory dump:
+    /// `siItemPos` is 8, `siOption`/`siChangedNum`/`siExp`/`siPrice` are zero, and
+    /// all 84 bytes of `cltItem` are zero, i.e. *"slot 8 is empty"*. That is
+    /// consistent with the 249 frame in the same burst, whose slot 8 is one of the
+    /// 40 empty slots of 80.
+    ///
+    /// **Deviation:** bytes 6..8 are `/Zp8` padding between `siChangedNum` and
+    /// `siExp`, and the capture holds `f7 59` there. We send zeros. That value is
+    /// uninitialised stack: the same two bytes appear at offset 896 of the
+    /// char-list frame and inside 248's passport blob, in both cases in regions
+    /// the legacy never writes.
+    pub person_item_info: Vec<u8>,
 }
 
 /// Builds the 45-frame world-entry sequence, in the order the reference server
@@ -183,7 +188,7 @@ pub struct WorldEntry<'a> {
 /// Panics if [`WorldEntry::person_item_info`] is not the expected 104 bytes,
 /// which would otherwise be sent as a body the client cannot parse. That is a
 /// programming error in the caller, not a runtime condition.
-pub fn prologue(input: &WorldEntry<'_>) -> Vec<(u16, Vec<u8>)> {
+pub fn prologue(input: &WorldEntry) -> Vec<(u16, Vec<u8>)> {
     assert_eq!(
         input.person_item_info.len(),
         PERSON_ITEM_INFO_LEN,
@@ -256,17 +261,27 @@ pub fn prologue(input: &WorldEntry<'_>) -> Vec<(u16, Vec<u8>)> {
     debug_assert_eq!(time.len(), SERVER_TIME_LEN);
     out.push((GameMsg::ResponseServertime as u16, time));
 
-    // The character's inventory -- still the capture's, see the field's docs.
+    // The one slot the reference server announced as empty. Generated; see the
+    // field's docs for why the captured padding bytes are not reproduced.
     out.push((
         GameMsg::ResponsePersoniteminfo as u16,
-        input.person_item_info.to_vec(),
+        input.person_item_info.clone(),
     ));
 
     // Friend list. **Deliberately all zeros even though the capture is not.**
-    // The captured 5,100-byte body is 19.5% non-zero: it is the reference
-    // character's actual friends. Replaying it would show every account someone
-    // else's friends, which is both wrong and a data leak. We model no friends,
-    // so the honest body is 5,100 zero bytes.
+    // The captured 5,100-byte body is 19.5% non-zero, and replaying it would
+    // show every account someone else's friends -- both wrong and a data leak.
+    // We model no friends, so the honest body is 5,100 zero bytes.
+    //
+    // An earlier version of this comment blamed those bytes on the reference
+    // character's real friend list. That was probably wrong, and the correction
+    // is the reason: the non-zero bytes are short runs at irregular offsets
+    // (6, 16, 21, 32, 36, 44, ...), and a fixed-stride record array would be
+    // regular. A live check on 2026-10-05 settled it from the other side --
+    // the reference character had no friends on the live server either. So the
+    // likelier explanation is an uninitialised buffer, the same `f7 59` that
+    // sits in `PERSONITEMINFO`'s padding and in 248's passport blob. Zeros are
+    // right either way; only the reasoning was wrong.
     out.push((
         GameMsg::ResponseFriendalllist as u16,
         vec![0u8; FRIEND_LIST_LEN],
@@ -288,6 +303,13 @@ const EVENT_NPC_LEN: usize = 16;
 const TRANSFORM_LEN: usize = 772;
 const SERVER_TIME_LEN: usize = 16;
 const PERSON_ITEM_INFO_LEN: usize = 104;
+
+/// `siItemPos` in the captured `PERSONITEMINFO`: the slot it announces.
+///
+/// Slot 8 is empty in the captured 249 item array, so the frame's whole content
+/// is "nothing here". It is generated rather than replayed so the same code path
+/// reports a populated slot correctly for any other character.
+pub const PERSON_ITEM_INFO_SLOT: u16 = 8;
 const FRIEND_LIST_LEN: usize = 5_100;
 const CHAR_OPTION_LEN: usize = 6;
 
@@ -296,11 +318,7 @@ mod tests {
     use super::*;
     use crate::generated_capture;
 
-    /// A stand-in for the captured `PERSONITEMINFO` body, so the tests below can
-    /// exercise `prologue` without reaching for the capture at every call site.
-    const ITEM_INFO_STUB: [u8; PERSON_ITEM_INFO_LEN] = [0u8; PERSON_ITEM_INFO_LEN];
-
-    fn entry(char_unique: u16) -> WorldEntry<'static> {
+    fn entry(char_unique: u16) -> WorldEntry {
         WorldEntry {
             char_unique,
             now: ServerTime {
@@ -313,7 +331,11 @@ mod tests {
                 second: 27,
                 millisecond: 500,
             },
-            person_item_info: &ITEM_INFO_STUB,
+            person_item_info: gz_proto::item::encode_person_item_info(
+                PERSON_ITEM_INFO_SLOT,
+                &gz_proto::item::Item::empty(),
+            )
+            .to_vec(),
         }
     }
 
@@ -432,7 +454,7 @@ mod tests {
     }
 
     #[test]
-    fn the_friend_list_is_empty_rather_than_the_capture_characters_friends() {
+    fn the_friend_list_is_empty_rather_than_the_capture_bytes() {
         let Some((_, captured)) = generated_capture::frames_in(64, 65).next() else {
             panic!("the capture should hold FRIENDALLLIST at index 64");
         };
@@ -441,8 +463,26 @@ mod tests {
         assert!(
             captured.iter().any(|&b| b != 0),
             "the captured friend list is expected to be non-empty; if it is not, \
-             the comment claiming it leaks another character's friends is wrong"
+             the zero-fill needs no justification"
         );
+
+        // The shape of the non-zero bytes is why we call them an uninitialised
+        // buffer rather than friend records: a fixed-stride array would put them
+        // at a regular interval, and these sit at 6, 16, 21, 32, 36, 44, ...
+        // This asserts that irregularity, so the diagnosis cannot rot silently
+        // if someone re-derives the body.
+        let offsets: Vec<usize> = captured
+            .iter()
+            .enumerate()
+            .filter(|&(_, &b)| b != 0)
+            .map(|(i, _)| i)
+            .collect();
+        let first_window = &offsets[..offsets.len().min(8)];
+        assert!(
+            first_window.windows(2).any(|w| w[1] - w[0] > 4),
+            "expected irregular spacing between non-zero runs, got {first_window:?}"
+        );
+
         let generated = prologue(&entry(1));
         let (_, body) = generated
             .iter()
@@ -504,9 +544,8 @@ mod tests {
     #[test]
     #[should_panic(expected = "PERSONITEMINFO must be 104 bytes")]
     fn a_wrong_sized_inventory_frame_is_rejected_at_build_time() {
-        let short = [0u8; 10];
         let bad = WorldEntry {
-            person_item_info: &short,
+            person_item_info: vec![0u8; 10],
             ..entry(1)
         };
         let _ = prologue(&bad);
