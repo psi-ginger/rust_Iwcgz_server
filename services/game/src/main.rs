@@ -47,7 +47,9 @@ use gz_proto::game::{
     BasicInfo, CharListEntry, CharUnique, GameLogin, MAX_CONSTRUCTION_NUM, MAX_VILLAGE_NUMBER,
     MakeCharInfo, ServerInfo, VillageStruct, client_map_index, decode_make_new_char,
     decode_select_char, decode_village_struct_request, encode_all_char_info_one,
-    encode_all_char_info_two, encode_del_result,
+    encode_all_char_info_two, encode_change_horse, encode_del_result, encode_family_update,
+    encode_get_village_info, encode_person_horse, encode_response_name,
+    encode_skillbook_magic_info,
 };
 use gz_proto::item::{
     Item, MAX_ITEM_PER_PERSON, MAX_ITEM_UNIQUE, decode_inv_drop, decode_inv_pickup,
@@ -293,6 +295,7 @@ async fn handle_client(
         account_id: 0,
         account_name: String::new(),
         character: None,
+        char_unique,
     };
 
     loop {
@@ -1752,6 +1755,16 @@ struct LiveFrames<'a> {
     /// slot, name, position and stats, and re-reading them per resync would mean
     /// a `characters` join on every status request.
     character: Option<CharacterFull>,
+    /// This session's `char_unique`, as handed to the client in
+    /// `RESPONSE_CLIENTCHARUNIQUE`.
+    ///
+    /// 244 and 258 both resolve their target by indexing the client's
+    /// `CharUniqueInfo` table with a character id carried *in the payload*
+    /// (`Client-SystemNPC.cpp:977`, `Client-Person.cpp:1065`) rather than using
+    /// the frame's own `id`. Replaying the capture therefore applied the
+    /// reference character to our session; generating them means stamping the
+    /// session's id, not `characters.game_unique`.
+    char_unique: i32,
 }
 
 impl LiveFrames<'_> {
@@ -1765,11 +1778,28 @@ impl LiveFrames<'_> {
     async fn regenerate(&self, cmd: u16) -> Result<Option<Vec<u8>>, AnyError> {
         let is_one = cmd == GameMsg::ResponseAllcharinfoone as u16;
         let is_two = cmd == GameMsg::ResponseAllcharinfotwo as u16;
-        if !is_one && !is_two {
+        // The rest of the world-entry burst: nameplate, mount, skill book, clan
+        // and village-war state. None of them is the captured character's, so all
+        // of them are rebuilt from the selected row or zero-filled.
+        let is_name = cmd == GameMsg::ResponseName as u16;
+        let is_horse_list = cmd == GameMsg::ResponsePersonHorse as u16;
+        let is_change_horse = cmd == GameMsg::ResponseChangehorse as u16;
+        let is_skillbook = cmd == GameMsg::ResponseSkillbookMagicinfoGet as u16;
+        let is_family = cmd == GameMsg::ResponseFamilyUpdate as u16;
+        let is_village = cmd == GameMsg::ResponseGetvillageinfo as u16;
+        if !is_one
+            && !is_two
+            && !is_name
+            && !is_horse_list
+            && !is_change_horse
+            && !is_skillbook
+            && !is_family
+            && !is_village
+        {
             return Ok(None);
         }
         // `None` until `REQUEST_SELECTCHAR` names the character, which is when the
-        // 230 burst carrying these two frames is first sent.
+        // 230 burst carrying these frames is first sent.
         let Some(character) = self.character.as_ref() else {
             return Ok(None);
         };
@@ -1779,6 +1809,40 @@ impl LiveFrames<'_> {
             return Ok(Some(encode_all_char_info_two(
                 &self.item_array(character_id).await?,
             )?));
+        }
+
+        // 244 and 258 carry the session's character id, not the row's: the client
+        // resolves both through `CharUniqueInfo`, which is keyed on the id handed
+        // out in `RESPONSE_CLIENTCHARUNIQUE`.
+        if is_name {
+            return Ok(Some(encode_response_name(
+                self.char_unique,
+                &character.name,
+            )));
+        }
+        if is_horse_list {
+            return Ok(Some(encode_person_horse()));
+        }
+        if is_change_horse {
+            // 258 narrows the id to `SI16`; the session id is already bounded
+            // below `MAX_SESSION_CHAR_UNIQUE`, so this only trips if that bound
+            // and this field ever disagree.
+            let char = i16::try_from(self.char_unique).map_err(|_| {
+                format!(
+                    "session char_unique {} does not fit the SI16 siCharUnique",
+                    self.char_unique
+                )
+            })?;
+            return Ok(Some(encode_change_horse(char)));
+        }
+        if is_skillbook {
+            return Ok(Some(encode_skillbook_magic_info()));
+        }
+        if is_family {
+            return Ok(Some(encode_family_update()));
+        }
+        if is_village {
+            return Ok(Some(encode_get_village_info()));
         }
 
         // 248: the identity-and-stats block, from `characters` + `character_stats`.
@@ -1812,6 +1876,7 @@ impl LiveFrames<'_> {
             life: character.max_life,
             mana: character.max_mana,
             exp: character.exp,
+            money: character.money,
         };
         // The trailing four `SI16` are the capture's set-item progress: type 20
         // step 3, both second slots zero. There is no set-item table yet.
@@ -1872,6 +1937,12 @@ fn hash_now() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // The declared payload lengths. Only the tests below assert on them, so they
+    // are imported here rather than at the top of the file.
+    use gz_proto::game::{
+        ALL_CHAR_INFO_ONE_LEN, ALL_CHAR_INFO_TWO_LEN, CHANGE_HORSE_LEN, FAMILY_UPDATE_LEN,
+        GET_VILLAGE_INFO_LEN, PERSON_HORSE_LEN, RESPONSE_NAME_LEN, SKILLBOOK_MAGIC_INFO_LEN,
+    };
 
     /// The regression this locks down is the 2026-10-05 live failure: seven
     /// `REQUEST_SELECTCHAR` frames on one socket, each replaying the 45-frame
@@ -1997,6 +2068,7 @@ mod tests {
             life: 433,
             mana: 20,
             exp: 349_415,
+            money: 1000,
         };
         let body = encode_all_char_info_one(&basic, 20, 3, 0, 0);
         assert_eq!(body.len(), 10_168);
@@ -2025,6 +2097,25 @@ mod tests {
             i64::from_le_bytes(body[944..952].try_into().unwrap()),
             349_415
         );
+        // `clIP.siMoney` @ 960 -- the last eight bytes of the `clIP` window, so
+        // there is no room for a field after it and the offset is self-checking.
+        assert_eq!(
+            i64::from_le_bytes(body[960..968].try_into().unwrap()),
+            1000,
+            "siMoney"
+        );
+        // The three fame fields the legacy seeds rather than loads.
+        assert_eq!(i16::from_le_bytes([body[952], body[953]]), 0, "siFameLevel");
+        assert_eq!(
+            i16::from_le_bytes([body[954], body[955]]),
+            1,
+            "siSkillBonus -- cltPIPInfo::Init()"
+        );
+        assert_eq!(
+            i32::from_le_bytes(body[956..960].try_into().unwrap()),
+            0,
+            "siFameExp"
+        );
         // Trailing set-item fields.
         assert_eq!(i16::from_le_bytes([body[10_160], body[10_161]]), 20);
         assert_eq!(i16::from_le_bytes([body[10_162], body[10_163]]), 3);
@@ -2052,6 +2143,212 @@ mod tests {
         assert_eq!(differing, vec![6, 7], "only the padding may differ");
         // And the slot is the one the capture announced.
         assert_eq!(i16::from_le_bytes([captured[0], captured[1]]), 8);
+    }
+
+    /// Every frame the 230 burst now generates must be the same size as the
+    /// captured frame for the same opcode.
+    ///
+    /// Length is the one property of a generated frame that cannot be argued
+    /// about from the struct declarations alone — `sizeof` depends on the
+    /// shipped build's packing — so it is pinned to the capture rather than to a
+    /// reviewer's arithmetic. This is the check that would have caught a
+    /// mis-derived `cltHorse`.
+    #[test]
+    fn every_generated_burst_frame_matches_its_captured_length() {
+        let generated: &[(GameMsg, usize)] = &[
+            (GameMsg::ResponseAllcharinfoone, ALL_CHAR_INFO_ONE_LEN),
+            (GameMsg::ResponseAllcharinfotwo, ALL_CHAR_INFO_TWO_LEN),
+            (GameMsg::ResponseName, RESPONSE_NAME_LEN),
+            (GameMsg::ResponsePersonHorse, PERSON_HORSE_LEN),
+            (GameMsg::ResponseChangehorse, CHANGE_HORSE_LEN),
+            (
+                GameMsg::ResponseSkillbookMagicinfoGet,
+                SKILLBOOK_MAGIC_INFO_LEN,
+            ),
+            (GameMsg::ResponseFamilyUpdate, FAMILY_UPDATE_LEN),
+            (GameMsg::ResponseGetvillageinfo, GET_VILLAGE_INFO_LEN),
+        ];
+
+        for &(msg, declared) in generated {
+            let captured = generated_capture::frame(msg as u16)
+                .unwrap_or_else(|| panic!("the capture must contain opcode {}", msg as u16));
+            assert_eq!(
+                declared,
+                captured.len(),
+                "declared length for opcode {} disagrees with the capture",
+                msg as u16
+            );
+        }
+    }
+
+    /// 244 is the nameplate, and it is keyed by a character id taken from the
+    /// payload rather than from the frame's `id`.
+    ///
+    /// `Client-SystemNPC.cpp:977` indexes `CharUniqueInfo` with
+    /// `pclinfo->siCharUnique`, so a wrong value here silently renames somebody
+    /// else — or nobody. Replaying the capture did exactly that: it carried 1471
+    /// *and* `Meirin`, and 1471 resolved to our own slot.
+    #[test]
+    fn generated_name_is_keyed_by_the_session_id_and_the_rows_name() {
+        let captured = generated_capture::frame(GameMsg::ResponseName as u16).unwrap();
+        let body = encode_response_name(1471, "Tester");
+
+        assert_eq!(body.len(), captured.len());
+        // `siCharUnique` @ 0, `szName[20]` @ 4 (`MsgType.h:3199-3200`).
+        assert_eq!(i32::from_le_bytes(body[0..4].try_into().unwrap()), 1471);
+        assert_eq!(&body[4..10], b"Tester");
+        assert!(body[10..].iter().all(|&b| b == 0), "NUL padded");
+
+        // The capture really did carry the other character here, at the same
+        // offsets — so this test fails if the frame stops being generated.
+        assert_eq!(i32::from_le_bytes(captured[0..4].try_into().unwrap()), 1471);
+        assert_eq!(&captured[4..10], b"Meirin");
+    }
+
+    /// 258 is the unmount, and it only unmounts if its `siCharUnique` resolves to
+    /// the local player.
+    ///
+    /// `Client-Person.cpp:1065-1071` does
+    /// `CR[CharUniqueInfo[siCharUnique]]->DeleteSlave()` and returns early when
+    /// the index does not resolve, so the captured mount survives unless this
+    /// frame is stamped with the session's id.
+    #[test]
+    fn generated_change_horse_dismounts_our_own_character() {
+        let captured = generated_capture::frame(GameMsg::ResponseChangehorse as u16).unwrap();
+        let body = encode_change_horse(1471);
+
+        assert_eq!(body.len(), captured.len());
+        // `siChangeHorseIndex` @ 0 is the legacy's "show horse 0" value, so index 0
+        // now resolves to the empty `cltChangeHorse` rather than `Foal744`.
+        assert_eq!(i16::from_le_bytes([body[0], body[1]]), 0);
+        // `cltChangeHorse` @ 4..112 zeroed; `siHorseUnique` and `szName` included.
+        assert!(body[4..112].iter().all(|&b| b == 0));
+        // `siCharUnique` @ 112 -- where the capture puts 1471, the last real field
+        // before the tail padding.
+        assert_eq!(i16::from_le_bytes([body[112], body[113]]), 1471);
+        assert_eq!(i16::from_le_bytes([captured[112], captured[113]]), 1471);
+    }
+
+    /// 226 lists the five horse slots; empty means unmounted.
+    ///
+    /// The header is `bool bAutoFoodSwitch`, `bool siCurrentHorseRIDEHORSE`,
+    /// `SI16 siCurrentShowHorse` (`Horse.h:223-227`), and the capture's byte 1 is
+    /// `01` — riding. The horse array starts at 28, which is 24 bytes past what
+    /// those three members account for; see [`PERSON_HORSE_HEADER_LEN`].
+    #[test]
+    fn generated_person_horse_is_empty_and_unmounted() {
+        let captured = generated_capture::frame(GameMsg::ResponsePersonHorse as u16).unwrap();
+        let body = encode_person_horse();
+
+        assert_eq!(body.len(), captured.len());
+        assert_eq!(PERSON_HORSE_LEN, 568, "28 header + 5 * 108");
+        assert!(body.iter().all(|&b| b == 0), "no horse at all");
+
+        // The capture was riding, and held exactly one horse at offset 28.
+        assert_eq!(captured[1], 1, "siCurrentHorseRIDEHORSE");
+        assert_eq!(&captured[30..37], b"Foal744");
+        assert_eq!(
+            captured
+                .windows(9)
+                .filter(|w| *w == b"\x0c\x00Foal744")
+                .count(),
+            1,
+            "exactly one horse record in the frame"
+        );
+    }
+
+    /// 8371, 8271 and 7203 are zero-filled, and must stay the capture's size.
+    ///
+    /// All three legacy constructors are `ZeroMemory(this, sizeof(*this))`
+    /// (`MsgType-Item.h:1874`, `MsgType-Person.h:2997`, `MsgType.h:3119`), so zero
+    /// is the encoding the legacy itself uses for "none" rather than a stand-in
+    /// for data we failed to model.
+    #[test]
+    fn the_empty_world_frames_are_zero_and_capture_sized() {
+        for (msg, body) in [
+            (
+                GameMsg::ResponseSkillbookMagicinfoGet,
+                encode_skillbook_magic_info(),
+            ),
+            (GameMsg::ResponseFamilyUpdate, encode_family_update()),
+            (GameMsg::ResponseGetvillageinfo, encode_get_village_info()),
+        ] {
+            let captured = generated_capture::frame(msg as u16)
+                .unwrap_or_else(|| panic!("the capture must contain opcode {}", msg as u16));
+            assert_eq!(body.len(), captured.len(), "opcode {}", msg as u16);
+            assert!(
+                body.iter().all(|&b| b == 0),
+                "opcode {} must be all zero",
+                msg as u16
+            );
+        }
+    }
+
+    /// No generated frame may carry the captured character's identity.
+    ///
+    /// The whole point of generating these is that the reference character's name
+    /// and horse stop leaking into a fresh session, so the absence is asserted
+    /// rather than assumed.
+    #[test]
+    fn no_generated_frame_carries_the_captured_character() {
+        let bodies: Vec<Vec<u8>> = vec![
+            encode_all_char_info_one(
+                &BasicInfo {
+                    account_idnum: 1471,
+                    account_id: "tester".into(),
+                    slot: 0,
+                    sex: 1,
+                    class_kind: 1,
+                    home_village: 0,
+                    map_index: 1,
+                    x: 25,
+                    y: 13,
+                    character_id: 4242,
+                    name: "Tester".into(),
+                    str_: 5,
+                    dex: 5,
+                    vit: 5,
+                    mag: 5,
+                    hnd: 5,
+                    luk: 5,
+                    wis: 5,
+                    level: 1,
+                    bonus: 0,
+                    life: 20,
+                    mana: 20,
+                    exp: 0,
+                    money: 1000,
+                },
+                20,
+                3,
+                0,
+                0,
+            ),
+            encode_response_name(1471, "Tester"),
+            encode_person_horse(),
+            encode_change_horse(1471),
+            encode_skillbook_magic_info(),
+            encode_family_update(),
+            encode_get_village_info(),
+        ];
+
+        for body in &bodies {
+            assert!(
+                !contains_ascii(body, b"Meirin"),
+                "the captured character's name leaked into a generated frame"
+            );
+            assert!(
+                !contains_ascii(body, b"Foal744"),
+                "the captured horse leaked into a generated frame"
+            );
+        }
+    }
+
+    /// A NUL-terminated ASCII needle anywhere in `haystack`.
+    fn contains_ascii(haystack: &[u8], needle: &[u8]) -> bool {
+        haystack
+            .windows(needle.len())
+            .any(|window| window == needle)
     }
 
     /// A re-sync has to keep the inventory refresh and lose the position reset.

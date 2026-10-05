@@ -237,6 +237,12 @@ impl CharListEntry {
             life: self.life,
             mana: self.mana,
             exp: self.exp,
+            // The char list is a summary rebuilt through `cltPIPInfo::Init()`'s
+            // defaults rather than a loaded character, and the capture agrees: its
+            // char-list block carries 0 at 960. The purse arrives in
+            // `ALLCHARINFOONE` (`BasicInfo::money`), which is the frame the client
+            // reads its own gold from.
+            money: 0,
         }
         .encode();
 
@@ -312,6 +318,9 @@ pub struct BasicInfo {
     pub mana: i32,
     /// `clIP.siExp`.
     pub exp: i64,
+    /// `clIP.siMoney` — the purse, at `clIP + 56`, the last eight bytes of the
+    /// block.
+    pub money: i64,
 }
 
 impl BasicInfo {
@@ -356,7 +365,20 @@ impl BasicInfo {
         w.i32(self.life); // 936..940
         w.i32(self.mana); // 940..944
         w.i64(self.exp); // 944..952
-        w.pad(BASIC_INFO_LEN - 952); // 952..968: fame, skill bonus, fame exp, money
+        // The four fields `cltPIPInfo` adds on top of `cltPIPInfoCommon`
+        // (`parametabox.h:246-249`). All three of the first are written
+        // explicitly rather than padded, because the offsets are only safe if the
+        // layout is stated: `siMoney` has to land on 960 to be the last field.
+        //
+        // `siSkillBonus` is the one that carries a value, and 1 is the legacy's
+        // own default -- `cltPIPInfo::Init()` sets `siSkillBonus = 1`
+        // (`parametabox.h:264`), which is what the capture's re-initialised
+        // char-list block holds at 954. `character_stats.skill_bonus` holds a real
+        // per-character value and is not plumbed here yet; see the handoff.
+        w.i16(0); // 952..954 siFameLevel -- no fame table
+        w.i16(1); // 954..956 siSkillBonus -- cltPIPInfo::Init()'s default
+        w.i32(0); // 956..960 siFameExp -- no fame table
+        w.i64(self.money); // 960..968 siMoney
 
         debug_assert_eq!(w.len(), BASIC_INFO_LEN);
         w.finish()
@@ -435,6 +457,192 @@ pub fn encode_all_char_info_two(items: &[Item]) -> Result<Vec<u8>, ItemArrayErro
     let mut out = vec![0u8; ALL_CHAR_INFO_TWO_LEN];
     encode_item_array(&mut out, items)?;
     Ok(out)
+}
+
+/// `MAX_PLAYER_NAME` (`CommonHeader.h:575`) — the fixed width of `szName` in
+/// `cltPerson.szName`, `clBI.szAccountID` and `cltGameMsgResponse_GetName.szName`.
+pub const PLAYER_NAME_LEN: usize = 20;
+
+/// `sizeof(cltGameMsgResponse_GetName)` — opcode 244's body.
+/// `MsgType.h:3197-3208` is `SI32 siCharUnique; TCHAR szName[MAX_PLAYER_NAME];`,
+/// so `4 + 20 = 24`.
+pub const RESPONSE_NAME_LEN: usize = 4 + PLAYER_NAME_LEN;
+
+/// Builds `GAMEMSG_RESPONSE_NAME` (244): a nameplate, keyed by character id.
+///
+/// The handler ignores the frame's own `id` argument and resolves its target out
+/// of the payload instead (`Client-SystemNPC.cpp:974-983`):
+///
+/// ```cpp
+/// SI32 charid = cltCharCommon::CharUniqueInfo[pclinfo->siCharUnique];
+/// if(pclCM->IsValidID(charid))
+///     pclCM->CR[charid]->SetName(pclinfo->szName);
+/// ```
+///
+/// so `char_unique` must be the id this session was handed in
+/// `RESPONSE_CLIENTCHARUNIQUE`, and `name` the character that owns it. Replaying
+/// the capture's frame verbatim therefore renamed the player to `Meirin`: the
+/// captured `siCharUnique` (1471) happened to resolve, and so did its name.
+#[must_use]
+pub fn encode_response_name(char_unique: i32, name: &str) -> Vec<u8> {
+    let mut w = Writer::with_capacity(RESPONSE_NAME_LEN);
+    w.i32(char_unique); // 0..4
+    w.fixed_str(name, PLAYER_NAME_LEN); // 4..24
+    debug_assert_eq!(w.len(), RESPONSE_NAME_LEN);
+    w.finish()
+}
+
+/// `sizeof(cltHorse)` as it travels: 108 bytes.
+///
+/// Not derivable from `CommonHeader.h:3251-3304` by summing members — the
+/// declared fields come to 100 under MSVC's 4-byte alignment. The shipped build
+/// is 8 bytes larger, and the capture is what pins it: the horse carried by 226
+/// (at payload offset 28) and the one carried by 258 (at offset 4) are
+/// **byte-identical across 108 bytes**, and 226's 568-byte body is exactly
+/// `28 + 5 * 108`. Either record alone would have been ambiguous; the pair
+/// agreeing at a 108-byte stride is not.
+pub const CLT_HORSE_LEN: usize = 108;
+
+/// `MAX_HORSE_PER_PERSON` (`Horse.h:152`) — five horse slots per character.
+pub const MAX_HORSE_PER_PERSON: usize = 5;
+
+/// Bytes before `clHorse[]` inside `cltPersonHorseInfo`.
+///
+/// The declaration (`Horse.h:220-236`) leads with `bool bAutoFoodSwitch`,
+/// `bool siCurrentHorseRIDEHORSE` and `SI16 siCurrentShowHorse` — four bytes,
+/// which would put the array at 4. The capture puts it at 28: the captured
+/// `siHorseUnique` of 12 and the name `Foal744` sit at 28 and 30, and repeating
+/// that stride at 108 bytes fills the body to exactly 568. **The 24 bytes at
+/// 4..28 are therefore unexplained**, and the shipped build is newer than these
+/// headers in at least one respect already established (captured opcodes 8451,
+/// 8464 and 8470 are absent from `MsgType.h`, which tops out at 8437).
+///
+/// This does not block generating the frame: every field in it is "no horse", so
+/// the unidentified region is zero either way. It is recorded here so nobody
+/// later mistakes 28 for a computed constant.
+pub const PERSON_HORSE_HEADER_LEN: usize = 28;
+
+/// `sizeof(cltPersonHorseInfo)` — opcode 226's body.
+pub const PERSON_HORSE_LEN: usize = PERSON_HORSE_HEADER_LEN + MAX_HORSE_PER_PERSON * CLT_HORSE_LEN;
+
+/// Builds `GAMEMSG_RESPONSE_PERSON_HORSE` (226): the character's five horse slots,
+/// all empty.
+///
+/// The handler (`Client-Person-BigInfo.cpp:271-279`) reads
+/// `GetCurrentShowHorse()` and compares it against what the player is already
+/// showing, so the frame has to describe *no* horse for the player to end up
+/// unmounted. It resolves the target as `cltCM->CR[1]` — hardcoded to the local
+/// player, not taken from the payload — which is why this frame needs no
+/// character id and why zeroing it is safe.
+///
+/// `siCurrentHorseRIDEHORSE` at payload offset 1 is the one field the capture
+/// sets (`01`, i.e. riding); zeroing it is what takes the character off the horse.
+#[must_use]
+pub fn encode_person_horse() -> Vec<u8> {
+    // Every field encodes "this character owns no horse": the five `siHorseUnique`
+    // values are 0, `siCurrentShowHorse` is 0 and `siCurrentHorseRIDEHORSE` is 0.
+    vec![0u8; PERSON_HORSE_LEN]
+}
+
+/// `sizeof(cltGameMsgResponse_ChangeHorse)` — opcode 258's body.
+///
+/// `MsgType-Person.h:641-655` is `SI16 siChangeHorseIndex; cltHorse
+/// cltChangeHorse; SI16 siCharUnique;`. Under 4-byte alignment that is
+/// `2 + 2 pad + 108 + 2 + 2 pad = 116`, which is both the captured length and the
+/// offset `siCharUnique` is independently pinned to: the capture has 1471
+/// (`0x05BF`) at offset 112, the last four bytes of the frame.
+pub const CHANGE_HORSE_LEN: usize = 116;
+
+/// Builds `GAMEMSG_RESPONSE_CHANGEHORSE` (258): dismount, and leave the character
+/// on no horse.
+///
+/// This is the frame that actually unmounts. The handler
+/// (`Client-Person.cpp:1065-1073`) resolves its target from the payload, exactly
+/// as 244 does, then calls two methods:
+///
+/// ```cpp
+/// SI32 tempid = cltCharCommon::CharUniqueInfo[pclinfo->siCharUnique];
+/// if(tempid <= 0) return;
+/// pclCM->CR[tempid]->DeleteSlave();
+/// pclChar->pclCI->clHorseInfo.SetCurrentShowHorseIndex(pclinfo->siChangeHorseIndex);
+/// ```
+///
+/// `DeleteSlave()` is the unmount. So `char_unique` must be this session's id or
+/// the call is skipped entirely and the captured character's mount survives; and
+/// because `siChangeHorseIndex` is 0 — the legacy's "show horse 0" value — the
+/// empty `cltChangeHorse` is what makes that index mean *nothing* rather than
+/// *the captured horse*.
+#[must_use]
+pub fn encode_change_horse(char_unique: i16) -> Vec<u8> {
+    let mut w = Writer::with_capacity(CHANGE_HORSE_LEN);
+    w.i16(0); // 0..2 siChangeHorseIndex -- the legacy's "no horse selected" value
+    w.pad(2); // 2..4 align cltChangeHorse to 4
+    w.pad(CLT_HORSE_LEN); // 4..112 cltChangeHorse, zero: no horse to mount
+    w.i16(char_unique); // 112..114 siCharUnique -- resolves to our own slot
+    w.pad(2); // 114..116 tail padding to 4-byte alignment
+    debug_assert_eq!(w.len(), CHANGE_HORSE_LEN);
+    w.finish()
+}
+
+/// `sizeof(cltGameMsgResponse_SkillBook_MagicInfo_Get)` — opcode 8371's body.
+/// `MsgType-Item.h:1869-1884`.
+pub const SKILLBOOK_MAGIC_INFO_LEN: usize = 992;
+
+/// Builds `GAMEMSG_RESPONSE_SKILLBOOK_MAGICINFOGET` (8371): an empty skill book.
+///
+/// Zero is the legacy's own encoding for this, not a shortcut: the constructor is
+/// `ZeroMemory(this, sizeof(*this))` (`MsgType-Item.h:1874`). The client's reader
+/// (`Client-Person.cpp:4187-4206`) walks `m_clAddSkillBookMagic` and
+/// `m_clAddSkillBookSubMagic` and **breaks on the first entry whose
+/// `GetMagicKind()` is `<= 0`**, so a zeroed frame clears the book and stops
+/// immediately.
+#[must_use]
+pub fn encode_skillbook_magic_info() -> Vec<u8> {
+    vec![0u8; SKILLBOOK_MAGIC_INFO_LEN]
+}
+
+/// `sizeof(cltGameResponse_UpdateFamily)` — opcode 8271's body.
+/// `MsgType-Person.h:2989-3002` is `CFamily m_cFamily; CMarriage m_cMarriage;`.
+pub const FAMILY_UPDATE_LEN: usize = 680;
+
+/// Builds `GAMEMSG_RESPONSE_FAMILYUPDATE` (8271): no clan, no marriage.
+///
+/// Zero is again the constructor's own value (`ZeroMemory(this, ...)`,
+/// `MsgType-Person.h:2997`). The one thing to be sure of is that a zeroed
+/// `CFamily` does not read as "family child", because the handler opens a dialog
+/// for that case (`Client-Family.cpp:47`):
+///
+/// ```cpp
+/// SI32 siMyClass = pclinfo->m_cFamily.GetMyClass_InFamily();
+/// if (siMyClass == MYCLASS_IN_FAMILY_CHILDREN) { CreateInterface(NFAMILYCOOKIELEVEL_DLG); }
+/// ```
+///
+/// `MYCLASS_IN_FAMILY_NONE` is `0` and `MYCLASS_IN_FAMILY_CHILDREN` is `2`
+/// (`Family.h:18-20`), so zero yields *none* and the dialog cannot open.
+#[must_use]
+pub fn encode_family_update() -> Vec<u8> {
+    vec![0u8; FAMILY_UPDATE_LEN]
+}
+
+/// `sizeof(cltGameMsgResponse_GetVillageInfo)` — opcode 7203's body.
+/// `MsgType.h:3106-3121`.
+pub const GET_VILLAGE_INFO_LEN: usize = 3_200;
+
+/// Builds `GAMEMSG_RESPONSE_GETVILLAGEINFO` (7203): no village war is running.
+///
+/// **This frame is not the character's town affiliation.** It is world village-war
+/// state — `siMasterVillage[]`, `siParentVillage[]`, `siDeclareWarVillage[]`,
+/// `clDeclareWarDate[]`, `siVillageMark[]`, `siTotalVillageScore[]`,
+/// `siNewYearEventScore[]` and `siNowWarVillage[]`, each
+/// `MAX_VILLAGE_NUMBER` wide (`MsgType.h:3109-3116`). A player's home village
+/// travels in `clBI.siHomeVillage` instead, which [`BasicInfo::home_village`]
+/// already fills from `characters.school_id`.
+///
+/// Zero is the constructor's value (`ZeroMemory`, `MsgType.h:3119`) and reads as
+/// "no village is at war", which is the true state of a fresh world.
+#[must_use]
+pub fn encode_get_village_info() -> Vec<u8> {
+    vec![0u8; GET_VILLAGE_INFO_LEN]
 }
 
 /// `GAMEMSG_REQUEST_SELECTCHAR` (opcode 4): a bare `SI32` slot index.

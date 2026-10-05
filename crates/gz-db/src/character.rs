@@ -56,6 +56,8 @@ pub struct CharacterFull {
     pub max_mana: i32,
     /// `cltPIPInfo.siExp`.
     pub exp: i64,
+    /// `cltPIPInfo.siMoney` — the purse. `0006_character_money.sql`.
+    pub money: i64,
     /// Last saved map (the `MapData` index sent as `uiMapIndex`).
     pub map_id: i32,
     /// Last saved tile x (`uiX`, 10 bits).
@@ -209,7 +211,7 @@ impl PgCharacterRepository {
     }
 }
 
-/// The 21 columns every [`CharacterFull`] needs, in the order [`FULL_SELECT`]
+/// The 23 columns every [`CharacterFull`] needs, in the order [`FULL_SELECT`]
 /// lists them.
 ///
 /// A named struct rather than a tuple because sqlx's tuple `FromRow` impls stop
@@ -224,6 +226,7 @@ struct FullRow {
     max_life: i32,
     max_mana: i32,
     exp: i64,
+    money: i64,
     map_id: i32,
     pos_x: i32,
     pos_y: i32,
@@ -242,7 +245,8 @@ struct FullRow {
 }
 
 const FULL_SELECT: &str = "SELECT c.character_id, c.name, c.class_kind, c.gender, s.level, \
-     s.max_life, s.max_mana, s.exp, c.map_id, c.pos_x, c.pos_y, c.slot, c.school_id, c.game_unique, \
+     s.max_life, s.max_mana, s.exp, c.money, c.map_id, c.pos_x, c.pos_y, c.slot, c.school_id, \
+     c.game_unique, \
      s.str, s.dex, s.vit, s.mag, s.hnd, s.luk, s.wis, s.bonus_points \
      FROM characters c JOIN character_stats s ON s.character_id = c.character_id";
 
@@ -257,6 +261,7 @@ impl From<FullRow> for CharacterFull {
             max_life: row.max_life,
             max_mana: row.max_mana,
             exp: row.exp,
+            money: row.money,
             map_id: row.map_id,
             pos_x: row.pos_x,
             pos_y: row.pos_y,

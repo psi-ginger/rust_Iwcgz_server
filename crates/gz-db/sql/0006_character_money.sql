@@ -1,0 +1,57 @@
+-- The character's purse, as `cltPIPInfo.siMoney` carries it in
+-- `GAMEMSG_RESPONSE_ALLCHARINFOONE` (248).
+--
+-- Applied by `goonzu-rs/scripts/db-init.ps1` after 0005. Idempotent.
+--
+-- ## Where the field lives
+--
+-- `cltPIPInfo` (`Char/ParametaBox/parametabox.h:243-249`) is `cltPIPInfoCommon`
+-- plus four more fields:
+--
+--     SI16   siFameLevel;
+--     SI16   siSkillBonus;
+--     SI32   siFameExp;
+--     GMONEY siMoney;
+--
+-- `cltPIPInfoCommon` is `cltBasicAbility` (7 x SI32 = 28 bytes) then `siLevel`,
+-- `siBonus`, `Life`, `Mana` and an `SI64 siExp` (`parametabox.h:107-111`), which
+-- puts the four extra fields at 48..56 and `siMoney` at 56. The whole struct is
+-- therefore 64 bytes -- the exact size of the `clIP` window inside 248's
+-- 10,168-byte body, which is why `siMoney` is the last eight bytes of that window
+-- and nothing follows it.
+--
+-- All four are confirmed against the reference capture's 248 body (offset 80310):
+-- `siFameLevel` @952 = 1, `siSkillBonus` @954 = 0x18, `siFameExp` @956 = 110,
+-- `siMoney` @960 = 2469. The capture's char-list frame, which the legacy rebuilds
+-- through `cltPIPInfo::Init()` rather than loading a character
+-- (`Server-Login.cpp:260`), carries 0 / 1 / 0 / 0 there -- and `Init()` is
+-- exactly `siSkillBonus = 1; siFameExp = 0; siFameLevel = 0; siMoney = 0`
+-- (`parametabox.h:260-272`). Two independently-constructed blocks agreeing is what
+-- makes the offsets safe to write rather than merely plausible.
+--
+-- ## `GMONEY` is read as SI64
+--
+-- `GMONEY` is not typedef'd anywhere in the headers we have, so its width is
+-- inferred. SI64 is the reading that needs no tail padding: `siMoney` at 56 is
+-- already 8-aligned, so SI64 lands it exactly on 64. An SI32 `siMoney` would end
+-- at 60 and leave four bytes of tail padding to reach the same 64. The capture
+-- cannot separate the two -- 2469 fits in 32 bits and the high four bytes are
+-- zero -- so this is a reasoned choice, not a proven one. Revisit if a purse ever
+-- exceeds `MAX_MONEY`.
+--
+-- ## Why the default is not zero
+--
+-- The legacy has no starting-money constant (`cltPIPInfo::Init()` seeds 0, and the
+-- captured 2469 was earned in play), so there is nothing to copy. Zero is the
+-- faithful default but not a usable one: a character that cannot afford anything
+-- makes the whole field untestable. 1000 is a goonzu-rs policy choice and is the
+-- one number here with no legacy provenance -- change it if the owner wants a
+-- different starting purse.
+ALTER TABLE characters ADD COLUMN IF NOT EXISTS money BIGINT NOT NULL DEFAULT 1000;
+
+-- `MAX_MONEY` is 2100000000 (`CommonHeader.h:995`), the ceiling the legacy's
+-- money arithmetic is written against. Enforced here so an over-large purse is a
+-- loud failure instead of a value the client cannot represent.
+ALTER TABLE characters DROP CONSTRAINT IF EXISTS characters_money_fits_max_money;
+ALTER TABLE characters ADD CONSTRAINT characters_money_fits_max_money
+  CHECK (money >= 0 AND money <= 2100000000);
