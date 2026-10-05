@@ -409,6 +409,14 @@ async fn handle_client(
                 }
                 c if c == GameMsg::RequestSelectchar as u16 => {
                     let slot = decode_select_char(payload.as_ref())?;
+                    if !admit_select_char(login.as_ref().and_then(|s| s.character_id)) {
+                        eprintln!(
+                            "game: {peer}: ignoring selectchar slot {slot}: this session has \
+                             already entered the world, and the legacy answers a repeat with \
+                             silence (ServerDB-Person.cpp:1757,1763)"
+                        );
+                        continue;
+                    }
                     let character_id = {
                         let session = login
                             .as_ref()
@@ -666,6 +674,43 @@ struct GameSession {
     entry_cell: Option<DropLocation>,
 }
 
+/// Whether a `GAMEMSG_REQUEST_SELECTCHAR` should be allowed to enter the world.
+///
+/// **World entry is one-shot per connection, and a repeat is a silent no-op —
+/// in every case the legacy can actually reach.** Verified 2026-10-05 against a
+/// live log that showed seven entries on one socket and a desyncing client:
+///
+/// 1. `Server-Login.cpp:189-190` — `idnum` is read from the **already-bound**
+///    character (`pclCI->clBI.siIDNum`), not from the requested slot, and
+///    `idnum <= 0` returns early.
+/// 2. `rsp_PersonIDGet` (`Goonzu_DB\04. GameDB___________.txt:1073`) selects
+///    `WHERE [idnum] = @idnum and [index] = @index` — **`AND`, not `OR`**. So the
+///    requested index is only ever honoured together with the *currently bound*
+///    character's idnum.
+/// 3. Therefore a request for a **different** slot matches no row, `siResult` is
+///    0, and `ServerDB-Person.cpp:1757` returns without sending anything.
+/// 4. A request for the **same** slot does match, and returns the same PersonID,
+///    which `:1763-1766` detects and returns on.
+/// 5. Only a genuinely different character could get past both — and that path
+///    (`:1770` `CloseAction`, `:1795` `DeleteChar`, then a fresh `cltCharServer`)
+///    *tears the old character down*. It still does not replay world state onto
+///    a live session.
+///
+/// So the legacy has no reachable branch in which a second selectchar re-sends
+/// the world, and no branch that tears a character down without a matching
+/// reload either. Implementing real switching is T-017's job and must do the
+/// `CloseAction`/`DeleteChar` teardown; until then the faithful behaviour is to
+/// send nothing, which is what a bare `false` here buys.
+///
+/// The client is built for this: `NSelectChar.cpp:1343-1354` sends selectchar
+/// with an already-bound char client present, and `:1357` closes the dialog
+/// without waiting for a reply. So the client-visible result of a refused switch
+/// is the char-select dialog closing and no world changing — the legacy's own
+/// behaviour, and why this is a no-op rather than a disconnect.
+fn admit_select_char(bound_character_id: Option<i32>) -> bool {
+    bound_character_id.is_none()
+}
+
 /// Sends every slot's `cltCharListInfo` (opcode 3), zeroed for empty slots, so
 /// the client's `PutCharList` writes 15 copies and the roster dialog repaints.
 async fn send_char_list(
@@ -790,15 +835,31 @@ async fn handle_select_char(
         .ok_or_else(|| format!("no character in account {} slot {slot}", session.account_id))?;
 
     // The character now exists as a world entity, so give it a durable id if it
-    // has never had one. It is *not* what goes on the wire yet: see
-    // `session_char_unique`.
+    // has never had one. It is *not* what goes on the wire: `make_char_unique`
+    // below echoes the session's `char_unique`, and every replayed frame carries
+    // that same session id, so the wire is self-consistent either way.
+    //
+    // The mismatch is therefore *inert today* and only worth reporting as future
+    // debt: once T-017 generates per-character frames from the database instead
+    // of replaying, those frames will carry `stored_unique`, and a session
+    // holding a different `char_unique` will have them all discarded by
+    // `SetCharReservedChar`.
+    //
+    // The earlier wording of this message ("the replayed per-character frames
+    // will be discarded by the client") was wrong about the mechanism and
+    // misled a 2026-10-05 diagnosis into blaming the id mismatch for a
+    // character-switch desync that was a missing already-bound guard instead.
+    // A character whose id *does* match, `Tester`, glitched identically; and
+    // `test3`, which does not match, entered the world cleanly.
     let stored_unique = characters
         .resolve_game_unique(character.character_id)
         .await?;
     if stored_unique != char_unique {
         println!(
-            "game: selectchar {:?} has game_unique {stored_unique} but this session opened with \
-             {char_unique}; the replayed per-character frames will be discarded by the client",
+            "game: selectchar {:?} has durable game_unique {stored_unique} but this session's \
+             char_unique is {char_unique}; harmless while the world is replayed (every frame \
+             carries the session id), but T-017 must make these agree or the client will discard \
+             this character's records",
             character.name
         );
     }
@@ -1669,6 +1730,27 @@ fn hash_now() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The regression this locks down is the 2026-10-05 live failure: seven
+    /// `REQUEST_SELECTCHAR` frames on one socket, each replaying the 45-frame
+    /// world prologue over an already-populated world, and a client that
+    /// desynced. Nothing about the second entry is legal — see the predicate's
+    /// docs — so the state, not the slot, is what decides.
+    #[test]
+    fn world_entry_is_one_shot_and_the_state_alone_decides() {
+        assert!(
+            admit_select_char(None),
+            "the first selectchar must be honoured"
+        );
+        // Same slot or a different slot is irrelevant: the predicate is not
+        // given the slot, on purpose, because the legacy's own guard is the
+        // bound character rather than the request.
+        assert!(!admit_select_char(Some(1)));
+        assert!(!admit_select_char(Some(2)));
+        // Idempotent: refusing a repeat must not make a later request admissible
+        // again, which is what would let the prologue replay N times.
+        assert!(!admit_select_char(admit_select_char(None).then_some(7)));
+    }
 
     #[test]
     fn deframe_leaves_an_uncompressed_body_alone() {
