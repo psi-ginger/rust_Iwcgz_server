@@ -31,6 +31,10 @@ pub enum RepositoryError {
     Database(sqlx::Error),
     NotFound,
     DuplicateUsername,
+    /// The caller asked for something the stored representation cannot express
+    /// (a slot index out of range, a record of the wrong length). Distinct from
+    /// [`Self::Database`] because retrying will not help.
+    Invalid(String),
 }
 
 impl std::fmt::Display for RepositoryError {
@@ -39,6 +43,7 @@ impl std::fmt::Display for RepositoryError {
             Self::Database(e) => write!(f, "database error: {e}"),
             Self::NotFound => write!(f, "account not found"),
             Self::DuplicateUsername => write!(f, "username already exists"),
+            Self::Invalid(what) => write!(f, "invalid request: {what}"),
         }
     }
 }

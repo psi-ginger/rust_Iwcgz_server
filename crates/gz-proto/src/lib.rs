@@ -5,6 +5,7 @@
 
 pub mod front;
 pub mod game;
+pub mod item;
 pub mod opcodes_auth;
 pub mod opcodes_front;
 pub mod opcodes_game;

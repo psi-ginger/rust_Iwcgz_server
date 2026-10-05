@@ -18,6 +18,7 @@ members = [
     "services/supervisor",
     "tools/codegen",
     "tools/capture",
+    "tools/pcapview",
     "tools/protoclient",
 ]
 # The fuzz crate is built by `cargo fuzz` against nightly (it needs libFuzzer

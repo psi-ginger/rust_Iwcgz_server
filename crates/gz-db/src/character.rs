@@ -64,6 +64,9 @@ pub struct CharacterFull {
     pub pos_y: i32,
     /// Home village (`siHomeVillageUnique`).
     pub school_id: i16,
+    /// The id the client knows this character by (`MyCharUnique`), or `None`
+    /// until it has been taken into a world for the first time.
+    pub game_unique: Option<i32>,
 }
 
 /// The character storage interface.
@@ -85,6 +88,26 @@ pub trait CharacterRepository: Send + Sync {
         account_id: i32,
         slot: i16,
     ) -> Result<Option<CharacterFull>, RepositoryError>;
+
+    /// Returns the live character with this exact name.
+    ///
+    /// # Errors
+    ///
+    /// [`RepositoryError::Database`] if the query fails.
+    async fn find_by_name(&self, name: &str) -> Result<Option<CharacterFull>, RepositoryError>;
+
+    /// Returns `character_id`'s `game_unique`, allocating and persisting one the
+    /// first time the character enters a world.
+    ///
+    /// Allocation goes through the `character_game_unique_seq` sequence rather
+    /// than `max(game_unique) + 1`, so two simultaneous world entries cannot
+    /// pick the same id.
+    ///
+    /// # Errors
+    ///
+    /// [`RepositoryError::Database`] if the query fails or the sequence is
+    /// exhausted.
+    async fn resolve_game_unique(&self, character_id: i32) -> Result<i32, RepositoryError>;
 }
 
 /// PostgreSQL implementation. Cheap to clone (shares the pool).
@@ -117,6 +140,64 @@ impl PgCharacterRepository {
     #[must_use]
     pub fn pool(&self) -> &PgPool {
         &self.pool
+    }
+}
+
+/// The 13 columns every `CharacterFull` needs, in the order [`FULL_SELECT`]
+/// lists them.
+type FullRow = (
+    i32,
+    String,
+    i16,
+    i16,
+    i16,
+    i32,
+    i32,
+    i64,
+    i32,
+    i32,
+    i32,
+    i16,
+    Option<i32>,
+);
+
+const FULL_SELECT: &str = "SELECT c.character_id, c.name, c.class_kind, c.gender, s.level, \
+     s.max_life, s.max_mana, s.exp, c.map_id, c.pos_x, c.pos_y, c.school_id, c.game_unique \
+     FROM characters c JOIN character_stats s ON s.character_id = c.character_id";
+
+impl From<FullRow> for CharacterFull {
+    fn from(
+        (
+            character_id,
+            name,
+            class_kind,
+            gender,
+            level,
+            max_life,
+            max_mana,
+            exp,
+            map_id,
+            pos_x,
+            pos_y,
+            school_id,
+            game_unique,
+        ): FullRow,
+    ) -> Self {
+        Self {
+            character_id,
+            name,
+            class_kind,
+            gender,
+            level,
+            max_life,
+            max_mana,
+            exp,
+            map_id,
+            pos_x,
+            pos_y,
+            school_id,
+            game_unique,
+        }
     }
 }
 
@@ -164,60 +245,58 @@ impl CharacterRepository for PgCharacterRepository {
         account_id: i32,
         slot: i16,
     ) -> Result<Option<CharacterFull>, RepositoryError> {
-        type Row = (
-            i32,
-            String,
-            i16,
-            i16,
-            i16,
-            i32,
-            i32,
-            i64,
-            i32,
-            i32,
-            i32,
-            i16,
-        );
-        let row = sqlx::query_as::<_, Row>(
-            "SELECT c.character_id, c.name, c.class_kind, c.gender, s.level, \
-                    s.max_life, s.max_mana, s.exp, c.map_id, c.pos_x, c.pos_y, c.school_id \
-             FROM characters c \
-             JOIN character_stats s ON s.character_id = c.character_id \
-             WHERE c.account_id = $1 AND c.slot = $2 AND c.deleted_at IS NULL",
-        )
+        let row = sqlx::query_as::<_, FullRow>(&format!(
+            "{FULL_SELECT} WHERE c.account_id = $1 AND c.slot = $2 AND c.deleted_at IS NULL"
+        ))
         .bind(account_id)
         .bind(slot)
         .fetch_optional(&self.pool)
         .await?;
+        Ok(row.map(CharacterFull::from))
+    }
 
-        Ok(row.map(
-            |(
-                character_id,
-                name,
-                class_kind,
-                gender,
-                level,
-                max_life,
-                max_mana,
-                exp,
-                map_id,
-                pos_x,
-                pos_y,
-                school_id,
-            )| CharacterFull {
-                character_id,
-                name,
-                class_kind,
-                gender,
-                level,
-                max_life,
-                max_mana,
-                exp,
-                map_id,
-                pos_x,
-                pos_y,
-                school_id,
-            },
-        ))
+    async fn find_by_name(&self, name: &str) -> Result<Option<CharacterFull>, RepositoryError> {
+        let row = sqlx::query_as::<_, FullRow>(&format!("{FULL_SELECT} WHERE c.name = $1"))
+            .bind(name)
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(row.map(CharacterFull::from))
+    }
+
+    async fn resolve_game_unique(&self, character_id: i32) -> Result<i32, RepositoryError> {
+        if let Some(existing) = sqlx::query_scalar::<_, i32>(
+            "SELECT game_unique FROM characters WHERE character_id = $1",
+        )
+        .bind(character_id)
+        .fetch_optional(&self.pool)
+        .await?
+        {
+            return Ok(existing);
+        }
+
+        // Single statement so a concurrent world entry cannot overwrite a value
+        // another connection has just written: the UPDATE only fires while the
+        // column is still NULL.
+        let allocated = sqlx::query_scalar::<_, i32>(
+            "UPDATE characters \
+             SET game_unique = nextval('character_game_unique_seq') \
+             WHERE character_id = $1 AND game_unique IS NULL \
+             RETURNING game_unique",
+        )
+        .bind(character_id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        match allocated {
+            Some(id) => Ok(id),
+            // Lost the race: the winner's id is now stored, so re-read it.
+            None => sqlx::query_scalar::<_, i32>(
+                "SELECT game_unique FROM characters WHERE character_id = $1",
+            )
+            .bind(character_id)
+            .fetch_optional(&self.pool)
+            .await?
+            .ok_or(RepositoryError::NotFound),
+        }
     }
 }

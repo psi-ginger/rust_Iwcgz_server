@@ -36,6 +36,17 @@ CREATE TABLE IF NOT EXISTS characters (
   UNIQUE (account_id, slot)
 );
 
+-- The id the client knows this character by (`MyCharUnique`), sent in
+-- GAMEMSG_RESPONSE_CLIENTCHARUNIQUE and repeated in
+-- cltMakeCharInfo.uiMakeCharUnique. NULL until the character first enters a
+-- world; allocated from `character_game_unique_seq` (0003).
+--
+-- Added by ALTER rather than declared above so that exactly one place defines the
+-- column: the CREATE above is a no-op on the databases that predate this file,
+-- and this statement brings them up to date. The dev seed (0002) writes the
+-- column, so it has to exist by the end of this file.
+ALTER TABLE characters ADD COLUMN IF NOT EXISTS game_unique INTEGER;
+
 -- Legacy tbl_IP ("important parameta"), the stats half of cltCharListInfo.
 CREATE TABLE IF NOT EXISTS character_stats (
   character_id INTEGER  PRIMARY KEY REFERENCES characters(character_id) ON DELETE CASCADE,

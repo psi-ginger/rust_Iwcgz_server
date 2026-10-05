@@ -403,6 +403,7 @@ name = "gz-db"
 version = "0.0.1"
 dependencies = [
  "async-trait",
+ "gz-proto",
  "sha2",
  "sqlx",
  "tokio",
@@ -798,6 +799,16 @@ dependencies = [
  "redox_syscall 0.5.18",
  "smallvec",
  "windows-link",
+]
+
+[[package]]
+name = "pcapview"
+version = "0.0.1"
+dependencies = [
+ "gz-cipher",
+ "gz-lzf",
+ "gz-net",
+ "gz-proto",
 ]
 
 [[package]]

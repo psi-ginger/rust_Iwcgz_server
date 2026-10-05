@@ -5,8 +5,13 @@
 //! touching callers. M1 scope: accounts only.
 
 pub mod character;
+pub mod item;
 pub mod password;
 pub mod repository;
 
 pub use character::{CharacterFull, CharacterRepository, CharacterSummary, PgCharacterRepository};
+pub use item::{
+    CharacterItem, DropLocation, DropOutcome, DropStatus, GroundClaim, ItemRepository, MoveOutcome,
+    PgItemRepository, PickupOutcome, PickupStatus, container_of,
+};
 pub use repository::{Account, AccountRepository, PgAccountRepository, RepositoryError};

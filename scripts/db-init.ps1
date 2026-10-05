@@ -22,7 +22,13 @@ if (-not $env:PGUSER)     { $env:PGUSER = "postgres" }
 if (-not (Test-Path $Psql)) { throw "psql not found at '$Psql' (set -Psql)" }
 
 $root  = Split-Path -Parent $PSScriptRoot
-$files = @("0001_schema.sql", "0002_seed_dev.sql")
+$files = @(
+    "0001_schema.sql",
+    "0002_seed_dev.sql",
+    "0003_character_items.sql",
+    "0004_world_items.sql",
+    "0005_world_item_handle.sql"
+)
 
 foreach ($f in $files) {
     $path = Join-Path $root "crates\gz-db\sql\$f"

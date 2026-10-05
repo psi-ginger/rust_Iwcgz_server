@@ -24,8 +24,14 @@ ON CONFLICT (username) DO UPDATE
 -- map_id 1 is `MapData` index 1 -> Village01 (63x68 tiles). The spawn is the
 -- village centre `(25,13)` from `cltMapTypeManager` (`MapTypeManager.cpp:124`);
 -- `(100,100)` is outside that map and the client cannot place the avatar there.
-INSERT INTO characters (account_id, slot, name, class_kind, gender, map_id, pos_x, pos_y)
-SELECT account_id, 0, 'Tester', 1, 1, 1, 25, 13
+-- `game_unique` is pinned to 0x05BF (1471) because every per-character frame in
+-- the replayed reference capture identifies the character by that id, and the
+-- client discards records whose id does not match the one it was handed in
+-- `GAMEMSG_RESPONSE_CLIENTCHARUNIQUE`. It becomes an allocated per-character id
+-- once `RESPONSE_ALLCHARINFOTWO` (249) is generated from `character_items`
+-- instead of replayed.
+INSERT INTO characters (account_id, slot, name, class_kind, gender, map_id, pos_x, pos_y, game_unique)
+SELECT account_id, 0, 'Tester', 1, 1, 1, 25, 13, 1471
 FROM accounts
 WHERE username = 'test'
 ON CONFLICT (account_id, slot) DO UPDATE
@@ -34,7 +40,8 @@ ON CONFLICT (account_id, slot) DO UPDATE
       gender     = EXCLUDED.gender,
       map_id     = EXCLUDED.map_id,
       pos_x      = EXCLUDED.pos_x,
-      pos_y      = EXCLUDED.pos_y;
+      pos_y      = EXCLUDED.pos_y,
+      game_unique = EXCLUDED.game_unique;
 
 INSERT INTO character_stats (character_id, level, exp, str, dex, vit, mag, hnd, luk, wis)
 SELECT c.character_id, 10, 0, 20, 15, 20, 10, 10, 10, 10

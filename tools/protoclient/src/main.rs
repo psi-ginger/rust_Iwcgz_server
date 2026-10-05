@@ -6,12 +6,19 @@
 //! okay". It is the harness that must go green before `New Era.exe` is
 //! pointed at the service.
 //!
-//! Usage: `protoclient [front_addr] [user] [password]`
+//! Usage: `protoclient [front_addr] [user] [password] [--move-item <from>:<to>] [--drop-item <slot>:<count>]`
 //! Defaults: `127.0.0.1:5700 test test`.
+//!
+//! `--move-item` runs the inventory phase after world entry: it pulls the
+//! `RESPONSE_ALLCHARINFOTWO` item array the server generated from PostgreSQL,
+//! sends `GAMEMSG_REQUEST_ITEMMOVE`, and pulls the array again to check the move
+//! was persisted and re-read. That is the whole item-mutation round trip, minus
+//! the GUI's local optimistic update.
 
 use gz_cipher::Cipher;
 use gz_net::{Frame, FrameParser, HEADER_SIZE};
 use gz_proto::game::MAKE_CHAR_INFO_PAYLOAD_LEN;
+use gz_proto::item::{CLT_ITEM_SIZE, Item};
 use gz_proto::opcodes_front::FrontMsg;
 use gz_proto::opcodes_game::GameMsg;
 use gz_proto::wire::{Reader, Writer};
@@ -26,6 +33,52 @@ async fn main() -> Result<(), AnyError> {
     let addr = args.next().unwrap_or_else(|| "127.0.0.1:5700".to_string());
     let user = args.next().unwrap_or_else(|| "test".to_string());
     let password = args.next().unwrap_or_else(|| "test".to_string());
+
+    // Optional `--move-item <from>:<to>`, the two absolute `cltPItemInfo::clItem`
+    // indices the client would put in `cltMoveItemInfo`.
+    let rest = args.collect::<Vec<_>>();
+    let move_item = rest
+        .windows(2)
+        .find(|w| w[0] == "--move-item")
+        .map(|w| {
+            let (from, to) = w[1]
+                .split_once(':')
+                .ok_or("expected --move-item <from>:<to>")?;
+            Ok::<_, AnyError>((
+                from.parse::<u16>()
+                    .map_err(|_| "from is not a slot index")?,
+                to.parse::<u16>().map_err(|_| "to is not a slot index")?,
+            ))
+        })
+        .transpose()?;
+
+    // Optional `--drop-item <slot>:<count>[:<claim_unique>]`, the
+    // `cltGameMsgRequest_InvDrop` body: one absolute slot and how much of that
+    // stack to remove. The optional third field puts a *wrong* `siUnique` in the
+    // request, which is how a desynced client looks; the probe then expects the
+    // server to refuse.
+    let drop_item = rest
+        .windows(2)
+        .find(|w| w[0] == "--drop-item")
+        .map(|w| {
+            let mut parts = w[1].split(':');
+            let slot = parts
+                .next()
+                .ok_or("expected --drop-item <slot>:<count>")?
+                .parse::<u16>()
+                .map_err(|_| "slot is not a slot index")?;
+            let count = parts
+                .next()
+                .ok_or("expected --drop-item <slot>:<count>")?
+                .parse::<u16>()
+                .map_err(|_| "count is not a number")?;
+            let claim = parts
+                .next()
+                .map(|s| s.parse::<u16>().map_err(|_| "claim_unique is not a number"))
+                .transpose()?;
+            Ok::<_, AnyError>((slot, count, claim))
+        })
+        .transpose()?;
 
     println!("probe: connecting to {addr} as {user:?}");
     let mut stream = TcpStream::connect(&addr).await?;
@@ -199,6 +252,11 @@ async fn main() -> Result<(), AnyError> {
     if u16::try_from(char_unique).unwrap_or(0) != make_char_unique {
         return Err("make-char unique does not match the session charunique".into());
     }
+    // `clOrder.siOrder` must be ORDER_STOP (2), or the client's SetChar hits
+    // the `default:` branch and the char's order state stays unset.
+    if p[0x14] != 2 {
+        return Err(format!("login packet clOrder.siOrder is {}, want 2", p[0x14]).into());
+    }
 
     // The dev character sits in Village01 (map index 1), whose client-side
     // `siVillageUnique` is 1; the client blocks movement until this reply.
@@ -211,16 +269,302 @@ async fn main() -> Result<(), AnyError> {
         &w.finish(),
     )
     .await?;
-    let (cmd, plain) = read_game_frame(&mut game, &mut gparser, &mut gbuf, &mut link_rx).await?;
-    expect_game_cmd(cmd, GameMsg::ResponseVillagestruct)?;
+    let (_cmd, plain) = read_until_game_cmd(
+        &mut game,
+        &mut gparser,
+        &mut gbuf,
+        &mut link_rx,
+        GameMsg::ResponseVillagestruct,
+    )
+    .await?;
     let village = i16::from_le_bytes([plain[HEADER_SIZE], plain[HEADER_SIZE + 1]]);
     println!(
         "probe: village {village} structure ({} bytes) received",
         plain.len() - HEADER_SIZE
     );
 
+    if let Some(spec) = move_item {
+        probe_item_move(
+            &mut game,
+            &mut gparser,
+            &mut gbuf,
+            &mut link_rx,
+            &mut session_tx,
+            spec,
+        )
+        .await?;
+    }
+
+    if let Some(spec) = drop_item {
+        probe_item_drop(
+            &mut game,
+            &mut gparser,
+            &mut gbuf,
+            &mut link_rx,
+            &mut session_tx,
+            spec,
+        )
+        .await?;
+    }
+
     println!("probe: front + game login path OK; world entry OK");
     Ok(())
+}
+
+/// Runs the inventory round trip: read the item array the server generated, move
+/// one slot, read it again.
+///
+/// There is no reply to `REQUEST_ITEMMOVE` in the legacy opcode table, so the
+/// only way to observe the effect is to ask for the character info again — which
+/// is exactly what the GUI client does, and exactly what makes the mutation
+/// visible at all.
+async fn probe_item_move(
+    game: &mut TcpStream,
+    gparser: &mut FrameParser,
+    gbuf: &mut [u8],
+    link_rx: &mut Cipher,
+    session_tx: &mut Cipher,
+    (from, to): (u16, u16),
+) -> Result<(), AnyError> {
+    let before = fetch_item_array(game, gparser, gbuf, link_rx, session_tx).await?;
+    let from_item = before[usize::from(from)];
+    let to_item = before[usize::from(to)];
+    println!(
+        "probe: before move — slot {from} holds item {} x{}, slot {to} holds item {} x{}",
+        from_item.unique(),
+        from_item.count(),
+        to_item.unique(),
+        to_item.count()
+    );
+    if from_item.is_empty() {
+        return Err(format!("slot {from} is empty, nothing to move").into());
+    }
+
+    let mut w = Writer::with_capacity(4);
+    w.u16(from);
+    w.u16(to);
+    send_game_encoded(game, session_tx, GameMsg::RequestItemmove, &w.finish()).await?;
+    println!("probe: sent REQUEST_ITEMMOVE {from} -> {to}");
+
+    let after = fetch_item_array(game, gparser, gbuf, link_rx, session_tx).await?;
+    let from_after = after[usize::from(from)];
+    let to_after = after[usize::from(to)];
+    println!(
+        "probe: after move  — slot {from} holds item {} x{}, slot {to} holds item {} x{}",
+        from_after.unique(),
+        from_after.count(),
+        to_after.unique(),
+        to_after.count()
+    );
+
+    // Either the two records exchanged places, or — when they held the same item
+    // — they merged into one stack in the destination and the source emptied.
+    let swapped = from_after == to_item && to_after == from_item;
+    let stacked = from_after.is_empty()
+        && to_after.unique() == from_item.unique()
+        && to_after.count() == from_item.count() + to_item.count();
+    if swapped || stacked {
+        println!(
+            "probe: the move round-tripped through PostgreSQL ({})",
+            if swapped { "swapped" } else { "stacked" }
+        );
+        Ok(())
+    } else {
+        Err(format!(
+            "after moving {from} -> {to}, the server's array does not agree with the move: \
+             slot {from} is {} x{} and slot {to} is {} x{}, expected a swap or a stack",
+            from_after.unique(),
+            from_after.count(),
+            to_after.unique(),
+            to_after.count()
+        )
+        .into())
+    }
+}
+
+/// Runs the drop round trip: read the item array, drop part of one stack, and
+/// check both the 7210 the server replies with and the persisted array.
+///
+/// A drop is the first inventory operation with an actual acknowledgement. The
+/// server answers `GAMEMSG_REQUEST_INVDROP` (307) with
+/// `GAMEMSG_RESPONSE_PERSONITEMINFO` (7210) carrying the slot's new contents —
+/// not with 309, which only draws a ground icon. The GUI client never updates its
+/// bag optimistically on a drop, so this frame is the whole confirmation.
+async fn probe_item_drop(
+    game: &mut TcpStream,
+    gparser: &mut FrameParser,
+    gbuf: &mut [u8],
+    link_rx: &mut Cipher,
+    session_tx: &mut Cipher,
+    (slot, count, claim): (u16, u16, Option<u16>),
+) -> Result<(), AnyError> {
+    let before = fetch_item_array(game, gparser, gbuf, link_rx, session_tx).await?;
+    let held = before[usize::from(slot)];
+    println!(
+        "probe: before drop — slot {slot} holds item {} x{}",
+        held.unique(),
+        held.count()
+    );
+    if held.is_empty() {
+        return Err(format!("slot {slot} is empty, nothing to drop").into());
+    }
+    if count == 0 || count > held.count() {
+        return Err(format!("cannot drop {count} of the {} in slot {slot}", held.count()).into());
+    }
+
+    // `cltGameMsgRequest_InvDrop` is `SI32 siItemPos` then the client's copy of
+    // the record, carrying the count it wants removed. A `claim` overrides the
+    // unique so the request deliberately disagrees with the server.
+    let mut w = Writer::with_capacity(4 + CLT_ITEM_SIZE);
+    w.i32(i32::from(slot));
+    let mut claimed = held;
+    claimed.set_count(count);
+    if let Some(lying) = claim {
+        claimed = Item::from_unique(lying, count);
+        println!(
+            "probe: deliberately claiming item {lying} for a slot holding {}",
+            held.unique()
+        );
+    }
+    w.bytes(&claimed.encode());
+    send_game_encoded(game, session_tx, GameMsg::RequestInvdrop, &w.finish()).await?;
+    println!("probe: sent REQUEST_INVDROP slot {slot} count {count}");
+
+    // The 7210 is the first frame the server volunteers, so read it directly.
+    let (cmd, plain) = read_until_game_cmd(
+        game,
+        gparser,
+        gbuf,
+        link_rx,
+        GameMsg::ResponsePersoniteminfo,
+    )
+    .await?;
+    assert_eq!(cmd, GameMsg::ResponsePersoniteminfo as u16);
+    let body = &plain[HEADER_SIZE..];
+    println!("probe: got RESPONSE_PERSONITEMINFO ({} bytes)", body.len());
+
+    let echoed_pos = u16::from_le_bytes([body[0], body[1]]);
+    let echoed = Item::decode(&body[12..])?;
+    let expected_count = held.count() - count;
+    println!(
+        "probe: 7210 says slot {echoed_pos} now holds item {} x{}",
+        echoed.unique(),
+        echoed.count()
+    );
+
+    if echoed_pos != slot {
+        return Err(format!("7210 names slot {echoed_pos}, asked about {slot}").into());
+    }
+
+    let remaining_ok = if expected_count == 0 {
+        echoed.is_empty()
+    } else {
+        echoed.unique() == held.unique() && echoed.count() == expected_count
+    };
+
+    // A request that disagreed with the stored record must be refused outright:
+    // the slot keeps its contents and nothing is written to the ground.
+    if claim.is_some() {
+        if echoed != held {
+            return Err(format!(
+                "a request claiming the wrong item was not refused: slot {slot} came back as \
+                 item {} x{}, expected the unchanged item {} x{}",
+                echoed.unique(),
+                echoed.count(),
+                held.unique(),
+                held.count()
+            )
+            .into());
+        }
+        println!("probe: the mismatched request was refused and the slot left intact");
+        return Ok(());
+    }
+
+    if !remaining_ok {
+        return Err(format!(
+            "7210 reports slot {slot} as item {} x{}, expected item {} x{}",
+            echoed.unique(),
+            echoed.count(),
+            held.unique(),
+            expected_count
+        )
+        .into());
+    }
+
+    // And confirm it reached PostgreSQL rather than just the reply path.
+    let after = fetch_item_array(game, gparser, gbuf, link_rx, session_tx).await?;
+    let persisted = after[usize::from(slot)];
+    if persisted != echoed {
+        return Err(format!(
+            "the stored array disagrees with the 7210 it just sent: slot {slot} is {} x{} \
+             in RESPONSE_ALLCHARINFOTWO but {} x{} in 7210",
+            persisted.unique(),
+            persisted.count(),
+            echoed.unique(),
+            echoed.count()
+        )
+        .into());
+    }
+
+    println!("probe: the drop round-tripped through PostgreSQL (7210 confirmed)");
+    Ok(())
+}
+
+/// Asks for the character info block and returns the item array it carries.
+///
+/// The reference server answers `REQUEST_CHANGESTATUSINFO` (230) with 25 frames,
+/// not with `RESPONSE_ALLCHARINFO` (231); `ALLCHARINFOTWO` (249) is the one that
+/// carries `cltPersonInfoTwo`, whose first member is the 80-slot item array.
+async fn fetch_item_array(
+    game: &mut TcpStream,
+    gparser: &mut FrameParser,
+    gbuf: &mut [u8],
+    link_rx: &mut Cipher,
+    session_tx: &mut Cipher,
+) -> Result<Vec<gz_proto::item::Item>, AnyError> {
+    let mut w = Writer::with_capacity(25);
+    w.i32(33);
+    send_game_encoded(
+        game,
+        session_tx,
+        GameMsg::RequestChangestatusinfo,
+        &w.finish(),
+    )
+    .await?;
+
+    loop {
+        let (cmd, plain) = read_game_frame(game, gparser, gbuf, link_rx).await?;
+        if cmd == GameMsg::ResponseAllcharinfotwo as u16 {
+            let body = &plain[HEADER_SIZE..];
+            println!("probe: ALLCHARINFOTWO body is {} bytes", body.len());
+            return gz_proto::item::decode_item_array(body).map_err(Into::into);
+        }
+    }
+}
+
+/// Reads frames until `expected` arrives, reporting what it skipped over.
+///
+/// World entry is a burst rather than a request/response pair: selecting a
+/// character makes the server replay ~45 captured frames before it answers
+/// anything, so a probe cannot assume the next frame is the reply it asked for.
+async fn read_until_game_cmd(
+    game: &mut TcpStream,
+    gparser: &mut FrameParser,
+    gbuf: &mut [u8],
+    link_rx: &mut Cipher,
+    expected: GameMsg,
+) -> Result<(u16, Vec<u8>), AnyError> {
+    let mut skipped = 0usize;
+    loop {
+        let (cmd, plain) = read_game_frame(game, gparser, gbuf, link_rx).await?;
+        if cmd == expected as u16 {
+            if skipped > 0 {
+                println!("probe: skipped {skipped} world-entry frame(s) looking for {expected:?}");
+            }
+            return Ok((cmd, plain));
+        }
+        skipped += 1;
+    }
 }
 
 /// Builds the 2108-byte `sRequest_English_LogIn` body.

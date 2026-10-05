@@ -9,3 +9,7 @@ sqlx = { version = "0.8", features = ["postgres", "runtime-tokio"] }
 tokio = { version = "1", features = ["full"] }
 async-trait = "0.1"
 sha2 = "0.10"
+# Slot indices and record sizes are wire facts, not storage decisions: the
+# `character_items` schema mirrors the client's 80-entry array, so the two must
+# not be able to drift.
+gz-proto = { path = "../gz-proto" }

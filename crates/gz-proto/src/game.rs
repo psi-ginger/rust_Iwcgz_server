@@ -321,6 +321,8 @@ pub struct MakeCharInfo {
     pub y: u16,
     /// `uiMapIndex` — the `MapData` index the client loads (10 bits). Must
     /// match the client's `clUnitMapInfo` row or `SetCharReservedChar` skips it.
+    ///
+    /// Build this with [`client_map_index`] rather than from `map_id` directly.
     pub map_index: u16,
     /// `uiTotalMoveSpeed` — base movement speed (6 bits).
     pub total_move_speed: u8,
@@ -333,6 +335,22 @@ pub struct MakeCharInfo {
     pub map_unique: i16,
     /// `siMakeAniType` — personal make-item animation type.
     pub make_ani_type: i16,
+}
+
+/// The `uiMapIndex` this client will be holding for a character on `map_id`.
+///
+/// `MakeCharInfo` packs the field into 10 bits and `Client-Login.cpp:245` copies
+/// it straight into `cltMapManager::CurrentMapIndex`. That makes it a value the
+/// *server* has to agree with on every frame that names a map to this client —
+/// most sharply `GAMEMSG_RESPONSE_ITEMDROP` (309), whose handler returns without
+/// drawing anything if `clPos.siMapIndex != CurrentMapIndex`
+/// (`Client-SystemNPC.cpp:2280`).
+///
+/// Both the login frame and the 309 encoder go through here so the two cannot
+/// drift apart silently.
+#[must_use]
+pub const fn client_map_index(map_id: i32) -> u16 {
+    (map_id as u32 & 0x3FF) as u16
 }
 
 impl MakeCharInfo {
@@ -363,7 +381,15 @@ impl MakeCharInfo {
         w.u8(self.home_village_unique); // 0x10
         w.pad(1); // 0x11
         w.u16(0); // 0x12: siJimCharUnique
-        w.pad(0x50 - 0x14); // 0x14..0x50
+        // 0x14: `cltOrderDataInfo clOrder` — `siOrder` + `siHostMode`. Leaving
+        // this zero hits the `default:` case in `cltCommonLogic::SetChar`, which
+        // not only fires a debug MsgBox but also skips `OrderStop`, leaving the
+        // char's order struct uninitialized; the client's frame loop then
+        // dereferences a null pointer (APPCRASH at RVA 0x921fa).
+        // Legacy sends `clOrder.Make(ORDER_STOP=2, BY_PLAYER=0, ...)`.
+        w.u8(2); // 0x14: siOrder = ORDER_STOP
+        w.u8(0); // 0x15: siHostMode = BY_PLAYER
+        w.pad(0x50 - 0x16); // 0x16..0x50: clOrder.params/dwPushedTime + tail
 
         w.u8(0); // 0x50: siCurrentShowHorse
         w.u8(self.game_master_level); // 0x51
