@@ -1549,8 +1549,32 @@ async fn send_raw(
 /// replay a *frozen* timestamp rather than a live one, so they are stale rather
 /// than spamming; see the clock notes on [`replay`].
 fn withhold_always(cmd: u16) -> Option<&'static str> {
-    (cmd == GameMsg::ResponseLetter as u16)
-        .then_some("it is somebody else's letter: 116 is per-event, not world entry")
+    if cmd == GameMsg::ResponseLetter as u16 {
+        return Some("it is somebody else's letter: 116 is per-event, not world entry");
+    }
+    // The client arms `m_bEvent=true` on any monster-attack body
+    // (`Client-MofuMofuEvent.cpp:91-96`); with no event running the honest
+    // thing is to send nothing, exactly as the legacy's `IsEvent()` gate
+    // (`Server-Person.cpp:2380`) does.
+    if cmd == GameMsg::ResponseMonsterAttackStart as u16 {
+        return Some("no monster-attack event is running; a body would arm one at village 0");
+    }
+    // Answered per-request by `handle_village_struct`; the captured burst copy
+    // carries village 35's live structure table and would overwrite the fresh
+    // answer.
+    if cmd == GameMsg::ResponseVillagestruct as u16 {
+        return Some(
+            "generated on request (1101); the captured burst copy carries the reference village's structures",
+        );
+    }
+    // The client walks the payload record-by-record with no length guard
+    // (`Client-Login.cpp:60-82`); with nobody else on the map there are no
+    // records, and there is no valid "empty list" body. The legacy omits the
+    // frame entirely (`ServerMap.cpp:140`).
+    if cmd == GameMsg::ResponseLoginmany as u16 {
+        return Some("no other characters on the map; an empty body would be walked as garbage");
+    }
+    None
 }
 
 /// Whether a captured frame has to be withheld when the client re-asks for state
@@ -1810,6 +1834,21 @@ impl LiveFrames<'_> {
         let is_family = cmd == GameMsg::ResponseFamilyUpdate as u16;
         let is_village = cmd == GameMsg::ResponseGetvillageinfo as u16;
         let is_guild_status = cmd == GameMsg::ResponseGuildSetguildstatus as u16;
+        // Event/secondary state frames that ride the same preamble. Each is
+        // either generated here with an honest "empty" body, or withheld via
+        // `withhold_always`. 8451 is the exception: its two captured copies
+        // stay verbatim (documented static blob, no session id in body).
+        let is_space_box = cmd == GameMsg::ResponseSpaceBoxList as u16;
+        let is_person_quest = cmd == GameMsg::ResponsePersonQuest as u16;
+        let is_soulguard_get = cmd == GameMsg::ResponseSoulguardGet as u16;
+        let is_soulguard_house_get = cmd == GameMsg::ResponseSoulguardHouseGet as u16;
+        let is_marry_info = cmd == GameMsg::ResponseGetMarryInfo as u16;
+        let is_elixir_set = cmd == GameMsg::ResponseElixirSet as u16;
+        let is_enemy_capture_all = cmd == GameMsg::ResponseEnemycaptureall as u16;
+        let is_item_mall_existence = cmd == GameMsg::ResponseItemmallexistence as u16;
+        let is_servertime = cmd == GameMsg::ResponseServertime as u16;
+        let is_zero_op_8464 = cmd == world_entry::OP_8464;
+        let is_zero_op_8470 = cmd == world_entry::OP_8470;
         if !is_one
             && !is_two
             && !is_name
@@ -1819,6 +1858,17 @@ impl LiveFrames<'_> {
             && !is_family
             && !is_village
             && !is_guild_status
+            && !is_space_box
+            && !is_person_quest
+            && !is_soulguard_get
+            && !is_soulguard_house_get
+            && !is_marry_info
+            && !is_elixir_set
+            && !is_enemy_capture_all
+            && !is_item_mall_existence
+            && !is_servertime
+            && !is_zero_op_8464
+            && !is_zero_op_8470
         {
             return Ok(None);
         }
@@ -1839,6 +1889,63 @@ impl LiveFrames<'_> {
                 )
             })?;
             return Ok(Some(world_entry::guild_status(char_unique)));
+        }
+        // The frames with no session-specific content: capture-length bodies,
+        // honest zeros (all-empty) or the legacy's defaults (02 00 capacity).
+        if is_space_box {
+            return Ok(Some(world_entry::space_box_list_empty()));
+        }
+        if is_person_quest {
+            return Ok(Some(world_entry::person_quest_empty()));
+        }
+        if is_soulguard_get {
+            return Ok(Some(world_entry::soulguard_get_empty()));
+        }
+        if is_soulguard_house_get {
+            return Ok(Some(world_entry::soulguard_house_get_default()));
+        }
+        if is_marry_info {
+            return Ok(Some(world_entry::marry_info_empty()));
+        }
+        if is_enemy_capture_all {
+            return Ok(Some(world_entry::enemy_capture_all_clear()));
+        }
+        if is_item_mall_existence {
+            return Ok(Some(world_entry::item_mall_existence_absent()));
+        }
+        if is_zero_op_8464 {
+            return Ok(Some(world_entry::zero_frame(
+                world_entry::OP_8464,
+                world_entry::OP_8464_LEN,
+            )));
+        }
+        if is_zero_op_8470 {
+            return Ok(Some(world_entry::zero_frame(
+                world_entry::OP_8470,
+                world_entry::OP_8470_LEN,
+            )));
+        }
+        if is_elixir_set {
+            let char_unique = u16::try_from(self.char_unique).map_err(|_| {
+                format!(
+                    "session char_unique {} does not fit the u32 elixir-id stamp",
+                    self.char_unique
+                )
+            })?;
+            return Ok(Some(world_entry::elixir_set_empty(char_unique)));
+        }
+        if is_servertime {
+            // 177 rides the preamble twice (idx 62 in the prologue tail, idx 84
+            // in the state sync). A frozen stamp is the one thing the client
+            // already folds into its minute/day display; a fresh one costs it
+            // nothing.
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            return Ok(Some(world_entry::encode_server_time(
+                &world_entry::ServerTime::from_unix_seconds(now),
+            )));
         }
         // `None` until `REQUEST_SELECTCHAR` names the character, which is when the
         // 230 burst carrying these frames is first sent.
@@ -2682,6 +2789,9 @@ mod tests {
             withheld,
             vec![
                 GameMsg::ResponseAllcharinfoone as u16,
+                GameMsg::ResponseMonsterAttackStart as u16,
+                GameMsg::ResponseLoginmany as u16,
+                GameMsg::ResponseVillagestruct as u16,
                 GameMsg::ResponseLetter as u16,
             ]
         );
@@ -2694,7 +2804,9 @@ mod tests {
             .collect();
         assert!(kept.contains(&(GameMsg::ResponseAllcharinfotwo as u16)));
         assert_eq!(sent.len(), 25, "the captured state-sync burst is 25 frames");
-        assert_eq!(kept.len(), sent.len() - 2);
+        assert_eq!(kept.len(), sent.len() - 5);
+        // Only the two event-specific frames and the letter had to move; the
+        // rest are now generated, so being sent is unchanged.
     }
 
     /// The memo dialog is somebody else's letter, and it is withheld on *entry*.
@@ -2844,5 +2956,111 @@ mod tests {
         // Slot 79 is outside every container: the array is 80 long but only 79
         // slots are addressable.
         assert!(items[BAG1_END as usize + 1..].iter().all(Item::is_empty));
+    }
+
+    /// Pins the new zero/empty bodies to the exact capture sizes. These
+    /// frames replaced a reference-character payload with a passive "nothing
+    /// here" body; a size mismatch would desync the client's fixed-stride
+    /// walk like the quest/spacebox decoders do.
+    #[test]
+    fn the_zero_state_frames_match_the_capture_lengths() {
+        let cases: &[(u16, Vec<u8>)] = &[
+            (
+                GameMsg::ResponseSpaceBoxList as u16,
+                world_entry::space_box_list_empty(),
+            ),
+            (
+                GameMsg::ResponsePersonQuest as u16,
+                world_entry::person_quest_empty(),
+            ),
+            (
+                GameMsg::ResponseSoulguardGet as u16,
+                world_entry::soulguard_get_empty(),
+            ),
+            (
+                GameMsg::ResponseSoulguardHouseGet as u16,
+                world_entry::soulguard_house_get_default(),
+            ),
+            (
+                GameMsg::ResponseGetMarryInfo as u16,
+                world_entry::marry_info_empty(),
+            ),
+            (
+                GameMsg::ResponseEnemycaptureall as u16,
+                world_entry::enemy_capture_all_clear(),
+            ),
+            (
+                GameMsg::ResponseItemmallexistence as u16,
+                world_entry::item_mall_existence_absent(),
+            ),
+            (
+                world_entry::OP_8464,
+                world_entry::zero_frame(world_entry::OP_8464, world_entry::OP_8464_LEN),
+            ),
+            (
+                world_entry::OP_8470,
+                world_entry::zero_frame(world_entry::OP_8470, world_entry::OP_8470_LEN),
+            ),
+        ];
+        for (cmd, body) in cases {
+            let captured = generated_capture::frame(*cmd)
+                .unwrap_or_else(|| panic!("capture must contain opcode {cmd}"));
+            assert_eq!(body.len(), captured.len(), "opcode {cmd}");
+        }
+        // 8286's only non-zero is the capacity default.
+        let house = world_entry::soulguard_house_get_default();
+        assert_eq!(&house[0..2], &[0x02, 0x00], "default capacity 2");
+        assert!(house[2..].iter().all(|&b| b == 0));
+        // 8178 needs the session id to start at offset 0.
+        let elixir = world_entry::elixir_set_empty(0x05BF);
+        assert_eq!(&elixir[0..4], &[0xBF, 0x05, 0x00, 0x00]);
+        assert!(elixir[4..].iter().all(|&b| b == 0));
+        let cap8178 = generated_capture::frame(GameMsg::ResponseElixirSet as u16).unwrap();
+        assert_eq!(elixir.len(), cap8178.len());
+    }
+
+    /// The 230 burst must not fall through to a verbatim replay of someone
+    /// else's payload. Every opcode in range `66..91` is either generated
+    /// (via `regenerate`), withheld, or one of the two documented static
+    /// blobs (8451 twice, 1208).
+    #[test]
+    fn every_state_sync_frame_is_generated_withheld_or_a_static_blob() {
+        // Already regenerated or withheld by the earlier slices.
+        let regenerated: &[u16] = &[
+            GameMsg::ResponseAllcharinfoone as u16,
+            GameMsg::ResponseAllcharinfotwo as u16,
+            GameMsg::ResponseName as u16,
+            GameMsg::ResponsePersonHorse as u16,
+            GameMsg::ResponseSkillbookMagicinfoGet as u16,
+            GameMsg::ResponseFamilyUpdate as u16,
+            GameMsg::ResponseGetvillageinfo as u16,
+            GameMsg::ResponseSpaceBoxList as u16,
+            GameMsg::ResponsePersonQuest as u16,
+            GameMsg::ResponseSoulguardGet as u16,
+            GameMsg::ResponseSoulguardHouseGet as u16,
+            GameMsg::ResponseGetMarryInfo as u16,
+            GameMsg::ResponseElixirSet as u16,
+            GameMsg::ResponseEnemycaptureall as u16,
+            GameMsg::ResponseItemmallexistence as u16,
+            GameMsg::ResponseServertime as u16,
+            GameMsg::ResponseGuildSetguildstatus as u16,
+            world_entry::OP_8464,
+            world_entry::OP_8470,
+        ];
+        // Kept verbatim as documented static data: 8451 appears twice in the
+        // burst and carries aSeason-1 UI blob only; 1208's 4-byte packed
+        // `cltDate` is frozen but harmless (the client renders it in the
+        // upper bar; the server's game clock is not wired to a real timebase).
+        let static_blobs: &[u16] = &[8451, GameMsg::ResponseDate as u16];
+        for (cmd, _, _) in crate::generated_frames::CAP_FRAMES[66..=90].iter() {
+            if withhold_always(*cmd).is_some() {
+                continue;
+            }
+            let ok = regenerated.contains(cmd) || static_blobs.contains(cmd);
+            assert!(
+                ok,
+                "opcode {cmd} in the state-sync burst is neither generated, withheld, nor a documented static blob"
+            );
+        }
     }
 }

@@ -262,17 +262,6 @@ pub fn prologue(input: &WorldEntry) -> Vec<(u16, Vec<u8>)> {
         PERSON_ITEM_INFO_LEN,
         "PERSONITEMINFO must be {PERSON_ITEM_INFO_LEN} bytes"
     );
-    let ServerTime {
-        year,
-        month,
-        day_of_week,
-        day,
-        hour,
-        minute,
-        second,
-        millisecond,
-    } = input.now;
-
     let mut out: Vec<(u16, Vec<u8>)> = Vec::with_capacity(45);
 
     // Country/war state: this character is in no country war.
@@ -314,19 +303,7 @@ pub fn prologue(input: &WorldEntry) -> Vec<(u16, Vec<u8>)> {
 
     // `SYSTEMTIME`. The first `u16` is `wYear`, so year 2026 is 0x07ea --
     // which is why the captured body starts `ea 07` and not a BCD pair.
-    let mut time = Vec::with_capacity(SERVER_TIME_LEN);
-    for field in [
-        year,
-        month,
-        day_of_week,
-        day,
-        hour,
-        minute,
-        second,
-        millisecond,
-    ] {
-        time.extend_from_slice(&field.to_le_bytes());
-    }
+    let time = encode_server_time(&input.now);
     debug_assert_eq!(time.len(), SERVER_TIME_LEN);
     out.push((GameMsg::ResponseServertime as u16, time));
 
@@ -372,6 +349,92 @@ const EVENT_NPC_LEN: usize = 16;
 const TRANSFORM_LEN: usize = 772;
 const SERVER_TIME_LEN: usize = 16;
 const PERSON_ITEM_INFO_LEN: usize = 104;
+
+/// `GAMEMSG_RESPONSE_PERSONQUEST` body length — `sizeof(cltPQuestInfo)` as the
+/// running client expects it (1536), which is wider than this source tree's
+/// current `Quest.h` implies (`MAX_QUEST_TYPE` drift). The captured frame is the
+/// only length the shipped client accepts, so it is pinned, not derived.
+pub const PERSON_QUEST_LEN: usize = 1536;
+/// `GAMEMSG_RESPONSE_SPACEBOXLIST` body length — `sizeof(cltGameMsgResponse_Space_Box_List)`
+/// as the running client expects it (16800). Same drift caveat as above: the
+/// source tree's `MAX_ITEM_SPACE_BOX` gives a smaller size, so the capture is
+/// pinned rather than derived.
+pub const SPACE_BOX_LIST_LEN: usize = 16800;
+pub const SOULGUARD_GET_LEN: usize = 28;
+pub const SOULGUARD_HOUSE_GET_LEN: usize = 64;
+pub const MARRY_INFO_LEN: usize = 48;
+pub const ELIXIR_SET_LEN: usize = 24;
+pub const ENEMY_CAPTURE_ALL_LEN: usize = 12;
+pub const ITEM_MALL_EXISTENCE_LEN: usize = 1;
+/// Opcode 8464: `GAMEMSG_RESPONSE_*`, len 14340. Entirely zero in the capture;
+/// no legacy enum entry in this source tree (the server build is newer). Body =
+/// all zeros.
+pub const OP_8464: u16 = 8464;
+pub const OP_8464_LEN: usize = 14340;
+/// Opcode 8470: same story, len 4168, all zero.
+pub const OP_8470: u16 = 8470;
+pub const OP_8470_LEN: usize = 4168;
+
+/// 225, 349, 225 et al. as honest "nothing" bodies for a fresh character.
+pub fn person_quest_empty() -> Vec<u8> {
+    vec![0u8; PERSON_QUEST_LEN]
+}
+pub fn space_box_list_empty() -> Vec<u8> {
+    vec![0u8; SPACE_BOX_LIST_LEN]
+}
+pub fn soulguard_get_empty() -> Vec<u8> {
+    vec![0u8; SOULGUARD_GET_LEN]
+}
+pub fn soulguard_house_get_default() -> Vec<u8> {
+    // `m_siMaxHaveHouseNum` = 2 is the legacy's default house capacity
+    // (`ServerDB-SoulGuard.cpp:269-277` creates the row with 2). The remaining
+    // 62 bytes (ten stored guard ids + kinds) are zero: no guards deployed.
+    let mut v = vec![0u8; SOULGUARD_HOUSE_GET_LEN];
+    v[0..2].copy_from_slice(&2i16.to_le_bytes());
+    v
+}
+pub fn marry_info_empty() -> Vec<u8> {
+    vec![0u8; MARRY_INFO_LEN]
+}
+/// 8178 `ResponseElixirSet`: `SI32 m_siCharUnique` then a zero `cltElixir_Info`
+/// (no elixir active). The client applies it to the character whose id sits at
+/// offset 0 (`Client-System.cpp:4273-4287`), so it must carry *this* session's
+/// id rather than the capture's 1471.
+pub fn elixir_set_empty(char_unique: u16) -> Vec<u8> {
+    let mut v = vec![0u8; ELIXIR_SET_LEN];
+    v[0..4].copy_from_slice(&u32::from(char_unique).to_le_bytes());
+    v
+}
+pub fn enemy_capture_all_clear() -> Vec<u8> {
+    vec![0u8; ENEMY_CAPTURE_ALL_LEN]
+}
+pub fn item_mall_existence_absent() -> Vec<u8> {
+    // A one-byte `bool`: `false`, no undelivered item-mall mail.
+    vec![0u8; ITEM_MALL_EXISTENCE_LEN]
+}
+pub fn zero_frame(op: u16, len: usize) -> Vec<u8> {
+    let _ = op;
+    vec![0u8; len]
+}
+/// Packs a `ServerTime` into the 16-byte `cltGameMsgResponse_ServerTime` body
+/// (`_SYSTEMTIME`: eight little-endian `u16`s). Extracted so the prologue and
+/// the state-sync regenerator share one encoder.
+pub fn encode_server_time(now: &ServerTime) -> Vec<u8> {
+    let mut time = Vec::with_capacity(SERVER_TIME_LEN);
+    for field in [
+        now.year,
+        now.month,
+        now.day_of_week,
+        now.day,
+        now.hour,
+        now.minute,
+        now.second,
+        now.millisecond,
+    ] {
+        time.extend_from_slice(&field.to_le_bytes());
+    }
+    time
+}
 
 /// `siItemPos` in the captured `PERSONITEMINFO`: the slot it announces.
 ///
