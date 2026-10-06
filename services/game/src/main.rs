@@ -1962,11 +1962,16 @@ mod tests {
     // The declared payload lengths. Only the tests below assert on them, so they
     // are imported here rather than at the top of the file.
     use gz_proto::game::{
-        ALL_CHAR_INFO_ONE_LEN, ALL_CHAR_INFO_TWO_LEN, CHANGE_HORSE_LEN, CLIENT_HEALTH_INFO_OFFSET,
+        ALL_CHAR_INFO_ONE_LEN, ALL_CHAR_INFO_TWO_LEN, BASIC_INFO_LEN, CHANGE_HORSE_LEN,
         CLT_HEALTH_INFO_LEN, FAMILY_UPDATE_LEN, GET_VILLAGE_INFO_LEN, HEALTH_INFO_OFFSET,
-        HEALTH_POINT_OFFSET, PERSON_HORSE_HEADER_LEN, PERSON_HORSE_LEN, RESPONSE_NAME_LEN,
-        SKILLBOOK_MAGIC_INFO_LEN,
+        HEALTH_POINT_OFFSET, HEALTH_POINT_SEED, HEALTH_PROBE_BASE, HEALTH_PROBE_LEN,
+        PERSON_HORSE_HEADER_LEN, PERSON_HORSE_LEN, RESPONSE_NAME_LEN, SKILLBOOK_MAGIC_INFO_LEN,
     };
+
+    /// `sizeof(cltPersonInfoOne)` — the body of opcode 248 before its trailing
+    /// set-item fields. `PERSON_INFO_ONE_LEN` is private to `gz_proto`, so the test
+    /// derives it from the public `ALL_CHAR_INFO_ONE_LEN` and the eight-byte tail.
+    const BODY_LEN: usize = ALL_CHAR_INFO_ONE_LEN - 8;
 
     /// The regression this locks down is the 2026-10-05 live failure: seven
     /// `REQUEST_SELECTCHAR` frames on one socket, each replaying the 45-frame
@@ -2146,13 +2151,15 @@ mod tests {
 
         // The unmodelled sub-structs are the documented deviation: zero, where
         // the capture carried the reference character's skills, horse (`Foal744`)
-        // and passport. `clHealthInfo` is carved out of that sweep because the one
-        // byte the client reads as a percentage is written -- see
+        // and passport. The `uiHealthPoint` probe window is carved out of that sweep
+        // because while the client's own offset is still being measured the ramp
+        // writes every byte of it -- see
         // `the_health_point_offset_is_the_one_the_capture_pins`.
+        let probe_end = HEALTH_PROBE_BASE + HEALTH_PROBE_LEN;
         for (i, &b) in body[968..10_160]
             .iter()
             .enumerate()
-            .filter(|&(i, _)| 968 + i != HEALTH_POINT_OFFSET)
+            .filter(|&(i, _)| !(HEALTH_PROBE_BASE..probe_end).contains(&(968 + i)))
         {
             assert_eq!(b, 0, "unmodelled region byte at offset {}", 968 + i);
         }
@@ -2197,18 +2204,15 @@ mod tests {
         let health = horse_info - CLT_HEALTH_INFO_LEN;
         assert_eq!(health, HEALTH_INFO_OFFSET, "clHealthInfo starts here");
 
-        // That is where the *sender* wrote it. `cltHealthInfo::Set` is a
-        // `memcpy` of the whole struct (`Common.cpp:3256-3259`), so the receiver
-        // stores those bytes at its own base — see `CLIENT_HEALTH_INFO_DRIFT`.
-        assert_eq!(CLIENT_HEALTH_INFO_OFFSET, HEALTH_INFO_OFFSET + 1);
-        assert_eq!(
-            HEALTH_POINT_OFFSET, 7_607,
-            "the client reads uiHealthPoint one byte past where the sender wrote it"
-        );
-        assert_eq!(
-            HEALTH_POINT_OFFSET - CLIENT_HEALTH_INFO_OFFSET,
-            10,
-            "uiHealthPoint is the eleventh byte of cltHealthInfo"
+        // That is where the *sender* wrote it. `cltHealthInfo::Set` is a `memcpy`
+        // of the whole struct (`Common.cpp:3256-3259`), so the receiver stores
+        // those bytes at its own base. Writing the seed at either 7606 or 7607 left
+        // the live client reading `-100%`, so the receiver's base is NOT known and
+        // `HEALTH_POINT_OFFSET` below is the sender's number, not the client's.
+        assert_eq!(HEALTH_POINT_OFFSET - HEALTH_INFO_OFFSET, 10);
+        assert!(
+            captured[HEALTH_POINT_OFFSET] <= 100,
+            "the capture's own is a percentage"
         );
 
         // The captured character's wellness state, so the sweep below has something
@@ -2223,13 +2227,9 @@ mod tests {
             &[0, 0, 0, 0],
             "siInnerOrg1..4"
         );
-        assert!(
-            captured[HEALTH_POINT_OFFSET] <= 100,
-            "the capture's uiHealthPoint ({}) is a percentage",
-            captured[HEALTH_POINT_OFFSET]
-        );
 
-        // And what we now send.
+        // And what we now send. While the offset is unknown the body carries the
+        // measuring ramp, so the client tells us where it reads `uiHealthPoint`.
         let generated = encode_all_char_info_one(
             &BasicInfo {
                 account_idnum: 1471,
@@ -2263,32 +2263,46 @@ mod tests {
             0,
         );
         assert_eq!(
-            generated[HEALTH_POINT_OFFSET], 100,
-            "cltHealthInfo::Init() seeds 100, which zeroes every siHealth*Rate"
+            &generated[HEALTH_PROBE_BASE..HEALTH_PROBE_BASE + HEALTH_PROBE_LEN],
+            (0..=u8::MAX).collect::<Vec<u8>>(),
+            "the ramp encodes each byte's own index, so the rate the client reports \
+             is `k - 100` for the byte it reads at HEALTH_PROBE_BASE + k"
         );
-        assert_eq!(
-            &generated[CLIENT_HEALTH_INFO_OFFSET..HEALTH_POINT_OFFSET],
-            &[0u8; 10],
-            "siHungry, siInnerOrg1..4 and uiOrg1..4Disease stay zero as the client reads them"
+        assert!(
+            (HEALTH_PROBE_BASE..HEALTH_PROBE_BASE + HEALTH_PROBE_LEN)
+                .contains(&HEALTH_POINT_OFFSET),
+            "the sender's own offset must stay inside the probe window or the ramp \
+             cannot see it: HEALTH_POINT_OFFSET={} window={}..={}",
+            HEALTH_POINT_OFFSET,
+            HEALTH_PROBE_BASE,
+            HEALTH_PROBE_BASE + HEALTH_PROBE_LEN - 1
         );
-        assert_eq!(
-            generated[HEALTH_INFO_OFFSET], 0,
-            "the byte the sender calls uiHealthPoint stays zero: writing the seed there \
-             is what raised the client's phantom organ complaint by landing on its \
-             uiOrg4Disease"
+        // The ramp must not bleed into the identity/stats block that ends at 968, which
+        // is why it starts at 7,424 rather than at the top of the frame. The span is
+        // wider than a single `uiHealthPoint` precisely so the band can also be
+        // read back as "the client's own base is N bytes off".
+        let ramp_start: usize = HEALTH_PROBE_BASE;
+        assert!(
+            ramp_start > BASIC_INFO_LEN,
+            "the ramp would overwrite the clBI/clIP block the status window depends on"
         );
-        assert_eq!(
-            generated[HEALTH_INFO_OFFSET + 11],
-            100,
-            "the seed lands on the sender's trailing pad byte, which is exactly the \
-             client's uiHealthPoint once the struct is slid one byte"
+        assert!(
+            ramp_start + HEALTH_PROBE_LEN <= BODY_LEN - CLT_HEALTH_INFO_LEN,
+            "the ramp must stay inside the body, clear of the trailing set-item fields"
         );
-        assert_eq!(
-            &generated[HEALTH_INFO_OFFSET..HEALTH_POINT_OFFSET - 1],
-            &[0u8; 10],
-            "the sender's clHealthInfo payload proper is untouched: siHungry, \
-             siInnerOrg1..4 and uiOrg1..4Disease all stay zero"
+        assert!(
+            generated[HEALTH_PROBE_BASE + HEALTH_PROBE_LEN..]
+                .iter()
+                .all(|b| *b == 0),
+            "and it stops at HEALTH_PROBE_BASE + HEALTH_PROBE_LEN"
         );
+
+        // `cltHealthInfo::Init()` seeds `uiHealthPoint` at 100 (`Common.cpp:3253`),
+        // and 100 is the value that makes every `siHealth*Rate` zero
+        // (`Parametabox.cpp:7727`), leaving the client's stat block alone. Assert the
+        // seed itself rather than an offset: the offset is what the probe is
+        // measuring, and this constant is not in doubt.
+        assert_eq!(HEALTH_POINT_SEED, 100);
     }
 
     /// The generated `PERSONITEMINFO` must differ from the capture only in the

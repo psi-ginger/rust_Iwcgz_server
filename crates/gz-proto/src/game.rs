@@ -429,57 +429,82 @@ const HEALTH_POINT_IN_STRUCT: usize = 10;
 /// numbers from the captured bytes rather than from this sentence.
 pub const HEALTH_INFO_OFFSET: usize = 7_596;
 
-/// How far the shipped client's `cltPersonInfoOne` places `clHealthInfo` past
-/// [`HEALTH_INFO_OFFSET`].
+/// **UNRESOLVED — this is the reference *server's* layout, and the shipped client's
+/// is somewhere else.** Read the probe below before trusting
+/// [`HEALTH_POINT_OFFSET`].
 ///
-/// # Deviation from the legacy
+/// `cltHealthInfo::Set` is `memcpy(this, pclinfo, sizeof(cltHealthInfo))`
+/// (`Common.cpp:3256-3259`) — a raw block copy, not a member-wise one. The client
+/// therefore stores our bytes at *its own* base address, and any difference between
+/// the shipped client build and this server source in the summed size of the
+/// sub-structs declared before `clHealthInfo` (`PersonInfo.h:285-313`) slides the
+/// whole struct wholesale. The horse anchor above cannot see that: it pins where the
+/// *sender* wrote `clHorse[0]`, not where the *receiver* reads it.
 ///
-/// [`CLIENT_HEALTH_INFO_DRIFT`] is a client/server build drift, not a modelling
-/// choice, and it is the reason writing 100 at the capture-pinned 7606 does not
-/// work. `cltHealthInfo::Set` is `memcpy(this, pclinfo, sizeof(cltHealthInfo))`
-/// (`Common.cpp:3256-3259`) — a raw block copy, not a member-wise one, so the
-/// client stores our bytes at *its own* base address. Any difference between the
-/// shipped client and this server source in the summed size of the sub-structs
-/// declared before `clHealthInfo` therefore slides the whole struct, silently and
-/// wholesale, and the horse anchor above cannot see it: it pins where the *sender*
-/// wrote `clHorse[0]`, not where the *receiver* reads it.
+/// Three candidate bases have been tried against the live client and all three
+/// failed to move `uiHealthPoint` off 0:
 ///
-/// The drift is pinned to exactly 1 by two client readouts, which between them fix
-/// both the direction and the member:
+/// | seed written at | outcome |
+/// |---|---|
+/// | [`HEALTH_INFO_OFFSET`] + 10 = 7606 | `-100%`, unchanged |
+/// | 7607 | `-100%`, unchanged |
 ///
-/// * The status window's wellness line still read `-100%`. That string is
-///   `GetTxtFromMgr(660)` formatted with `siHealthStrRate`
-///   (`NCharPerson.cpp:2844`, `:2978`, …), and `siHealthStrRate` is
-///   `uiHealthPoint - 100` (`Parametabox.cpp:7727`). So the client's
-///   `uiHealthPoint` was still 0: byte 7606 is *not* it, and the drift is not 0.
-/// * The same session then reported an active body-organ complaint, which
-///   `cltHealth::GetCurDisease` only produces when `FindDisease(ORG_n,
-///   uiOrgNDisease)` resolves a real disease (`Health.cpp:1209-1238`), reached
-///   before the health word is even consulted
-///   (`NPannel_CharStatusDlg.cpp:598`). Every byte we emit in that region is 0
-///   except the 100 at 7606, so some `uiOrg*Disease` *is* reading 7606.
+/// The client's `uiHealthPoint` is nonetheless proven to be 0, not merely
+/// unread: `siHealthStrRate` is `uiHealthPoint - 100` (`Parametabox.cpp:7727`) and
+/// `clHealthAdd.Init()` at `:7723` zeroes all seven members before the six are set,
+/// so `clTotalBA` cancels to exactly 0 for str/dex/mag/hnd/luk/wis and the tooltip
+/// reads the rate verbatim.
 ///
-/// `uiHealthPoint` is declared after all four `uiOrg*Disease` members, so the only
-/// disease member that can land on 7606 with `uiHealthPoint` still beyond it is
-/// `uiOrg4Disease`, the ninth byte. That puts the client's base at 7597 and its
-/// `uiHealthPoint` at 7607. Under that base the rest of the struct reads
-/// consistently: `siHungry` lands on 7597..7598 = 0, which is the `Fullness: 0` the
-/// client showed, and `siInnerOrg1..4` on 7599..7602 = 0, which is why no organ
-/// word appeared and only the disease text did.
-///
-/// This constant is the one number here that the capture cannot pin, because the
-/// capture is the sender's bytes. It is pinned instead against the client's two
-/// readouts above, and the test
-/// `the_health_point_offset_is_the_one_the_capture_pins` asserts the resulting
-/// byte so a future edit cannot silently move it back into a padding slot.
-pub const CLIENT_HEALTH_INFO_DRIFT: usize = 1;
+/// **Therefore: do not re-derive this by reading the struct declarations.** Locate
+/// it with [`write_ui_health_point_probe`], which measures the client's own copy.
+pub const HEALTH_POINT_OFFSET: usize = HEALTH_INFO_OFFSET + HEALTH_POINT_IN_STRUCT;
 
-/// Where the *shipped client* reads `clHealthInfo` in opcode 248's body.
-pub const CLIENT_HEALTH_INFO_OFFSET: usize = HEALTH_INFO_OFFSET + CLIENT_HEALTH_INFO_DRIFT;
+/// First byte of the [`write_ui_health_point_probe`] ramp.
+///
+/// 7,424 spans a drift of −172 (client base 7,424) to +81 (client base 7,678), which
+/// brackets the plausible range on both sides: `clHealthInfo` is a 12-byte struct
+/// declared immediately before `clHorseInfo`, so a base beyond ~7,608 would already
+/// have to have shifted it out of its own declaration order.
+pub const HEALTH_PROBE_BASE: usize = 7_424;
 
-/// `clHealthInfo.uiHealthPoint`'s offset in opcode 248's body, as the client reads
-/// it.
-pub const HEALTH_POINT_OFFSET: usize = CLIENT_HEALTH_INFO_OFFSET + HEALTH_POINT_IN_STRUCT;
+/// Width of the ramp — a full byte, so the value at a candidate offset *is* that
+/// offset's index.
+pub const HEALTH_PROBE_LEN: usize = 256;
+
+/// Writes a 256-byte value-encoded ramp so the client reports which byte it reads
+/// as `clHealthInfo.uiHealthPoint`.
+///
+/// # This is a diagnostic, not an encoding
+///
+/// **It is temporary and must be reverted** once [`HEALTH_POINT_OFFSET`] is known.
+/// It is a `pub fn` so the test can assert the ramp byte-for-byte while it is in
+/// place; the permanent replacement is a single [`HEALTH_POINT_SEED`] byte.
+///
+/// The method: `uiHealthPoint` is read unclamped on the client — `siHealth*Rate =
+/// uiHealthPoint - 100` at `Parametabox.cpp:7727-7733` has no clamp, and
+/// `cltHealth::Action`, which does bound it, is gated on `GAMEMODE_SERVER`
+/// (`Parametabox.cpp:4224-4229`) so the client never runs it. The client then
+/// renders that rate as a percentage via `GetTxtFromMgr(660)`
+/// (`NCharPerson.cpp:2844`, `:2978`, `:3107`, `:3366`, `:3494`, `:3569`). So the
+/// byte the client picked comes back verbatim in the ability row's tooltip:
+///
+/// ```text
+/// byte at BASE + k is k        ->  tooltip shows (k - 100)%
+/// k = HEALTH_POINT_OFFSET - HEALTH_PROBE_BASE
+/// ```
+///
+/// The ramp deliberately does not avoid the organ/disease bytes, so a disease
+/// tooltip may appear and the mount will read as garbage for the duration. Neither
+/// masks the rate, which is read from an ability row rather than the wellness
+/// pannel (`NPannel_CharStatusDlg.cpp:598` consults the disease branch first, the
+/// row tooltip at `NCharPerson.cpp:2844` does not).
+pub fn write_ui_health_point_probe(out: &mut [u8]) {
+    let end = HEALTH_PROBE_BASE + HEALTH_PROBE_LEN;
+    let window = &mut out[HEALTH_PROBE_BASE..end];
+    for (k, byte) in window.iter_mut().enumerate() {
+        *byte = u8::try_from(k).unwrap_or(0);
+    }
+}
 
 /// `cltHealthInfo::Init()`'s `uiHealthPoint` (`Common.cpp:3227-3254`): the legacy
 /// constructor zeroes every other member and seeds this one at 100.
@@ -513,6 +538,11 @@ pub const HEALTH_POINT_SEED: u8 = 100;
 /// `uiHealthPoint` as a *percentage* and multiplies the whole stat block by
 /// `(uiHealthPoint - 100) / 100`.
 ///
+/// [`HEALTH_POINT_OFFSET`] is not yet known — see the note on it — so the body
+/// currently carries the [`write_ui_health_point_probe`] ramp instead of the seed.
+/// **That is a temporary diagnostic and this frame must not be considered shippable
+/// until the ramp is replaced by a single seed byte.**
+///
 /// [`encode_all_char_info_two`] is the other half of the same
 /// `REQUEST_ALLCHARINFO` burst.
 #[must_use]
@@ -525,7 +555,10 @@ pub fn encode_all_char_info_one(
 ) -> Vec<u8> {
     let mut out = basic.encode();
     out.resize(PERSON_INFO_ONE_LEN, 0);
-    out[HEALTH_POINT_OFFSET] = HEALTH_POINT_SEED;
+    // TEMPORARY DIAGNOSTIC -- revert to `out[HEALTH_POINT_OFFSET] =
+    // HEALTH_POINT_SEED;` once the client's own offset is measured. See
+    // `write_ui_health_point_probe`.
+    write_ui_health_point_probe(&mut out);
     let mut w = Writer::with_capacity(8);
     w.i16(set_item_type);
     w.i16(set_item_step);
