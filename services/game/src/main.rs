@@ -1964,14 +1964,9 @@ mod tests {
     use gz_proto::game::{
         ALL_CHAR_INFO_ONE_LEN, ALL_CHAR_INFO_TWO_LEN, BASIC_INFO_LEN, CHANGE_HORSE_LEN,
         CLT_HEALTH_INFO_LEN, FAMILY_UPDATE_LEN, GET_VILLAGE_INFO_LEN, HEALTH_INFO_OFFSET,
-        HEALTH_POINT_OFFSET, HEALTH_POINT_SEED, HEALTH_PROBE_BASE, HEALTH_PROBE_LEN,
-        PERSON_HORSE_HEADER_LEN, PERSON_HORSE_LEN, RESPONSE_NAME_LEN, SKILLBOOK_MAGIC_INFO_LEN,
+        HEALTH_POINT_OFFSET, HEALTH_POINT_SEED, PERSON_HORSE_HEADER_LEN, PERSON_HORSE_LEN,
+        RESPONSE_NAME_LEN, SKILLBOOK_MAGIC_INFO_LEN,
     };
-
-    /// `sizeof(cltPersonInfoOne)` — the body of opcode 248 before its trailing
-    /// set-item fields. `PERSON_INFO_ONE_LEN` is private to `gz_proto`, so the test
-    /// derives it from the public `ALL_CHAR_INFO_ONE_LEN` and the eight-byte tail.
-    const BODY_LEN: usize = ALL_CHAR_INFO_ONE_LEN - 8;
 
     /// The regression this locks down is the 2026-10-05 live failure: seven
     /// `REQUEST_SELECTCHAR` frames on one socket, each replaying the 45-frame
@@ -2151,15 +2146,13 @@ mod tests {
 
         // The unmodelled sub-structs are the documented deviation: zero, where
         // the capture carried the reference character's skills, horse (`Foal744`)
-        // and passport. The `uiHealthPoint` probe window is carved out of that sweep
-        // because while the client's own offset is still being measured the ramp
-        // writes every byte of it -- see
+        // and passport. `clHealthInfo` is carved out of that sweep because the one
+        // byte the sender calls `uiHealthPoint` is written -- see
         // `the_health_point_offset_is_the_one_the_capture_pins`.
-        let probe_end = HEALTH_PROBE_BASE + HEALTH_PROBE_LEN;
         for (i, &b) in body[968..10_160]
             .iter()
             .enumerate()
-            .filter(|&(i, _)| !(HEALTH_PROBE_BASE..probe_end).contains(&(968 + i)))
+            .filter(|&(i, _)| 968 + i != HEALTH_POINT_OFFSET)
         {
             assert_eq!(b, 0, "unmodelled region byte at offset {}", 968 + i);
         }
@@ -2262,48 +2255,102 @@ mod tests {
             0,
             0,
         );
-        assert_eq!(
-            &generated[HEALTH_PROBE_BASE..HEALTH_PROBE_BASE + HEALTH_PROBE_LEN],
-            (0..=u8::MAX).collect::<Vec<u8>>(),
-            "the ramp encodes each byte's own index, so the rate the client reports \
-             is `k - 100` for the byte it reads at HEALTH_PROBE_BASE + k"
-        );
-        assert!(
-            (HEALTH_PROBE_BASE..HEALTH_PROBE_BASE + HEALTH_PROBE_LEN)
-                .contains(&HEALTH_POINT_OFFSET),
-            "the sender's own offset must stay inside the probe window or the ramp \
-             cannot see it: HEALTH_POINT_OFFSET={} window={}..={}",
-            HEALTH_POINT_OFFSET,
-            HEALTH_PROBE_BASE,
-            HEALTH_PROBE_BASE + HEALTH_PROBE_LEN - 1
-        );
-        // The ramp must not bleed into the identity/stats block that ends at 968, which
-        // is why it starts at 7,424 rather than at the top of the frame. The span is
-        // wider than a single `uiHealthPoint` precisely so the band can also be
-        // read back as "the client's own base is N bytes off".
-        let ramp_start: usize = HEALTH_PROBE_BASE;
-        assert!(
-            ramp_start > BASIC_INFO_LEN,
-            "the ramp would overwrite the clBI/clIP block the status window depends on"
-        );
-        assert!(
-            ramp_start + HEALTH_PROBE_LEN <= BODY_LEN - CLT_HEALTH_INFO_LEN,
-            "the ramp must stay inside the body, clear of the trailing set-item fields"
-        );
-        assert!(
-            generated[HEALTH_PROBE_BASE + HEALTH_PROBE_LEN..]
-                .iter()
-                .all(|b| *b == 0),
-            "and it stops at HEALTH_PROBE_BASE + HEALTH_PROBE_LEN"
-        );
-
         // `cltHealthInfo::Init()` seeds `uiHealthPoint` at 100 (`Common.cpp:3253`),
         // and 100 is the value that makes every `siHealth*Rate` zero
-        // (`Parametabox.cpp:7727`), leaving the client's stat block alone. Assert the
-        // seed itself rather than an offset: the offset is what the probe is
-        // measuring, and this constant is not in doubt.
+        // (`Parametabox.cpp:7727`), leaving the client's stat block alone. The offset
+        // is the sender's own and is capture-pinned two lines up.
         assert_eq!(HEALTH_POINT_SEED, 100);
+        assert_eq!(generated[HEALTH_POINT_OFFSET], HEALTH_POINT_SEED);
+        assert_eq!(
+            &generated[HEALTH_INFO_OFFSET..HEALTH_POINT_OFFSET],
+            &[0u8; 10],
+            "siHungry, siInnerOrg1..4 and uiOrg1..4Disease stay zero, as the sender \
+             writes them"
+        );
     }
+
+    /// Regression guard for the 2026-10-06 client crash.
+    ///
+    /// A probe ramp was written over body offsets 7,424..7,680 to make the client
+    /// report which byte it reads as `clHealthInfo.uiHealthPoint`. It killed
+    /// `New Era.exe` 1.1.1.3 on login: Application Error event 1000,
+    /// `0xc0000005` at `0x003caf30`. The window straddles the horse, and
+    /// `cltHorse::szName` is `TCHAR[MAX_HORSE_NAME]` with `MAX_HORSE_NAME` == 12
+    /// (`CommonHeader.h:538`, `:3255`) — a fixed 12-byte field with no terminator
+    /// slot. Forty-two consecutive non-zero bytes across it reads off the end.
+    ///
+    /// This does not re-run the probe. It asserts the *shape* of what we send, so
+    /// that no future attempt to make the unmodelled band observable does it by
+    /// writing a run of distinct values into it.
+    #[test]
+    fn the_unmodelled_band_carries_no_probe_ramp() {
+        let generated = encode_all_char_info_one(
+            &BasicInfo {
+                account_idnum: 1471,
+                account_id: "tester".into(),
+                slot: 2,
+                sex: 1,
+                class_kind: 0,
+                home_village: 0,
+                map_index: 158,
+                x: 27,
+                y: 87,
+                character_id: 4242,
+                name: "test3".into(),
+                str_: 5,
+                dex: 5,
+                vit: 5,
+                mag: 5,
+                hnd: 5,
+                luk: 5,
+                wis: 5,
+                level: 1,
+                bonus: 5,
+                life: 40,
+                mana: 20,
+                exp: 0,
+                money: 1000,
+            },
+            0,
+            0,
+            0,
+            0,
+        );
+
+        // `clHealthInfo` plus `clHorseInfo`'s 28-byte header is where the ramp
+        // killed the client. Everything from the byte after `uiHealthPoint` to the
+        // end of the horse array must stay zero.
+        let horse_band = &generated[HEALTH_POINT_OFFSET + 1..HORSE_ARRAY_END];
+        assert!(
+            horse_band.iter().all(|b| *b == 0),
+            "the horse band must stay zero: cltHorse::szName is a fixed 12 bytes with \
+             no terminator slot, and siHorseUnique/clHorseInfo's SI16s are indexes. \
+             First non-zero at body offset {:?}",
+            horse_band
+                .iter()
+                .position(|b| *b != 0)
+                .map(|p| p + HEALTH_POINT_OFFSET + 1)
+        );
+
+        // And nothing anywhere in the band may form a long ascending run, which is
+        // the ramp's fingerprint. `window(3)` over the whole unmodelled region
+        // catches any future attempt to encode an index into it.
+        let unmodelled = &generated[BASIC_INFO_LEN..HORSE_ARRAY_END];
+        assert!(
+            !unmodelled
+                .windows(8)
+                .any(|w| { w.windows(2).all(|p| p[1] == p[0].wrapping_add(1)) }),
+            "an 8-byte ascending run in the unmodelled band is a probe ramp; it \
+             crashed the client on 2026-10-06"
+        );
+    }
+
+    /// `clHorse[0]` ends the region the ramp must never reach. Derived from the
+    /// capture rather than hardcoded: `clHorse[0]` starts 28 bytes after
+    /// `clHorseInfo`, holds `MAX_HORSE_NAME` 12 and is 108 bytes, and there are 5
+    /// of them (frame 226 is exactly `28 + 5 * 108`).
+    const HORSE_ARRAY_END: usize =
+        HEALTH_INFO_OFFSET + CLT_HEALTH_INFO_LEN + PERSON_HORSE_HEADER_LEN + 5 * 108;
 
     /// The generated `PERSONITEMINFO` must differ from the capture only in the
     /// two padding bytes the legacy never initialised.

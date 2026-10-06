@@ -455,56 +455,49 @@ pub const HEALTH_INFO_OFFSET: usize = 7_596;
 /// so `clTotalBA` cancels to exactly 0 for str/dex/mag/hnd/luk/wis and the tooltip
 /// reads the rate verbatim.
 ///
-/// **Therefore: do not re-derive this by reading the struct declarations.** Locate
-/// it with [`write_ui_health_point_probe`], which measures the client's own copy.
+/// # The write below is currently inert on the shipped client
+///
+/// It is kept because it is the sender's own, capture-pinned location and it is
+/// what a client whose build matches this source needs. But three locations have
+/// been tried live (the sender's own 7606, 7607, and an all-zero struct) and none
+/// moved the client, so on `New Era.exe` 1.1.1.3 this byte is written and ignored.
+///
+/// **Do not try to find the client's offset by writing a probe ramp.** That was
+/// attempted on 2026-10-06 and **crashed the client on login** — see
+/// [`HEALTH_PROBE_WAS_CRASHING`]. Any future probe must write only into bytes no
+/// struct member occupies.
 pub const HEALTH_POINT_OFFSET: usize = HEALTH_INFO_OFFSET + HEALTH_POINT_IN_STRUCT;
 
-/// First byte of the [`write_ui_health_point_probe`] ramp.
+/// Why a ramp-based probe is not available, kept so the experiment is not repeated.
 ///
-/// 7,424 spans a drift of −172 (client base 7,424) to +81 (client base 7,678), which
-/// brackets the plausible range on both sides: `clHealthInfo` is a 12-byte struct
-/// declared immediately before `clHorseInfo`, so a base beyond ~7,608 would already
-/// have to have shifted it out of its own declaration order.
-pub const HEALTH_PROBE_BASE: usize = 7_424;
-
-/// Width of the ramp — a full byte, so the value at a candidate offset *is* that
-/// offset's index.
-pub const HEALTH_PROBE_LEN: usize = 256;
-
-/// Writes a 256-byte value-encoded ramp so the client reports which byte it reads
-/// as `clHealthInfo.uiHealthPoint`.
+/// A 256-byte value ramp over 7,424..7,680 was built to make the client report
+/// which byte it reads as `uiHealthPoint`, and it **crashed `New Era.exe` 1.1.1.3 on
+/// login**: Windows Application Error event 1000, `Exception code: 0xc0000005`,
+/// `Fault offset: 0x003caf30`, 2026-10-06 11:01:53. Three mechanisms in the window
+/// can each do it, and the ramp triggered all three:
 ///
-/// # This is a diagnostic, not an encoding
+/// * **Unterminated horse name.** `cltHorse::szName` is `TCHAR[MAX_HORSE_NAME]`
+///   (`CommonHeader.h:3255`) and `MAX_HORSE_NAME` is **12** (`CommonHeader.h:538`) —
+///   a fixed 12 bytes with *no terminator slot*, which is why `sizeof(cltHorse)` is
+///   the odd 108. The capture carries `Foal744` as 7 ASCII bytes then padding
+///   (body offset 7638), so the field is written and relied on as fixed-width. The
+///   ramp made 7638..7679 forty-two consecutive non-zero bytes, so any
+///   `strcpy`/`sprintf("%s")` of `szName` reads off the end of the field. **This is
+///   the most likely cause.**
+/// * **Out-of-range horse index.** `clHorse[0].siHorseUnique` (body 7636) became 212;
+///   the valid `HORSEUNIQUE_*` values stop at 40 (`Horse.h:22-41`). Any table lookup
+///   or array index on it walks off the end. `clHorseInfo`'s two `SI16`s at body
+///   7608..7611 became 184/186 for the same reason.
+/// * **Live skill/rank state.** 7,424..7,595 covers `clCharSkill`, `clCharRank`,
+///   `clBank`, `clStock`, `clMarket`, `clRealEstate` and `clWorldMoney`, which are
+///   pointer- and count-bearing. The reference character has non-zero skill data in
+///   this band (body 2,644..2,679), so the client actively parses it.
 ///
-/// **It is temporary and must be reverted** once [`HEALTH_POINT_OFFSET`] is known.
-/// It is a `pub fn` so the test can assert the ramp byte-for-byte while it is in
-/// place; the permanent replacement is a single [`HEALTH_POINT_SEED`] byte.
-///
-/// The method: `uiHealthPoint` is read unclamped on the client — `siHealth*Rate =
-/// uiHealthPoint - 100` at `Parametabox.cpp:7727-7733` has no clamp, and
-/// `cltHealth::Action`, which does bound it, is gated on `GAMEMODE_SERVER`
-/// (`Parametabox.cpp:4224-4229`) so the client never runs it. The client then
-/// renders that rate as a percentage via `GetTxtFromMgr(660)`
-/// (`NCharPerson.cpp:2844`, `:2978`, `:3107`, `:3366`, `:3494`, `:3569`). So the
-/// byte the client picked comes back verbatim in the ability row's tooltip:
-///
-/// ```text
-/// byte at BASE + k is k        ->  tooltip shows (k - 100)%
-/// k = HEALTH_POINT_OFFSET - HEALTH_PROBE_BASE
-/// ```
-///
-/// The ramp deliberately does not avoid the organ/disease bytes, so a disease
-/// tooltip may appear and the mount will read as garbage for the duration. Neither
-/// masks the rate, which is read from an ability row rather than the wellness
-/// pannel (`NPannel_CharStatusDlg.cpp:598` consults the disease branch first, the
-/// row tooltip at `NCharPerson.cpp:2844` does not).
-pub fn write_ui_health_point_probe(out: &mut [u8]) {
-    let end = HEALTH_PROBE_BASE + HEALTH_PROBE_LEN;
-    let window = &mut out[HEALTH_PROBE_BASE..end];
-    for (k, byte) in window.iter_mut().enumerate() {
-        *byte = u8::try_from(k).unwrap_or(0);
-    }
-}
+/// The lesson that generalises: **in this frame, "zero-filled and ignored" is safe,
+/// and "non-zero and possibly-misread" is not.** A probe that writes a distinct
+/// value into 256 unknown bytes is not a measurement, it is 256 chances to hand the
+/// client an out-of-range index or an unterminated string.
+pub const HEALTH_PROBE_WAS_CRASHING: bool = true;
 
 /// `cltHealthInfo::Init()`'s `uiHealthPoint` (`Common.cpp:3227-3254`): the legacy
 /// constructor zeroes every other member and seeds this one at 100.
@@ -538,10 +531,8 @@ pub const HEALTH_POINT_SEED: u8 = 100;
 /// `uiHealthPoint` as a *percentage* and multiplies the whole stat block by
 /// `(uiHealthPoint - 100) / 100`.
 ///
-/// [`HEALTH_POINT_OFFSET`] is not yet known — see the note on it — so the body
-/// currently carries the [`write_ui_health_point_probe`] ramp instead of the seed.
-/// **That is a temporary diagnostic and this frame must not be considered shippable
-/// until the ramp is replaced by a single seed byte.**
+/// [`HEALTH_POINT_OFFSET`] is the sender's own location and is **inert on the
+/// shipped client**, so the symptom persists there; see that constant.
 ///
 /// [`encode_all_char_info_two`] is the other half of the same
 /// `REQUEST_ALLCHARINFO` burst.
@@ -555,10 +546,10 @@ pub fn encode_all_char_info_one(
 ) -> Vec<u8> {
     let mut out = basic.encode();
     out.resize(PERSON_INFO_ONE_LEN, 0);
-    // TEMPORARY DIAGNOSTIC -- revert to `out[HEALTH_POINT_OFFSET] =
-    // HEALTH_POINT_SEED;` once the client's own offset is measured. See
-    // `write_ui_health_point_probe`.
-    write_ui_health_point_probe(&mut out);
+    // The sender's own, capture-pinned `uiHealthPoint`. Inert on the shipped
+    // client (see `HEALTH_POINT_OFFSET`), and it must stay a *single* byte: a
+    // wide probe here crashes the client (`HEALTH_PROBE_WAS_CRASHING`).
+    out[HEALTH_POINT_OFFSET] = HEALTH_POINT_SEED;
     let mut w = Writer::with_capacity(8);
     w.i16(set_item_type);
     w.i16(set_item_step);
