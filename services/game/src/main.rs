@@ -1963,9 +1963,9 @@ mod tests {
     // are imported here rather than at the top of the file.
     use gz_proto::game::{
         ALL_CHAR_INFO_ONE_LEN, ALL_CHAR_INFO_TWO_LEN, BASIC_INFO_LEN, CHANGE_HORSE_LEN,
-        CLT_HEALTH_INFO_LEN, FAMILY_UPDATE_LEN, GET_VILLAGE_INFO_LEN, HEALTH_INFO_OFFSET,
-        HEALTH_POINT_OFFSET, HEALTH_POINT_SEED, PERSON_HORSE_HEADER_LEN, PERSON_HORSE_LEN,
-        RESPONSE_NAME_LEN, SKILLBOOK_MAGIC_INFO_LEN,
+        CLT_HEALTH_INFO_LEN, CLT_HEALTH_INFO_WIRE_LEN, FAMILY_UPDATE_LEN, GET_VILLAGE_INFO_LEN,
+        HEALTH_INFO_OFFSET, HEALTH_POINT_OFFSET, HEALTH_POINT_SEED, PERSON_HORSE_HEADER_LEN,
+        PERSON_HORSE_LEN, RESPONSE_NAME_LEN, SKILLBOOK_MAGIC_INFO_LEN,
     };
 
     /// The regression this locks down is the 2026-10-05 live failure: seven
@@ -2168,8 +2168,15 @@ mod tests {
     /// and `siHorseUnique`/`szName` sit at 0/2 inside `cltHorse`
     /// (`CommonHeader.h:3254-3255`), so the nine-byte marker locates `clHorse[0]`
     /// outright. The array's offset inside `cltPersonHorseInfo` is the same
-    /// [`PERSON_HORSE_HEADER_LEN`] the 226 frame independently pins, and
-    /// [`CLT_HEALTH_INFO_LEN`] bytes run straight back from there.
+    /// [`PERSON_HORSE_HEADER_LEN`] the 226 frame independently pins.
+    ///
+    /// What runs *back* from `clHorseInfo` is [`CLT_HEALTH_INFO_WIRE_LEN`], not
+    /// [`CLT_HEALTH_INFO_LEN`]. Those differ by four, and getting it wrong is what
+    /// broke the status window: 7596 instead of 7592 put the seed at 7606, four
+    /// bytes into the slot's tail where `New Era.exe` never looks, so writing 7606
+    /// and then 7607 both left the live client reading `-100%`. The wire width is
+    /// pinned by the client's own `cltHealthInfo::Set` at `0x0085B2A0`, which is a
+    /// single `movups`/`movups` pair — sixteen bytes, one SSE store.
     ///
     /// This is also the regression for the 2026-10-06 live failure: the status
     /// window read Str/Dex/Int/Wis/Luck/Hnd as 0 and left VIT as the only stat
@@ -2194,25 +2201,29 @@ mod tests {
         let horse = horses[0];
 
         let horse_info = horse - PERSON_HORSE_HEADER_LEN;
-        let health = horse_info - CLT_HEALTH_INFO_LEN;
+        let health = horse_info - CLT_HEALTH_INFO_WIRE_LEN;
         assert_eq!(health, HEALTH_INFO_OFFSET, "clHealthInfo starts here");
+        assert_eq!(HEALTH_INFO_OFFSET, 7_592);
+        assert_eq!(HEALTH_POINT_OFFSET, 7_602);
 
-        // That is where the *sender* wrote it. `cltHealthInfo::Set` is a `memcpy`
-        // of the whole struct (`Common.cpp:3256-3259`), so the receiver stores
-        // those bytes at its own base. Writing the seed at either 7606 or 7607 left
-        // the live client reading `-100%`, so the receiver's base is NOT known and
-        // `HEALTH_POINT_OFFSET` below is the sender's number, not the client's.
+        // `uiHealthPoint` is the tenth byte of `clHealthInfo` (`CommonHeader.h:2898`),
+        // which the client's `SetHealthAddAbility` at `0x0084C380` reads as
+        // `movzx eax,byte ptr [ecx+0Ah]`.
         assert_eq!(HEALTH_POINT_OFFSET - HEALTH_INFO_OFFSET, 10);
-        assert!(
-            captured[HEALTH_POINT_OFFSET] <= 100,
-            "the capture's own is a percentage"
+        // And the capture states the reference character's own value, non-zero. That
+        // is a second, independent vote: if the base were really 7596 this byte
+        // would be 0 and the reference session would have shown `-100%` too.
+        assert_eq!(
+            captured[HEALTH_POINT_OFFSET], 110,
+            "the reference character's wellness rate is +10"
         );
 
         // The captured character's wellness state, so the sweep below has something
-        // to be zero against: a healthy Meirin with one organ complaint.
+        // to be zero against. `siHungry` 14 is a played character running low;
+        // every organ and disease byte is clean.
         assert_eq!(
             i16::from_le_bytes([captured[health], captured[health + 1]]),
-            0,
+            14,
             "siHungry"
         );
         assert_eq!(
@@ -2220,9 +2231,23 @@ mod tests {
             &[0, 0, 0, 0],
             "siInnerOrg1..4"
         );
+        assert_eq!(
+            &captured[health + 6..health + 10],
+            &[0, 0, 0, 0],
+            "uiOrg1..4Disease"
+        );
+        // The four bytes the client's 16-byte `Set` copies but this source does not
+        // declare. The capture leaves them zero, so we do too.
+        assert_eq!(
+            &captured[HEALTH_INFO_OFFSET + CLT_HEALTH_INFO_LEN..horse_info],
+            &[0u8; 4],
+            "the client's four extra clHealthInfo bytes"
+        );
 
-        // And what we now send. While the offset is unknown the body carries the
-        // measuring ramp, so the client tells us where it reads `uiHealthPoint`.
+        // And what we now send. `cltHealthInfo::Init()` seeds `uiHealthPoint` at 100
+        // (`Common.cpp:3253`), and 100 is the neutral value: it makes every
+        // `siHealth*Rate` zero (`Parametabox.cpp:7727`), so `clHealthAdd` adds
+        // nothing and the rest of `clTotalBA` supplies the real numbers.
         let generated = encode_all_char_info_one(
             &BasicInfo {
                 account_idnum: 1471,
@@ -2255,10 +2280,6 @@ mod tests {
             0,
             0,
         );
-        // `cltHealthInfo::Init()` seeds `uiHealthPoint` at 100 (`Common.cpp:3253`),
-        // and 100 is the value that makes every `siHealth*Rate` zero
-        // (`Parametabox.cpp:7727`), leaving the client's stat block alone. The offset
-        // is the sender's own and is capture-pinned two lines up.
         assert_eq!(HEALTH_POINT_SEED, 100);
         assert_eq!(generated[HEALTH_POINT_OFFSET], HEALTH_POINT_SEED);
         assert_eq!(
@@ -2274,10 +2295,13 @@ mod tests {
     /// A probe ramp was written over body offsets 7,424..7,680 to make the client
     /// report which byte it reads as `clHealthInfo.uiHealthPoint`. It killed
     /// `New Era.exe` 1.1.1.3 on login: Application Error event 1000,
-    /// `0xc0000005` at `0x003caf30`. The window straddles the horse, and
-    /// `cltHorse::szName` is `TCHAR[MAX_HORSE_NAME]` with `MAX_HORSE_NAME` == 12
-    /// (`CommonHeader.h:538`, `:3255`) — a fixed 12-byte field with no terminator
-    /// slot. Forty-two consecutive non-zero bytes across it reads off the end.
+    /// `0xc0000005` at `0x003caf30`.
+    ///
+    /// That offset is an RVA, so the fault site is `0x00400000 + 0x3CAF30 =
+    /// 0x007CAF30`, and the client's own code there is a **null dereference from an
+    /// out-of-range table index**: it reads a word at `[ecx+0x37FA]`, bounds it
+    /// against 4, and only dereferences when the lookup succeeds *and* returns a
+    /// type-`0x11` entry. The ramp planted a value above 4.
     ///
     /// This does not re-run the probe. It asserts the *shape* of what we send, so
     /// that no future attempt to make the unmodelled band observable does it by
@@ -2319,13 +2343,14 @@ mod tests {
 
         // `clHealthInfo` plus `clHorseInfo`'s 28-byte header is where the ramp
         // killed the client. Everything from the byte after `uiHealthPoint` to the
-        // end of the horse array must stay zero.
+        // end of the horse array must stay zero: the client's fault site is a
+        // bounded table index, and this band holds the values it reads.
         let horse_band = &generated[HEALTH_POINT_OFFSET + 1..HORSE_ARRAY_END];
         assert!(
             horse_band.iter().all(|b| *b == 0),
-            "the horse band must stay zero: cltHorse::szName is a fixed 12 bytes with \
-             no terminator slot, and siHorseUnique/clHorseInfo's SI16s are indexes. \
-             First non-zero at body offset {:?}",
+            "the horse band must stay zero: `New Era.exe` indexes a table by the word \
+             at +0x37FA and null-derefs on anything above 4, and cltHorse::szName is a \
+             fixed 12 bytes with no terminator slot. First non-zero at body offset {:?}",
             horse_band
                 .iter()
                 .position(|b| *b != 0)
@@ -2349,8 +2374,28 @@ mod tests {
     /// capture rather than hardcoded: `clHorse[0]` starts 28 bytes after
     /// `clHorseInfo`, holds `MAX_HORSE_NAME` 12 and is 108 bytes, and there are 5
     /// of them (frame 226 is exactly `28 + 5 * 108`).
+    ///
+    /// This must come out at **8176** (`0x1FF0`), which is the next source offset
+    /// in the client's own `cltPersonInfo::SetOne` copy table. If it ever stops
+    /// agreeing with that literal, the offsets have drifted apart again.
     const HORSE_ARRAY_END: usize =
-        HEALTH_INFO_OFFSET + CLT_HEALTH_INFO_LEN + PERSON_HORSE_HEADER_LEN + 5 * 108;
+        HEALTH_INFO_OFFSET + CLT_HEALTH_INFO_WIRE_LEN + PERSON_HORSE_HEADER_LEN + 5 * 108;
+
+    /// The offset chain the status-window fix rests on, asserted as arithmetic so a
+    /// change to any link is a test failure rather than a live regression.
+    ///
+    /// Every number here is independently observable: `0x1DA8` and `0x1DB8` are
+    /// literals in the client's `SetOne` (`New Era.exe` 1.1.1.3, VA `0x00461AC1`
+    /// and `0x00461AD9`), `0x1FF0` is the next one, and 28 + 5 * 108 is the horse
+    /// array the capture and frame 226 agree on.
+    #[test]
+    fn the_client_layout_chain_agrees_with_the_horse_array() {
+        assert_eq!(HEALTH_INFO_OFFSET, 0x1DA8);
+        assert_eq!(HEALTH_POINT_OFFSET, 0x1DA8 + 10);
+        assert_eq!(HEALTH_INFO_OFFSET + CLT_HEALTH_INFO_WIRE_LEN, 0x1DB8);
+        assert_eq!(HORSE_ARRAY_END, 0x1FF0);
+        assert_eq!(PERSON_HORSE_HEADER_LEN, 28);
+    }
 
     /// The generated `PERSONITEMINFO` must differ from the capture only in the
     /// two padding bytes the legacy never initialised.

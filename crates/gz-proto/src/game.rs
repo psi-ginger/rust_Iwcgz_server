@@ -411,104 +411,132 @@ pub const ALL_CHAR_INFO_TWO_LEN: usize = MAX_ITEM_PER_PERSON * CLT_ITEM_SIZE + 4
 /// fields sit at 0, 2..6, 6..10 and 10.
 pub const CLT_HEALTH_INFO_LEN: usize = 12;
 
+/// How many bytes the *shipped client* copies for `clHealthInfo`.
+///
+/// Four more than [`CLT_HEALTH_INFO_LEN`], and this is the number that governs the
+/// wire. `New Era.exe` 1.1.1.3's `cltHealthInfo::Set` is `movups xmm0,[eax]` /
+/// `movups [ecx],xmm0` / `pop ebp` / `ret 4` at `0x0085B2A0` — one 16-byte SSE
+/// copy, not a member-wise one, so the client's build carries four bytes this
+/// source does not declare and `clHorseInfo` begins 16 bytes after `clHealthInfo`
+/// rather than 12. The capture agrees: 7604..7607 are zero there.
+pub const CLT_HEALTH_INFO_WIRE_LEN: usize = 16;
+
 /// Offset of `uiHealthPoint` inside [`CLT_HEALTH_INFO_LEN`].
 const HEALTH_POINT_IN_STRUCT: usize = 10;
 
-/// Where the *reference server* put `clHealthInfo` in opcode 248's body.
+/// Where the *client* reads `clHealthInfo` in opcode 248's body: **7592**.
 ///
-/// Not an arithmetic result. `clHealthInfo` is declared immediately before
-/// `clHorseInfo` (`PersonInfo.h:308`, `:313`) with nothing between them, so the
-/// struct ends exactly where `clHorseInfo` begins — and `clHorseInfo`'s offset is
-/// a thing the capture states rather than one it infers. The reference character
-/// rode the `HORSEUNIQUE_FOAL` named `Foal744` (`Horse.h:33` is `12`), and
-/// `siHorseUnique`/`szName` sit at 0/2 inside `cltHorse`
-/// (`CommonHeader.h:3254-3255`), so `clHorse[0]` begins at 7636. The capture puts
-/// `clHorse[]` at [`PERSON_HORSE_HEADER_LEN`] inside `cltPersonHorseInfo`, which
-/// makes `clHorseInfo` 7608 and `clHealthInfo` 7596. The test
-/// `the_health_point_offset_is_the_one_the_capture_pins` re-derives all three
-/// numbers from the captured bytes rather than from this sentence.
-pub const HEALTH_INFO_OFFSET: usize = 7_596;
+/// This was wrong by four bytes (7596) until 2026-10-06, and those four bytes were
+/// the whole status-window defect. The number is pinned by the client's own
+/// `cltPersonInfo::SetOne`, disassembled from `New Era.exe` 1.1.1.3 at VA
+/// `0x004619C0`, where `ebx` is the received `cltPersonInfoOne*` and `edi` is
+/// `this`. Its sub-struct copy table is a flat run of `lea`/`call` pairs:
+///
+/// ```text
+/// 004619D5: lea eax,[ebx+00000388h] ; lea ecx,[edi+00000388h] ; call 0084B2F0
+/// 004619E7: lea eax,[ebx+000003C8h] ; lea ecx,[edi+000003C8h] ; call 0090E230
+/// ...
+/// 00461AC1: lea eax,[ebx+00001DA8h] ; lea ecx,[edi+000037E8h] ; call 0085B2A0
+/// 00461AD9: lea eax,[ebx+00001DB8h] ; lea ecx,[edi+000037F8h] ; call 00438DC0
+/// 00461AEB: lea eax,[ebx+00001FF0h] ; lea ecx,[edi+00003A30h] ; call 00438CD0
+/// ```
+///
+/// `0x1DA8` is 7592 and `0x1DB8` is 7608. `clHealthInfo` is declared immediately
+/// before `clHorseInfo` (`PersonInfo.h:308`, `:313`) with nothing between them, so
+/// 7592 is `clHealthInfo` and 7608 is `clHorseInfo` — the same 7608 the capture's
+/// `Foal744` marker pins independently. And `0x1FF0` is 8176, which is exactly
+/// `clHorseInfo`'s [`PERSON_HORSE_HEADER_LEN`] plus `MAX_HORSE_PER_PERSON` 5
+/// horses of 108, so the *next* member in the table starts where the horse array
+/// ends. Three separate numbers that agree.
+///
+/// The old 7596 assumed the 12-byte legacy `sizeof` and no gap, which put
+/// `uiHealthPoint` at 7606 — four bytes into the slot's tail, past the last
+/// declared field, where the client never looks. That is the whole reason seeding
+/// 7606 and then 7607 both left the live status window unmoved.
+pub const HEALTH_INFO_OFFSET: usize = 7_592;
 
-/// **UNRESOLVED — this is the reference *server's* layout, and the shipped client's
-/// is somewhere else.** Read the probe below before trusting
-/// [`HEALTH_POINT_OFFSET`].
+/// 7602 — where `uiHealthPoint` lives in opcode 248's body, and the one byte that
+/// decides whether the client's status window works.
 ///
-/// `cltHealthInfo::Set` is `memcpy(this, pclinfo, sizeof(cltHealthInfo))`
-/// (`Common.cpp:3256-3259`) — a raw block copy, not a member-wise one. The client
-/// therefore stores our bytes at *its own* base address, and any difference between
-/// the shipped client build and this server source in the summed size of the
-/// sub-structs declared before `clHealthInfo` (`PersonInfo.h:285-313`) slides the
-/// whole struct wholesale. The horse anchor above cannot see that: it pins where the
-/// *sender* wrote `clHorse[0]`, not where the *receiver* reads it.
+/// [`HEALTH_INFO_OFFSET`] + 10, which is `uiHealthPoint`'s offset inside
+/// `cltHealthInfo` (`CommonHeader.h:2898`). The client's own code agrees: its
+/// `cltParametaBox::SetHealthAddAbility` at `0x0084C380` takes the health-info
+/// pointer in `[ebp+8]`, null-checks it, and reads
+/// `movzx eax,byte ptr [ecx+0Ah]` followed by `sub eax,64h` — `uiHealthPoint`
+/// minus 100.
 ///
-/// Three candidate bases have been tried against the live client and all three
-/// failed to move `uiHealthPoint` off 0:
+/// The capture corroborates it from the other side. The reference character, who
+/// was demonstrably not broken, carries `0x6E` at body 7602 and zero at 7606: a
+/// wellness rate of `+10` for them, `-100` for us.
 ///
-/// | seed written at | outcome |
-/// |---|---|
-/// | [`HEALTH_INFO_OFFSET`] + 10 = 7606 | `-100%`, unchanged |
-/// | 7607 | `-100%`, unchanged |
-///
-/// The client's `uiHealthPoint` is nonetheless proven to be 0, not merely
-/// unread: `siHealthStrRate` is `uiHealthPoint - 100` (`Parametabox.cpp:7727`) and
-/// `clHealthAdd.Init()` at `:7723` zeroes all seven members before the six are set,
-/// so `clTotalBA` cancels to exactly 0 for str/dex/mag/hnd/luk/wis and the tooltip
-/// reads the rate verbatim.
-///
-/// # The write below is currently inert on the shipped client
-///
-/// It is kept because it is the sender's own, capture-pinned location and it is
-/// what a client whose build matches this source needs. But three locations have
-/// been tried live (the sender's own 7606, 7607, and an all-zero struct) and none
-/// moved the client, so on `New Era.exe` 1.1.1.3 this byte is written and ignored.
-///
-/// **Do not try to find the client's offset by writing a probe ramp.** That was
-/// attempted on 2026-10-06 and **crashed the client on login** — see
-/// [`HEALTH_PROBE_WAS_CRASHING`]. Any future probe must write only into bytes no
-/// struct member occupies.
+/// This byte used to be written at 7606 and was inert on the shipped client. Two
+/// live attempts (7606, then 7607) failed to move the status window for exactly
+/// this reason. It is no longer inert.
 pub const HEALTH_POINT_OFFSET: usize = HEALTH_INFO_OFFSET + HEALTH_POINT_IN_STRUCT;
 
 /// Why a ramp-based probe is not available, kept so the experiment is not repeated.
 ///
-/// A 256-byte value ramp over 7,424..7,680 was built to make the client report
-/// which byte it reads as `uiHealthPoint`, and it **crashed `New Era.exe` 1.1.1.3 on
+/// A 256-byte value ramp over body 7,424..7,680 was built to make the client report
+/// which byte it reads as `uiHealthPoint`. It **crashed `New Era.exe` 1.1.1.3 on
 /// login**: Windows Application Error event 1000, `Exception code: 0xc0000005`,
-/// `Fault offset: 0x003caf30`, 2026-10-06 11:01:53. Three mechanisms in the window
-/// can each do it, and the ramp triggered all three:
+/// `Fault offset: 0x003caf30`, 2026-10-06 11:01:53.
 ///
-/// * **Unterminated horse name.** `cltHorse::szName` is `TCHAR[MAX_HORSE_NAME]`
-///   (`CommonHeader.h:3255`) and `MAX_HORSE_NAME` is **12** (`CommonHeader.h:538`) —
-///   a fixed 12 bytes with *no terminator slot*, which is why `sizeof(cltHorse)` is
-///   the odd 108. The capture carries `Foal744` as 7 ASCII bytes then padding
-///   (body offset 7638), so the field is written and relied on as fixed-width. The
-///   ramp made 7638..7679 forty-two consecutive non-zero bytes, so any
-///   `strcpy`/`sprintf("%s")` of `szName` reads off the end of the field. **This is
-///   the most likely cause.**
-/// * **Out-of-range horse index.** `clHorse[0].siHorseUnique` (body 7636) became 212;
-///   the valid `HORSEUNIQUE_*` values stop at 40 (`Horse.h:22-41`). Any table lookup
-///   or array index on it walks off the end. `clHorseInfo`'s two `SI16`s at body
-///   7608..7611 became 184/186 for the same reason.
-/// * **Live skill/rank state.** 7,424..7,595 covers `clCharSkill`, `clCharRank`,
-///   `clBank`, `clStock`, `clMarket`, `clRealEstate` and `clWorldMoney`, which are
-///   pointer- and count-bearing. The reference character has non-zero skill data in
-///   this band (body 2,644..2,679), so the client actively parses it.
+/// # The fault was a null dereference from an out-of-range index
+///
+/// The event's `Fault offset` is an **RVA**, not a VA — adding the image base
+/// `0x00400000` puts it at `0x007CAF30`, inside `.text`, and that is where the
+/// client's own fault site is:
+///
+/// ```text
+/// 007CAEF2: mov   ecx,dword ptr [ebx+20Ch]
+/// 007CAF04: movzx eax,word ptr [ecx+000037FAh]   ; a word field read as an index
+/// 007CAF0B: cmp   eax,4
+/// 007CAF0E: ja    007CAF2E                        ; out of range -> NULL
+/// 007CAF11: add   ecx,3814h
+/// 007CAF18: call  004371D0                        ; indexed lookup
+/// 007CAF1D: mov   ecx,eax
+/// 007CAF1F: test  eax,eax
+/// 007CAF21: je    007CAF30                        ; NULL -> crash
+/// 007CAF23: cmp   word ptr [eax],11h
+/// 007CAF27: jne   007CAF30                        ; wrong type -> crash
+/// 007CAF2E: xor   ecx,ecx                          ; explicit NULL
+/// 007CAF30: movsx esi,word ptr [ecx]              <<< 0xC0000005
+/// ```
+///
+/// Three paths converge on `ecx == 0`, so the site is safe only for a value in
+/// 0..=4 that resolves to a type-`0x11` entry. The ramp planted a value above 4
+/// and the client null-dereferenced. **This corrects the earlier write-up**, which
+/// blamed an unterminated `cltHorse::szName`: `szName` is fixed-width 12 bytes and
+/// nothing in the fault site is a string. Disproved, not merely unlikely.
 ///
 /// The lesson that generalises: **in this frame, "zero-filled and ignored" is safe,
-/// and "non-zero and possibly-misread" is not.** A probe that writes a distinct
-/// value into 256 unknown bytes is not a measurement, it is 256 chances to hand the
-/// client an out-of-range index or an unterminated string.
+/// and "non-zero and possibly-misread" is not.** Never plant a value into a field
+/// the client uses as a bounded index. A probe that writes distinct values into
+/// 256 unknown bytes is not a measurement, it is 256 chances to hand the client an
+/// out-of-range index.
 pub const HEALTH_PROBE_WAS_CRASHING: bool = true;
 
 /// `cltHealthInfo::Init()`'s `uiHealthPoint` (`Common.cpp:3227-3254`): the legacy
-/// constructor zeroes every other member and seeds this one at 100.
+/// constructor zeroes every other member — `siHungry`, the four `siInnerOrg*` and
+/// the four `uiOrg*Disease` — and seeds this one at 100.
 ///
-/// 100 is not cosmetic. `cltParametaBox::SetHealthAddAbility`
-/// (`Parametabox.cpp:7712-7744`) computes `siHealth*Rate = uiHealthPoint - 100`
-/// and then `clHealthAdd.SetStr((BasicBA.GetStr() * siHealthStrRate) / 100)` — so a
-/// frame carrying 0 does not merely read 0 in the status window's wellness bar,
-/// it silently cancels the client's *entire* stat block. `SetVit` is never called
-/// (`siHealthVitRate` does not exist), which is why VIT is the one ability that
-/// survives: the six others come out as `base - base = 0`.
+/// 100 is not cosmetic, it is the *neutral* value, and it is the whole fix.
+/// `cltParametaBox::SetHealthAddAbility` (`Parametabox.cpp:7712-7744`) computes
+/// `siHealth*Rate = uiHealthPoint - 100` and then
+/// `clHealthAdd.SetStr((BasicBA.GetStr() * siHealthStrRate) / 100)`. At 100 the
+/// rate is 0 and `clHealthAdd` contributes nothing, leaving the other components
+/// of `clTotalBA` to supply the real numbers. At 0 the rate is `-100`, each of the
+/// six abilities becomes `base * -1`, and the whole block cancels — which is the
+/// six zeroed rows and the `-100%` in the status window.
+///
+/// The client does the same arithmetic, and in the same order, at
+/// `0x0084C380`: six `movzx eax,byte ptr [ecx+0Ah]` / `sub eax,64h` pairs filling
+/// six rate slots at `this+0x20..0x37`, each then feeding a signed divide-by-100
+/// and a setter on `this+0xD8`. Six setters, never a seventh — `SetVit` is absent
+/// from the shipped binary exactly as it is absent from the source, because
+/// `siHealthVitRate` does not exist. That is why VIT is the one ability that
+/// survived `-100`: its `clHealthAdd` slot stays at the 0 `clHealthAdd.Init()`
+/// wrote rather than being cancelled.
 pub const HEALTH_POINT_SEED: u8 = 100;
 
 /// Builds `GAMEMSG_RESPONSE_ALLCHARINFOONE` (248), the frame the client's
@@ -528,11 +556,12 @@ pub const HEALTH_POINT_SEED: u8 = 100;
 ///
 /// `clHealthInfo` is the one exception, and it is not a preference: see
 /// [`HEALTH_POINT_SEED`]. Zeroing it is actively wrong, because the client reads
-/// `uiHealthPoint` as a *percentage* and multiplies the whole stat block by
+/// `uiHealthPoint` as a *percentage* and scales the whole stat block by
 /// `(uiHealthPoint - 100) / 100`.
 ///
-/// [`HEALTH_POINT_OFFSET`] is the sender's own location and is **inert on the
-/// shipped client**, so the symptom persists there; see that constant.
+/// The four bytes 7604..7607 — the tail of the client's 16-byte `clHealthInfo`
+/// slot, past every field this source declares — stay zero, which is what the
+/// capture has there.
 ///
 /// [`encode_all_char_info_two`] is the other half of the same
 /// `REQUEST_ALLCHARINFO` burst.
@@ -546,9 +575,9 @@ pub fn encode_all_char_info_one(
 ) -> Vec<u8> {
     let mut out = basic.encode();
     out.resize(PERSON_INFO_ONE_LEN, 0);
-    // The sender's own, capture-pinned `uiHealthPoint`. Inert on the shipped
-    // client (see `HEALTH_POINT_OFFSET`), and it must stay a *single* byte: a
-    // wide probe here crashes the client (`HEALTH_PROBE_WAS_CRASHING`).
+    // `uiHealthPoint`, at the offset the client's own `SetOne` reads it from. It
+    // must stay a *single* byte: a wide probe here crashes the client
+    // (`HEALTH_PROBE_WAS_CRASHING`).
     out[HEALTH_POINT_OFFSET] = HEALTH_POINT_SEED;
     let mut w = Writer::with_capacity(8);
     w.i16(set_item_type);
