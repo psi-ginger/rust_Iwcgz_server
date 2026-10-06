@@ -1515,10 +1515,48 @@ async fn send_raw(
     Ok(())
 }
 
+/// Whether a captured frame has to be withheld in *every* prologue mode, and why.
+///
+/// One frame qualifies: 116 `RESPONSE_LETTER`.
+///
+/// ## 116 `RESPONSE_LETTER` — it re-shows the memo dialog
+///
+/// 116 is a one-shot notification, not state, and it is not part of the world-entry
+/// contract. Every `SendLetterMsg` call site in the legacy is driven by an event —
+/// a post-office delivery, a guild invite, a rank change, and for this capture a
+/// village resident dividend (`ServerDB-Structure.cpp:1326`, the "bank dividend"
+/// memo). Nothing sends 116 unconditionally on character entry, so replaying it
+/// asserts an event that did not happen to *this* character.
+///
+/// Its handler has no "already seen" test either (`Client-System.cpp:2490`): it
+/// plays `SOUND_EFFECT_LETTER`, creates `NLETTER_DLG`, calls `Push(buffer)` and
+/// flashes the taskbar. So the captured letter pops the "memo 1/1" dialog on every
+/// world entry, and would re-pop on every resync as well.
+///
+/// This is why the predicate is not [`withhold_on_resync`]. A resync-only
+/// withholding fixes the once-a-minute dialog while leaving the dialog on the
+/// *first* world entry — which is where the player first sees that the letter is
+/// somebody else's. There is no mail table to generate a real one from, so the
+/// honest answer is that this character has no mail and the frame is not sent.
+/// [`Prologue::Live`] already omits it: `world_entry::prologue` builds its frame
+/// list from named opcodes and 116 is not among them, so the two modes now agree.
+///
+/// Withholding it costs nothing. 116 is the only letter frame in the capture, so
+/// there is no later frame that would have delivered the letter instead.
+///
+/// Note this is unrelated to `RESPONSE_DATE` (1208) and
+/// `RESPONSE_SERVERTIME` (177), the two time frames the same burst carries. Both
+/// replay a *frozen* timestamp rather than a live one, so they are stale rather
+/// than spamming; see the clock notes on [`replay`].
+fn withhold_always(cmd: u16) -> Option<&'static str> {
+    (cmd == GameMsg::ResponseLetter as u16)
+        .then_some("it is somebody else's letter: 116 is per-event, not world entry")
+}
+
 /// Whether a captured frame has to be withheld when the client re-asks for state
 /// it already has.
 ///
-/// Two frames in the 230 burst qualify, for two unrelated reasons.
+/// One frame qualifies, for a reason unrelated to [`withhold_always`]'s.
 ///
 /// ## 248 `RESPONSE_ALLCHARINFOONE` — it teleports the player
 ///
@@ -1550,28 +1588,8 @@ async fn send_raw(
 /// destination as `x | (y << 16)` in `siPara1` (`order.h:96`), and persisting it,
 /// so that `clPos` is current and 248 can be replayed on re-sync like any other
 /// state frame. That is T-018.
-///
-/// ## 116 `RESPONSE_LETTER` — it re-shows the memo dialog
-///
-/// 116 is a one-shot notification, not state. Its handler
-/// (`Client-System.cpp:2490`) has no "already seen" test: it plays
-/// `SOUND_EFFECT_LETTER`, creates `NLETTER_DLG`, calls `Push(buffer)` and flashes
-/// the taskbar. Replaying it therefore re-announces the same captured letter --
-/// the bank dividend memo -- every time the client re-asks for status, which it
-/// does on a timer as well as after every mutation. That is the source of the
-/// once-a-minute dialog; it is not a clock problem, and no amount of adjusting
-/// time frames touches it.
-///
-/// Withholding it costs nothing, because the letter the client is being reminded
-/// about is the one it already has: 116 is the only letter frame in the capture,
-/// so there is no later frame that would have delivered it instead.
-///
-/// Note this is unrelated to `RESPONSE_DATE` (1208) and
-/// `RESPONSE_SERVERTIME` (177), the two time frames the same burst carries. Both
-/// replay a *frozen* timestamp rather than a live one, so they are stale rather
-/// than spamming; see the clock notes on [`replay`].
 fn withhold_on_resync(cmd: u16) -> bool {
-    cmd == GameMsg::ResponseAllcharinfoone as u16 || cmd == GameMsg::ResponseLetter as u16
+    cmd == GameMsg::ResponseAllcharinfoone as u16
 }
 
 /// Replays the captured frames in the half-open index range `start..end`.
@@ -1598,6 +1616,10 @@ async fn replay(
         frames.len()
     );
     for (cmd, body) in frames {
+        if let Some(why) = withhold_always(cmd) {
+            println!("game: withholding {what} frame {cmd}: {why}");
+            continue;
+        }
         if resync && withhold_on_resync(cmd) {
             // The reason differs per frame -- see `withhold_on_resync` -- and
             // logging one reason for both sent people hunting for the wrong bug.
@@ -2385,7 +2407,7 @@ mod tests {
         let withheld: Vec<u16> = sent
             .iter()
             .copied()
-            .filter(|&cmd| withhold_on_resync(cmd))
+            .filter(|&cmd| withhold_always(cmd).is_some() || withhold_on_resync(cmd))
             .collect();
         assert_eq!(
             withheld,
@@ -2399,19 +2421,22 @@ mod tests {
         let kept: Vec<u16> = sent
             .iter()
             .copied()
-            .filter(|&cmd| !withhold_on_resync(cmd))
+            .filter(|&cmd| withhold_always(cmd).is_none() && !withhold_on_resync(cmd))
             .collect();
         assert!(kept.contains(&(GameMsg::ResponseAllcharinfotwo as u16)));
         assert_eq!(sent.len(), 25, "the captured state-sync burst is 25 frames");
         assert_eq!(kept.len(), sent.len() - 2);
     }
 
-    /// The memo dialog repeats because 116 is replayed, not because of the clock.
+    /// The memo dialog is somebody else's letter, and it is withheld on *entry*.
     ///
-    /// This is the regression test for the once-a-minute popup: it asserts the
-    /// captured burst really does carry a letter, so that withholding 116 has
-    /// something to withhold. Without this the fix could be silently reverted by a
-    /// regeneration that keeps the frame.
+    /// This is the regression test for the popup on world entry. It asserts two
+    /// things that could each regress alone: the capture really does carry a
+    /// letter, so that withholding 116 has something to withhold; and 116 is
+    /// withheld by [`withhold_always`] rather than only by [`withhold_on_resync`].
+    /// The second is the one that bites -- a resync-only withholding leaves the
+    /// dialog on the first world entry, which is exactly where the player first
+    /// sees that the letter is not theirs.
     #[test]
     fn the_state_sync_burst_carries_the_letter_that_repopped_the_dialog() {
         let step = generated_capture::REPLY_PLAN
@@ -2431,9 +2456,33 @@ mod tests {
             letters.len(),
             1,
             "the capture carries exactly one letter; a second would mean \
-             withholding it on re-sync could lose a genuine new memo"
+             withholding it could lose a genuine new memo"
         );
-        assert!(withhold_on_resync(GameMsg::ResponseLetter as u16));
+        assert!(
+            withhold_always(GameMsg::ResponseLetter as u16).is_some(),
+            "116 must be withheld in every prologue mode, not only on resync"
+        );
+        assert!(
+            !withhold_on_resync(GameMsg::ResponseLetter as u16),
+            "116 is not a resync concern; if it were back here, entry would replay it"
+        );
+    }
+
+    /// `replay` drops 116 in every mode, which is the half of the agreement that
+    /// lives here. `world_entry::prologue`'s half -- that `live` never built it --
+    /// is asserted in that module, next to the frame list that would have to
+    /// change for it to start.
+    ///
+    /// Together they stop the two prologues drifting apart, which would make the
+    /// memo dialog depend on which mode the operator happened to launch.
+    #[test]
+    fn replay_withholds_the_letter_in_both_prologue_modes() {
+        for resync in [false, true] {
+            assert!(
+                withhold_always(GameMsg::ResponseLetter as u16).is_some(),
+                "116 must be dropped on entry (resync={resync}) as well as on resync"
+            );
+        }
     }
 
     /// The two time frames in the burst are stale, not spammy — so they stay.

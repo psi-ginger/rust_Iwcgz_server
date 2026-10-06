@@ -12,6 +12,36 @@ use sqlx::postgres::PgPoolOptions;
 
 use crate::repository::RepositoryError;
 
+/// The map a new character starts on: `MAPINDEX_PALACE`, which is 158
+/// (`map.h:69`).
+///
+/// The legacy's new-character path assigns it by name rather than by number
+/// (`clbasicinfo.clPos.SetMapIndex(MAPINDEX_PALACE)`, `Server-Login.cpp:375`),
+/// and the number is what reaches the client. The client's
+/// `Data\mapinfoE.txt` row 173 names MapIndex 158 `Hanyang` — MapUnique 12,
+/// which `Data\MapTypeInfo.txt:17` resolves to `MAPTYPE_SHURIPALACE1`. MapIndex 1
+/// is the one the dev seed used to be, which `mapinfoE.txt` row 16 ties to
+/// `VillageUnique 1`, and `Data\villageinfoE.txt` row 1 names village 1
+/// `Ankaran` — which is why the town banner came up wrong.
+pub const PALACE_MAP_INDEX: i32 = 158;
+
+/// Where a new character stands: tile `(27, 87)`.
+///
+/// The legacy draws both axes from `rand()` — `rand()%7 + 24` and `rand()%23 + 68`
+/// (`Server-Login.cpp:377-378`) — so its spawn is somewhere in X 24..30, Y
+/// 68..90 on every character. `(27, 87)` is inside that box and is the fixed
+/// palace point the legacy itself warps to
+/// (`cltWarpInfo clWarpInfo(1, MAPINDEX_PALACE, false, false, 27, 87, -1, -1)`,
+/// `NPartyDlg.cpp:533`).
+///
+/// Deviation from the oracle: deterministic where the legacy is not, so that
+/// two logins of the same character agree and a capture-based test can name the
+/// expected tile.
+pub const PALACE_SPAWN_X: i32 = 27;
+
+/// See [`PALACE_SPAWN_X`].
+pub const PALACE_SPAWN_Y: i32 = 87;
+
 /// The subset of a character row that a char-list packet carries.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CharacterSummary {
@@ -351,8 +381,9 @@ impl CharacterRepository for PgCharacterRepository {
         slot: i16,
     ) -> Result<i32, RepositoryError> {
         let character_id: i32 = sqlx::query_scalar(
-            "INSERT INTO characters (account_id, slot, name, class_kind, gender) \
-             VALUES ($1, $2, $3, $4, $5) \
+            "INSERT INTO characters \
+             (account_id, slot, name, class_kind, gender, map_id, pos_x, pos_y) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8) \
              RETURNING character_id",
         )
         .bind(account_id)
@@ -360,6 +391,13 @@ impl CharacterRepository for PgCharacterRepository {
         .bind(name)
         .bind(class_kind)
         .bind(gender)
+        // The legacy sets these before the row is ever written
+        // (`Server-Login.cpp:375-381`); leaving them to the column defaults is
+        // what put a character at (0, 0), which is outside every map and renders
+        // as a black void.
+        .bind(PALACE_MAP_INDEX)
+        .bind(PALACE_SPAWN_X)
+        .bind(PALACE_SPAWN_Y)
         .fetch_one(&self.pool)
         .await?;
 
@@ -443,5 +481,50 @@ impl CharacterRepository for PgCharacterRepository {
             .await?
             .ok_or(RepositoryError::NotFound),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{PALACE_MAP_INDEX, PALACE_SPAWN_X, PALACE_SPAWN_Y};
+
+    /// The spawn constants are the legacy's, not ours — pinned so nobody
+    /// "tidies" them into a nicer-looking number.
+    ///
+    /// The map is `MAPINDEX_PALACE` (`map.h:69`), which the client's
+    /// `Data\mapinfoE.txt` row 173 names `Hanyang`. The tile is inside the box
+    /// the legacy's own `rand()%7 + 24` / `rand()%23 + 68`
+    /// (`Server-Login.cpp:377-378`) draws from, and equals the fixed palace warp
+    /// point in `NPartyDlg.cpp:533`.
+    ///
+    /// Both halves matter. The bounds assertions catch a spawn point that drifts
+    /// outside the palace's walkable box; the equality assertions catch one that
+    /// drifts *within* it, which the bounds would happily accept and which would
+    /// put the character somewhere the legacy never places one.
+    #[test]
+    fn the_palace_spawn_is_the_legacy_map_inside_the_legacy_random_box() {
+        // `rand()%7 + 24` -> X 24..=30 inclusive.
+        assert!((24..=30).contains(&PALACE_SPAWN_X), "x {}", PALACE_SPAWN_X);
+        // `rand()%23 + 68` -> Y 68..=90 inclusive.
+        assert!((68..=90).contains(&PALACE_SPAWN_Y), "y {}", PALACE_SPAWN_Y);
+        // The point `NPartyDlg.cpp:533` warps to.
+        assert_eq!(
+            (PALACE_MAP_INDEX, PALACE_SPAWN_X, PALACE_SPAWN_Y),
+            (158, 27, 87)
+        );
+    }
+
+    /// Tile 0 of no map is what the client draws as a black void, so nothing in
+    /// this module may default to it.
+    ///
+    /// This is the `(0, 0)` bug restated as an invariant: the columns defaulted to
+    /// 0 in `0001_schema.sql` and `create_character` inserted neither of them, so
+    /// every character made through the game's own make-character path landed
+    /// there. 0007 moves the defaults and corrects the rows.
+    #[test]
+    fn no_spawn_constant_is_tile_zero() {
+        assert_ne!(PALACE_MAP_INDEX, 0);
+        assert_ne!(PALACE_SPAWN_X, 0);
+        assert_ne!(PALACE_SPAWN_Y, 0);
     }
 }

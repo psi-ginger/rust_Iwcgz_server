@@ -491,6 +491,30 @@ mod tests {
         assert!(body.iter().all(|&b| b == 0), "friend list must be empty");
     }
 
+    /// `live` sends no letter, and must not grow one without saying so.
+    ///
+    /// 116 `RESPONSE_LETTER` is per-event in the legacy — every `SendLetterMsg`
+    /// call site is driven by a delivery, a guild invite, a rank change, a
+    /// village dividend (`ServerDB-Structure.cpp:1326`) — so no event means no
+    /// frame, and the generated prologue correctly omits it. The `replay` side is
+    /// `withhold_always` in `main.rs`, and it drops 116 for the same reason.
+    ///
+    /// This asserts the omission on purpose: were `prologue` ever to gain a 116,
+    /// the two modes would disagree and the memo dialog would appear only under
+    /// `live`. Adding a letter table is the thing that should change this test,
+    /// and it should have to delete this line to do so.
+    #[test]
+    fn the_generated_prologue_sends_no_letter() {
+        let generated = prologue(&entry(1));
+        assert!(
+            !generated
+                .iter()
+                .any(|(op, _)| *op == GameMsg::ResponseLetter as u16),
+            "no event, no letter: if a mail table lands, build a real one here \
+             instead of deleting the assertion"
+        );
+    }
+
     #[test]
     fn server_time_is_eight_little_endian_u16s_in_systemtime_order() {
         let now = ServerTime {

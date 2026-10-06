@@ -21,9 +21,13 @@ ON CONFLICT (username) DO UPDATE
 -- (`NSelectChar.cpp:736,923`); kind 0 renders as an empty slot even though the
 -- server sent a character. 1 = KIND_HERO1 (male), matching gender 1.
 --
--- map_id 1 is `MapData` index 1 -> Village01 (63x68 tiles). The spawn is the
--- village centre `(25,13)` from `cltMapTypeManager` (`MapTypeManager.cpp:124`);
--- `(100,100)` is outside that map and the client cannot place the avatar there.
+-- map_id 158 is `MAPINDEX_PALACE` (`map.h:69`), the map the legacy's
+-- new-character path assigns (`Server-Login.cpp:375`), and the client's
+-- `Data\mapinfoE.txt` names it `Hanyang`. pos (27, 87) is the palace spawn --
+-- inside the legacy's own random X 24..30 / Y 68..90 box, and the fixed point
+-- it warps to in `NPartyDlg.cpp:533`. `(0,0)` (the 0001 default for pos_x and
+-- pos_y) is outside every map and renders as a black void; 0007 corrects any
+-- row written before this.
 -- `game_unique` is pinned to 0x05BF (1471) because every per-character frame in
 -- the replayed reference capture identifies the character by that id, and the
 -- client discards records whose id does not match the one it was handed in
@@ -31,7 +35,7 @@ ON CONFLICT (username) DO UPDATE
 -- once `RESPONSE_ALLCHARINFOTWO` (249) is generated from `character_items`
 -- instead of replayed.
 INSERT INTO characters (account_id, slot, name, class_kind, gender, map_id, pos_x, pos_y, game_unique)
-SELECT account_id, 0, 'Tester', 1, 1, 1, 25, 13, 1471
+SELECT account_id, 0, 'Tester', 1, 1, 158, 27, 87, 1471
 FROM accounts
 WHERE username = 'test'
 ON CONFLICT (account_id, slot) DO UPDATE

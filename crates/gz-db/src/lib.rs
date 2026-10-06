@@ -9,7 +9,10 @@ pub mod item;
 pub mod password;
 pub mod repository;
 
-pub use character::{CharacterFull, CharacterRepository, CharacterSummary, PgCharacterRepository};
+pub use character::{
+    CharacterFull, CharacterRepository, CharacterSummary, PALACE_MAP_INDEX, PALACE_SPAWN_X,
+    PALACE_SPAWN_Y, PgCharacterRepository,
+};
 pub use item::{
     CharacterItem, DropLocation, DropOutcome, DropStatus, GroundClaim, ItemRepository, MoveOutcome,
     PgItemRepository, PickupOutcome, PickupStatus, SplitOutcome, SplitStatus, container_of,
