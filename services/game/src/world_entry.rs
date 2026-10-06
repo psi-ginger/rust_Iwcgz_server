@@ -49,22 +49,6 @@
 
 use gz_proto::opcodes_game::GameMsg;
 
-/// The single 76-byte guild-status record, repeated [`GUILD_STATUS_RECORDS`]
-/// times.
-///
-/// All 35 captured copies are **byte-identical** (verified 2026-10-05 by
-/// comparing every one of the 35 against the first), so this is one record and
-/// a count rather than a table. The record carries the session character id at
-/// [`GUILD_CHAR_UNIQUE_OFFSET`] and the fixed category string `SpecialNeeds`
-/// at offset 44; everything else is constant.
-const GUILD_STATUS: [u8; GUILD_STATUS_LEN] = [
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x31, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x02, 0x2a, 0xb3, 0x00, 0x20, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x53, 0x70, 0x65, 0x63,
-    0x69, 0x61, 0x6c, 0x4e, 0x65, 0x65, 0x64, 0x73, 0x00, 0x01, 0x69, 0x06, 0x1e, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-];
-
 const GUILD_STATUS_LEN: usize = 76;
 
 /// How many times the reference server sent the guild-status record. 35 is the
@@ -72,10 +56,94 @@ const GUILD_STATUS_LEN: usize = 76;
 /// pinned to what the client was actually sent rather than guessed at.
 const GUILD_STATUS_RECORDS: usize = 35;
 
-/// Offset of the `u16` session character id inside [`GUILD_STATUS`]. Confirmed
-/// against the capture: every one of the 35 records holds `bf 05` here, which
-/// is `0x05BF` = 1471 = the capture's `CAPTURED_CHAR_UNIQUE`.
+/// Offset of the `SI32` session character id inside the guild-status record,
+/// the last field of `cltGameMsgResponse_Guild_SetGuildStatus`
+/// (`MsgType-Guild.h:490`). Confirmed against the capture: every one of the 35
+/// records holds `bf 05 00 00` here, which is `0x05BF` = 1471 = the capture's
+/// `CAPTURED_CHAR_UNIQUE`.
 const GUILD_CHAR_UNIQUE_OFFSET: usize = 72;
+
+/// Offset of `cltSimpleGuildRank.uiConfirm` (a `UI08` at struct offset 25).
+///
+/// Derived from the declaration (`CommonHeader.h:1164-1173`) with
+/// `GUILD_MAXNAMENUM` = 13 (`CommonHeader.h:1158`): `siType` + 3 pad, two
+/// `SI32`, `szGuildName[13]`, then `uiConfirm`. The capture confirms it — 44
+/// holds `SpecialNeeds\0` and the byte at 57 holds `01` = `GUILDSTATUS_NORMAL`
+/// (`Guild.h:144`), with `/Zp8` padding after it.
+const GUILD_UI_CONFIRM_OFFSET: usize = 57;
+
+/// `cltSimpleGuildRank::Init()`'s value for `uiConfirm` (`Common.cpp:424`).
+///
+/// The legacy reuses the *rank-type* constant here rather than
+/// `GUILDSTATUS_STANDING`; the client's `IsGuildMember()` never reads it for a
+/// non-member because `siGuildUnitIndex <= 0` already returned `false`
+/// (`Common.cpp:520-535`), so the value is sent as `Init()` writes it rather
+/// than "corrected".
+const GUILDRANKTYPE_STANDING: u8 = 3;
+
+/// The 76-byte body of `GAMEMSG_RESPONSE_GUILD_SETGUILDSTATUS` for a character
+/// in **no guild**: an all-zero `cltGuildStatus`, `cltSimpleGuildRank::Init()`,
+/// and this session's character id.
+///
+/// # Why this is not the captured record
+///
+/// The capture's 35 copies carry the reference character's *real* guild, and
+/// generating them is what made VIT read 54. The record is
+/// `cltGuildStatus clinfo` (32 bytes) + `cltSimpleGuildRank clGuild` (40) +
+/// `SI32 siCharUnique` (4) (`MsgType-Guild.h:485-490`), and the captured bytes
+/// say:
+///
+/// | offset | value | meaning |
+/// |---|---|---|
+/// | 8 | **49** | `clinfo.siVit` — `cltBasicAbility` is str, dex, **vit**, mag, hnd, luk, wis (`CommonHeader.h:2746-2752`) |
+/// | 32 | 2 | `siType` = `GUILDRANKTYPE_MEMBER` (`CommonHeader.h:1155`) |
+/// | 36 | 32 | `siVillageUnique` |
+/// | 40 | 4 | `siGuildUnitIndex` |
+/// | 44 | `SpecialNeeds` | `szGuildName` |
+/// | 57 | 1 | `uiConfirm` = `GUILDSTATUS_NORMAL` |
+///
+/// So all four gates of `IsGuildMember()` (`Common.cpp:520-535`) pass, the
+/// client takes the `Set` branch (`Client-Server\Client-Guild.cpp:327-337`),
+/// and `clGuildBA.Vit` becomes 49. `clTotalBA` adds that term **raw**
+/// (`Parametabox.cpp:4379`) even though the status window prints it with a `%`
+/// (`NCharPerson.cpp:3237`), so `5 + 49 = 54` and
+/// `54 * (8000 + 1*5) / 1000 = 432` (`SetHitPoint`, `Parametabox.cpp:3374`) —
+/// the reported "VIT 54, HP 40/432", to the digit.
+///
+/// # What the legacy sends instead
+///
+/// For a character with no guild this is exactly the legacy's body:
+/// `pclGuildtemp.Init()` + `clGuildtemp.Init()` give a zeroed status and a
+/// non-member rank (`ServerDB-Person.cpp:3247-3258`). The client then takes
+/// the `else` at `Client-Server\Client-Guild.cpp:339-344` and calls `Init()` on
+/// both `clGuildRank` and `clGuildBA`, so the VIT term is 0 by construction
+/// rather than by luck — which matters because `cltParametaBox::Init()` never
+/// touches `clGuildBA`, so an unsent record leaves it as uninitialised memory.
+///
+/// **Two deliberate deviations:**
+///
+/// * The legacy sends *one* record; the capture holds **35**. The count stays
+///   35 so `generated_prologue_matches_the_capture_frame_for_frame` keeps
+///   pinning the frame count and every `(opcode, length)` to the capture, and
+///   the duplicates are idempotent — each copy runs the same `Init()`.
+/// * Bytes 58 and 59 are `/Zp8` padding `Init()` never writes
+///   (`Common.cpp:418-428`), so the legacy's own body holds uninitialised
+///   stack there — the same `f7 59`-shaped artefact seen in `PERSONITEMINFO`.
+///   We send zeros.
+///
+/// # Citations
+///
+/// `IsGuildMember` gates, `cltSimpleGuildRank::Init`, the no-guild send site,
+/// and the client's `Set`/`Init` branches are all named above; the arithmetic
+/// is pinned in `the_captured_guild_vit_reproduces_the_reported_max_hp`.
+#[must_use]
+pub fn guild_status(char_unique: u16) -> Vec<u8> {
+    let mut record = vec![0u8; GUILD_STATUS_LEN];
+    record[GUILD_UI_CONFIRM_OFFSET] = GUILDRANKTYPE_STANDING;
+    record[GUILD_CHAR_UNIQUE_OFFSET..GUILD_CHAR_UNIQUE_OFFSET + 4]
+        .copy_from_slice(&u32::from(char_unique).to_le_bytes());
+    record
+}
 
 /// The item-type table head. `SETITEMTYPEINFO` is world configuration, not
 /// character state, and the two leading `u16` (20, 3) are the only non-zero
@@ -218,13 +286,14 @@ pub fn prologue(input: &WorldEntry) -> Vec<(u16, Vec<u8>)> {
         vec![0u8; SHOW_PUCHIKOMI_LEN],
     ));
 
-    // The guild-status block. 35 identical records, each stamped with this
-    // session's character id.
+    // The guild-status block: 35 identical "this character is in no guild"
+    // records, each stamped with this session's character id. `guild_status`
+    // says why the capture's bytes are not reused.
     for _ in 0..GUILD_STATUS_RECORDS {
-        let mut record = GUILD_STATUS.to_vec();
-        record[GUILD_CHAR_UNIQUE_OFFSET..GUILD_CHAR_UNIQUE_OFFSET + 2]
-            .copy_from_slice(&input.char_unique.to_le_bytes());
-        out.push((GameMsg::ResponseGuildSetguildstatus as u16, record));
+        out.push((
+            GameMsg::ResponseGuildSetguildstatus as u16,
+            guild_status(input.char_unique),
+        ));
     }
 
     // Village event NPCs: none active.
@@ -437,20 +506,107 @@ mod tests {
         }
     }
 
+    /// `cltSimpleGuildRank::IsGuildMember()` (`Common.cpp:520-535`), evaluated on
+    /// a captured/generated record rather than asserted as prose, so the test
+    /// states the client's own decision and not a byte we chose.
+    ///
+    /// The four gates in order: `siType == GUILDRANKTYPE_STANDING` (3),
+    /// `siGuildUnitIndex <= 0`, `siVillageUnique <= 0`,
+    /// `uiConfirm == GUILDSTATUS_STANDING` (0).
+    fn is_guild_member(record: &[u8]) -> bool {
+        let i32_at =
+            |at: usize| i32::from_le_bytes(record[at..at + 4].try_into().expect("an SI32 field"));
+        if record[32] == 3 {
+            return false;
+        }
+        if i32_at(40) <= 0 {
+            return false;
+        }
+        if i32_at(36) <= 0 {
+            return false;
+        }
+        record[57] != 0
+    }
+
+    /// The deviation this fix exists for, asserted from both sides.
+    ///
+    /// The capture's record is a *member* of guild `SpecialNeeds` carrying
+    /// `siVit` = 49; ours says "no guild". Generating the captured bytes —
+    /// which is what both `prologue` and `replay` did — put 49 into
+    /// `clGuildBA.Vit`, and `clTotalBA` adds that term raw, which is the
+    /// reported `Vit 54`.
     #[test]
-    fn the_generated_guild_record_is_byte_identical_to_the_captured_one() {
-        // The template was transcribed by hand from the capture; this is what
-        // proves the transcription.
+    fn the_guild_record_says_no_guild_while_the_capture_carries_a_real_one() {
         let Some((_, captured)) = generated_capture::frames_in(23, 24).next() else {
             panic!("the capture should hold the first guild record at index 23");
         };
-        let generated = prologue(&entry(0x05BF));
-        let ours = generated
+        // Prove the premise before asserting on the deviation: if the captured
+        // record were already a non-member, "we send a non-member" would be
+        // vacuous and the +49 would have to come from somewhere else.
+        assert_eq!(
+            i32::from_le_bytes(captured[8..12].try_into().unwrap()),
+            49,
+            "the captured record's cltBasicAbility slot 2 (siVit)"
+        );
+        assert!(
+            is_guild_member(captured),
+            "the captured record must be a guild member for this test to mean anything"
+        );
+        assert_eq!(&captured[44..57], b"SpecialNeeds\0");
+
+        let generated = prologue(&entry(0x1234));
+        let guilds: Vec<&[u8]> = generated
             .iter()
-            .find(|(op, _)| *op == GameMsg::ResponseGuildSetguildstatus as u16)
+            .filter(|(op, _)| *op == GameMsg::ResponseGuildSetguildstatus as u16)
             .map(|(_, body)| body.as_slice())
-            .expect("a guild record");
-        assert_eq!(ours, captured);
+            .collect();
+        assert_eq!(guilds.len(), GUILD_STATUS_RECORDS);
+        for record in guilds {
+            assert_eq!(record.len(), GUILD_STATUS_LEN);
+            // No guild stats at all: `cltGuildStatus` is the first 32 bytes.
+            assert!(
+                record[..32].iter().all(|&b| b == 0),
+                "clinfo must be zeroed, got {:02x?}",
+                &record[..32]
+            );
+            assert!(
+                !is_guild_member(record),
+                "the client must take the Init branch"
+            );
+            assert_eq!(
+                record[57], GUILDRANKTYPE_STANDING,
+                "cltSimpleGuildRank::Init()"
+            );
+            // Nothing else may be planted into a rank the client reads.
+            assert!(record[58..72].iter().all(|&b| b == 0));
+            assert_eq!(
+                &record[GUILD_CHAR_UNIQUE_OFFSET..GUILD_CHAR_UNIQUE_OFFSET + 4],
+                &[0x34, 0x12, 0x00, 0x00]
+            );
+        }
+    }
+
+    /// The arithmetic that makes 49 the *whole* anomaly, pinned so a future
+    /// change cannot quietly leave another +49 behind.
+    ///
+    /// `clTotalBA` sums `clGuildBA` raw (`Parametabox.cpp:4379`) and
+    /// `SetHitPoint` turns the total into a maximum at `Parametabox.cpp:3374`:
+    /// `siVitHitpoint = (vit * (8000 + level*5)) / 1000`.
+    #[test]
+    fn the_captured_guild_vit_reproduces_the_reported_max_hp() {
+        let Some((_, captured)) = generated_capture::frames_in(23, 24).next() else {
+            panic!("the capture should hold the first guild record at index 23");
+        };
+        let guild_vit = i32::from_le_bytes(captured[8..12].try_into().unwrap());
+        let base_vit = 5; // `character_stats.vit DEFAULT 5`, level 1
+        let level = 1;
+        assert_eq!(
+            (base_vit + guild_vit) * (8000 + level * 5) / 1000,
+            432,
+            "5 + 49 must be exactly the observed maximum, 432"
+        );
+        // And with the guild term gone, the spec's level-1 figure.
+        assert_eq!(base_vit * (8000 + level * 5) / 1000, 40);
     }
 
     #[test]

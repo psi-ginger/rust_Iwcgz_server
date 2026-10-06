@@ -1809,6 +1809,7 @@ impl LiveFrames<'_> {
         let is_skillbook = cmd == GameMsg::ResponseSkillbookMagicinfoGet as u16;
         let is_family = cmd == GameMsg::ResponseFamilyUpdate as u16;
         let is_village = cmd == GameMsg::ResponseGetvillageinfo as u16;
+        let is_guild_status = cmd == GameMsg::ResponseGuildSetguildstatus as u16;
         if !is_one
             && !is_two
             && !is_name
@@ -1817,8 +1818,27 @@ impl LiveFrames<'_> {
             && !is_skillbook
             && !is_family
             && !is_village
+            && !is_guild_status
         {
             return Ok(None);
+        }
+        // 2926 is handled before the character lookup: the legacy sends it
+        // unconditionally at login and its body for a character with no guild is
+        // the same 76 bytes whatever the row says (`ServerDB-Person.cpp:3247-3258`).
+        //
+        // Replaying the captured copy here is what made VIT read 54 — see
+        // `world_entry::guild_status`, which documents the record's `siVit` = 49
+        // and the client branch that adds it. It also must not fall back to the
+        // captured body if `character` were ever unset, because the fallback is
+        // the bug.
+        if is_guild_status {
+            let char_unique = u16::try_from(self.char_unique).map_err(|_| {
+                format!(
+                    "session char_unique {} does not fit the u16 guild-status stamp",
+                    self.char_unique
+                )
+            })?;
+            return Ok(Some(world_entry::guild_status(char_unique)));
         }
         // `None` until `REQUEST_SELECTCHAR` names the character, which is when the
         // 230 burst carrying these frames is first sent.
