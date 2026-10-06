@@ -414,7 +414,7 @@ pub const CLT_HEALTH_INFO_LEN: usize = 12;
 /// Offset of `uiHealthPoint` inside [`CLT_HEALTH_INFO_LEN`].
 const HEALTH_POINT_IN_STRUCT: usize = 10;
 
-/// `uiHealthPoint`'s offset in opcode 248's body.
+/// Where the *reference server* put `clHealthInfo` in opcode 248's body.
 ///
 /// Not an arithmetic result. `clHealthInfo` is declared immediately before
 /// `clHorseInfo` (`PersonInfo.h:308`, `:313`) with nothing between them, so the
@@ -429,8 +429,57 @@ const HEALTH_POINT_IN_STRUCT: usize = 10;
 /// numbers from the captured bytes rather than from this sentence.
 pub const HEALTH_INFO_OFFSET: usize = 7_596;
 
-/// `clHealthInfo.uiHealthPoint`'s offset in opcode 248's body.
-pub const HEALTH_POINT_OFFSET: usize = HEALTH_INFO_OFFSET + HEALTH_POINT_IN_STRUCT;
+/// How far the shipped client's `cltPersonInfoOne` places `clHealthInfo` past
+/// [`HEALTH_INFO_OFFSET`].
+///
+/// # Deviation from the legacy
+///
+/// [`CLIENT_HEALTH_INFO_DRIFT`] is a client/server build drift, not a modelling
+/// choice, and it is the reason writing 100 at the capture-pinned 7606 does not
+/// work. `cltHealthInfo::Set` is `memcpy(this, pclinfo, sizeof(cltHealthInfo))`
+/// (`Common.cpp:3256-3259`) — a raw block copy, not a member-wise one, so the
+/// client stores our bytes at *its own* base address. Any difference between the
+/// shipped client and this server source in the summed size of the sub-structs
+/// declared before `clHealthInfo` therefore slides the whole struct, silently and
+/// wholesale, and the horse anchor above cannot see it: it pins where the *sender*
+/// wrote `clHorse[0]`, not where the *receiver* reads it.
+///
+/// The drift is pinned to exactly 1 by two client readouts, which between them fix
+/// both the direction and the member:
+///
+/// * The status window's wellness line still read `-100%`. That string is
+///   `GetTxtFromMgr(660)` formatted with `siHealthStrRate`
+///   (`NCharPerson.cpp:2844`, `:2978`, …), and `siHealthStrRate` is
+///   `uiHealthPoint - 100` (`Parametabox.cpp:7727`). So the client's
+///   `uiHealthPoint` was still 0: byte 7606 is *not* it, and the drift is not 0.
+/// * The same session then reported an active body-organ complaint, which
+///   `cltHealth::GetCurDisease` only produces when `FindDisease(ORG_n,
+///   uiOrgNDisease)` resolves a real disease (`Health.cpp:1209-1238`), reached
+///   before the health word is even consulted
+///   (`NPannel_CharStatusDlg.cpp:598`). Every byte we emit in that region is 0
+///   except the 100 at 7606, so some `uiOrg*Disease` *is* reading 7606.
+///
+/// `uiHealthPoint` is declared after all four `uiOrg*Disease` members, so the only
+/// disease member that can land on 7606 with `uiHealthPoint` still beyond it is
+/// `uiOrg4Disease`, the ninth byte. That puts the client's base at 7597 and its
+/// `uiHealthPoint` at 7607. Under that base the rest of the struct reads
+/// consistently: `siHungry` lands on 7597..7598 = 0, which is the `Fullness: 0` the
+/// client showed, and `siInnerOrg1..4` on 7599..7602 = 0, which is why no organ
+/// word appeared and only the disease text did.
+///
+/// This constant is the one number here that the capture cannot pin, because the
+/// capture is the sender's bytes. It is pinned instead against the client's two
+/// readouts above, and the test
+/// `the_health_point_offset_is_the_one_the_capture_pins` asserts the resulting
+/// byte so a future edit cannot silently move it back into a padding slot.
+pub const CLIENT_HEALTH_INFO_DRIFT: usize = 1;
+
+/// Where the *shipped client* reads `clHealthInfo` in opcode 248's body.
+pub const CLIENT_HEALTH_INFO_OFFSET: usize = HEALTH_INFO_OFFSET + CLIENT_HEALTH_INFO_DRIFT;
+
+/// `clHealthInfo.uiHealthPoint`'s offset in opcode 248's body, as the client reads
+/// it.
+pub const HEALTH_POINT_OFFSET: usize = CLIENT_HEALTH_INFO_OFFSET + HEALTH_POINT_IN_STRUCT;
 
 /// `cltHealthInfo::Init()`'s `uiHealthPoint` (`Common.cpp:3227-3254`): the legacy
 /// constructor zeroes every other member and seeds this one at 100.

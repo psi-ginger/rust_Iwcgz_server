@@ -1962,9 +1962,10 @@ mod tests {
     // The declared payload lengths. Only the tests below assert on them, so they
     // are imported here rather than at the top of the file.
     use gz_proto::game::{
-        ALL_CHAR_INFO_ONE_LEN, ALL_CHAR_INFO_TWO_LEN, CHANGE_HORSE_LEN, CLT_HEALTH_INFO_LEN,
-        FAMILY_UPDATE_LEN, GET_VILLAGE_INFO_LEN, HEALTH_INFO_OFFSET, HEALTH_POINT_OFFSET,
-        PERSON_HORSE_HEADER_LEN, PERSON_HORSE_LEN, RESPONSE_NAME_LEN, SKILLBOOK_MAGIC_INFO_LEN,
+        ALL_CHAR_INFO_ONE_LEN, ALL_CHAR_INFO_TWO_LEN, CHANGE_HORSE_LEN, CLIENT_HEALTH_INFO_OFFSET,
+        CLT_HEALTH_INFO_LEN, FAMILY_UPDATE_LEN, GET_VILLAGE_INFO_LEN, HEALTH_INFO_OFFSET,
+        HEALTH_POINT_OFFSET, PERSON_HORSE_HEADER_LEN, PERSON_HORSE_LEN, RESPONSE_NAME_LEN,
+        SKILLBOOK_MAGIC_INFO_LEN,
     };
 
     /// The regression this locks down is the 2026-10-05 live failure: seven
@@ -2195,8 +2196,17 @@ mod tests {
         let horse_info = horse - PERSON_HORSE_HEADER_LEN;
         let health = horse_info - CLT_HEALTH_INFO_LEN;
         assert_eq!(health, HEALTH_INFO_OFFSET, "clHealthInfo starts here");
+
+        // That is where the *sender* wrote it. `cltHealthInfo::Set` is a
+        // `memcpy` of the whole struct (`Common.cpp:3256-3259`), so the receiver
+        // stores those bytes at its own base — see `CLIENT_HEALTH_INFO_DRIFT`.
+        assert_eq!(CLIENT_HEALTH_INFO_OFFSET, HEALTH_INFO_OFFSET + 1);
         assert_eq!(
-            HEALTH_POINT_OFFSET - HEALTH_INFO_OFFSET,
+            HEALTH_POINT_OFFSET, 7_607,
+            "the client reads uiHealthPoint one byte past where the sender wrote it"
+        );
+        assert_eq!(
+            HEALTH_POINT_OFFSET - CLIENT_HEALTH_INFO_OFFSET,
             10,
             "uiHealthPoint is the eleventh byte of cltHealthInfo"
         );
@@ -2257,14 +2267,27 @@ mod tests {
             "cltHealthInfo::Init() seeds 100, which zeroes every siHealth*Rate"
         );
         assert_eq!(
-            &generated[HEALTH_INFO_OFFSET..HEALTH_POINT_OFFSET],
+            &generated[CLIENT_HEALTH_INFO_OFFSET..HEALTH_POINT_OFFSET],
             &[0u8; 10],
-            "the rest of clHealthInfo stays zero"
+            "siHungry, siInnerOrg1..4 and uiOrg1..4Disease stay zero as the client reads them"
         );
         assert_eq!(
-            &generated[HEALTH_POINT_OFFSET + 1..HEALTH_INFO_OFFSET + CLT_HEALTH_INFO_LEN],
-            &[0u8; 1],
-            "uiHealthPoint is the last member, so the struct is 12 bytes"
+            generated[HEALTH_INFO_OFFSET], 0,
+            "the byte the sender calls uiHealthPoint stays zero: writing the seed there \
+             is what raised the client's phantom organ complaint by landing on its \
+             uiOrg4Disease"
+        );
+        assert_eq!(
+            generated[HEALTH_INFO_OFFSET + 11],
+            100,
+            "the seed lands on the sender's trailing pad byte, which is exactly the \
+             client's uiHealthPoint once the struct is slid one byte"
+        );
+        assert_eq!(
+            &generated[HEALTH_INFO_OFFSET..HEALTH_POINT_OFFSET - 1],
+            &[0u8; 10],
+            "the sender's clHealthInfo payload proper is untouched: siHungry, \
+             siInnerOrg1..4 and uiOrg1..4Disease all stay zero"
         );
     }
 
