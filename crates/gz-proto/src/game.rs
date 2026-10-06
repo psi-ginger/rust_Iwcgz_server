@@ -405,6 +405,45 @@ pub const ALL_CHAR_INFO_ONE_LEN: usize = PERSON_INFO_ONE_LEN + 8;
 /// (`PersonInfo.h:420-424`), so the item array leads at offset 0.
 pub const ALL_CHAR_INFO_TWO_LEN: usize = MAX_ITEM_PER_PERSON * CLT_ITEM_SIZE + 4_240;
 
+/// `sizeof(cltHealthInfo)` — 12 bytes, all sub-byte or word sized
+/// (`CommonHeader.h:2872-2898`): `SI16 siHungry`, `SI08 siInnerOrg1..4`, `UI08
+/// uiOrg1..4Disease`, `UI08 uiHealthPoint`. Nothing in it needs padding, so the
+/// fields sit at 0, 2..6, 6..10 and 10.
+pub const CLT_HEALTH_INFO_LEN: usize = 12;
+
+/// Offset of `uiHealthPoint` inside [`CLT_HEALTH_INFO_LEN`].
+const HEALTH_POINT_IN_STRUCT: usize = 10;
+
+/// `uiHealthPoint`'s offset in opcode 248's body.
+///
+/// Not an arithmetic result. `clHealthInfo` is declared immediately before
+/// `clHorseInfo` (`PersonInfo.h:308`, `:313`) with nothing between them, so the
+/// struct ends exactly where `clHorseInfo` begins — and `clHorseInfo`'s offset is
+/// a thing the capture states rather than one it infers. The reference character
+/// rode the `HORSEUNIQUE_FOAL` named `Foal744` (`Horse.h:33` is `12`), and
+/// `siHorseUnique`/`szName` sit at 0/2 inside `cltHorse`
+/// (`CommonHeader.h:3254-3255`), so `clHorse[0]` begins at 7636. The capture puts
+/// `clHorse[]` at [`PERSON_HORSE_HEADER_LEN`] inside `cltPersonHorseInfo`, which
+/// makes `clHorseInfo` 7608 and `clHealthInfo` 7596. The test
+/// `the_health_point_offset_is_the_one_the_capture_pins` re-derives all three
+/// numbers from the captured bytes rather than from this sentence.
+pub const HEALTH_INFO_OFFSET: usize = 7_596;
+
+/// `clHealthInfo.uiHealthPoint`'s offset in opcode 248's body.
+pub const HEALTH_POINT_OFFSET: usize = HEALTH_INFO_OFFSET + HEALTH_POINT_IN_STRUCT;
+
+/// `cltHealthInfo::Init()`'s `uiHealthPoint` (`Common.cpp:3227-3254`): the legacy
+/// constructor zeroes every other member and seeds this one at 100.
+///
+/// 100 is not cosmetic. `cltParametaBox::SetHealthAddAbility`
+/// (`Parametabox.cpp:7712-7744`) computes `siHealth*Rate = uiHealthPoint - 100`
+/// and then `clHealthAdd.SetStr((BasicBA.GetStr() * siHealthStrRate) / 100)` — so a
+/// frame carrying 0 does not merely read 0 in the status window's wellness bar,
+/// it silently cancels the client's *entire* stat block. `SetVit` is never called
+/// (`siHealthVitRate` does not exist), which is why VIT is the one ability that
+/// survives: the six others come out as `base - base = 0`.
+pub const HEALTH_POINT_SEED: u8 = 100;
+
 /// Builds `GAMEMSG_RESPONSE_ALLCHARINFOONE` (248), the frame the client's
 /// `SetOne` applies wholesale to its `cltCharCommon`.
 ///
@@ -420,6 +459,11 @@ pub const ALL_CHAR_INFO_TWO_LEN: usize = MAX_ITEM_PER_PERSON * CLT_ITEM_SIZE + 4
 /// `PERSONITEMINFO` padding holds (`MsgType.h:3356`, `siChangedNum`+2). Zeros are
 /// strictly better than that.
 ///
+/// `clHealthInfo` is the one exception, and it is not a preference: see
+/// [`HEALTH_POINT_SEED`]. Zeroing it is actively wrong, because the client reads
+/// `uiHealthPoint` as a *percentage* and multiplies the whole stat block by
+/// `(uiHealthPoint - 100) / 100`.
+///
 /// [`encode_all_char_info_two`] is the other half of the same
 /// `REQUEST_ALLCHARINFO` burst.
 #[must_use]
@@ -432,6 +476,7 @@ pub fn encode_all_char_info_one(
 ) -> Vec<u8> {
     let mut out = basic.encode();
     out.resize(PERSON_INFO_ONE_LEN, 0);
+    out[HEALTH_POINT_OFFSET] = HEALTH_POINT_SEED;
     let mut w = Writer::with_capacity(8);
     w.i16(set_item_type);
     w.i16(set_item_step);

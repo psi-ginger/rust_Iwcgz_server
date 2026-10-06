@@ -1962,8 +1962,9 @@ mod tests {
     // The declared payload lengths. Only the tests below assert on them, so they
     // are imported here rather than at the top of the file.
     use gz_proto::game::{
-        ALL_CHAR_INFO_ONE_LEN, ALL_CHAR_INFO_TWO_LEN, CHANGE_HORSE_LEN, FAMILY_UPDATE_LEN,
-        GET_VILLAGE_INFO_LEN, PERSON_HORSE_LEN, RESPONSE_NAME_LEN, SKILLBOOK_MAGIC_INFO_LEN,
+        ALL_CHAR_INFO_ONE_LEN, ALL_CHAR_INFO_TWO_LEN, CHANGE_HORSE_LEN, CLT_HEALTH_INFO_LEN,
+        FAMILY_UPDATE_LEN, GET_VILLAGE_INFO_LEN, HEALTH_INFO_OFFSET, HEALTH_POINT_OFFSET,
+        PERSON_HORSE_HEADER_LEN, PERSON_HORSE_LEN, RESPONSE_NAME_LEN, SKILLBOOK_MAGIC_INFO_LEN,
     };
 
     /// The regression this locks down is the 2026-10-05 live failure: seven
@@ -2144,8 +2145,127 @@ mod tests {
 
         // The unmodelled sub-structs are the documented deviation: zero, where
         // the capture carried the reference character's skills, horse (`Foal744`)
-        // and passport.
-        assert!(body[968..10_160].iter().all(|&b| b == 0));
+        // and passport. `clHealthInfo` is carved out of that sweep because the one
+        // byte the client reads as a percentage is written -- see
+        // `the_health_point_offset_is_the_one_the_capture_pins`.
+        for (i, &b) in body[968..10_160]
+            .iter()
+            .enumerate()
+            .filter(|&(i, _)| 968 + i != HEALTH_POINT_OFFSET)
+        {
+            assert_eq!(b, 0, "unmodelled region byte at offset {}", 968 + i);
+        }
+    }
+
+    /// `clHealthInfo.uiHealthPoint` is the one byte in `ALLCHARINFOONE` that must
+    /// not be zero, and its offset has to be pinned to the reference bytes rather
+    /// than to arithmetic over eight struct sizes nobody can re-check by eye.
+    ///
+    /// The chain is short because `clHealthInfo` is declared immediately before
+    /// `clHorseInfo` (`PersonInfo.h:308`, `:313`), with nothing between them. The
+    /// capture's reference character rode the `HORSEUNIQUE_FOAL` named `Foal744`,
+    /// and `siHorseUnique`/`szName` sit at 0/2 inside `cltHorse`
+    /// (`CommonHeader.h:3254-3255`), so the nine-byte marker locates `clHorse[0]`
+    /// outright. The array's offset inside `cltPersonHorseInfo` is the same
+    /// [`PERSON_HORSE_HEADER_LEN`] the 226 frame independently pins, and
+    /// [`CLT_HEALTH_INFO_LEN`] bytes run straight back from there.
+    ///
+    /// This is also the regression for the 2026-10-06 live failure: the status
+    /// window read Str/Dex/Int/Wis/Luck/Hnd as 0 and left VIT as the only stat
+    /// standing. `SetHealthAddAbility` (`Parametabox.cpp:7712-7744`) scales the
+    /// whole block by `(uiHealthPoint - 100) / 100`, so a zeroed `clHealthInfo`
+    /// subtracts every ability from the total column -- and never calls `SetVit`,
+    /// which is why VIT alone escaped.
+    #[test]
+    fn the_health_point_offset_is_the_one_the_capture_pins() {
+        let captured = generated_capture::frame(GameMsg::ResponseAllcharinfoone as u16)
+            .expect("the capture must contain an ALLCHARINFOONE frame");
+
+        // `HORSEUNIQUE_FOAL` is 12 (`Horse.h:33`), little-endian in an `SI16`,
+        // and `szName` starts two bytes later.
+        let horses: Vec<usize> = captured
+            .windows(9)
+            .enumerate()
+            .filter(|(_, w)| *w == b"\x0c\x00Foal744")
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(horses.len(), 1, "exactly one horse record in the frame");
+        let horse = horses[0];
+
+        let horse_info = horse - PERSON_HORSE_HEADER_LEN;
+        let health = horse_info - CLT_HEALTH_INFO_LEN;
+        assert_eq!(health, HEALTH_INFO_OFFSET, "clHealthInfo starts here");
+        assert_eq!(
+            HEALTH_POINT_OFFSET - HEALTH_INFO_OFFSET,
+            10,
+            "uiHealthPoint is the eleventh byte of cltHealthInfo"
+        );
+
+        // The captured character's wellness state, so the sweep below has something
+        // to be zero against: a healthy Meirin with one organ complaint.
+        assert_eq!(
+            i16::from_le_bytes([captured[health], captured[health + 1]]),
+            0,
+            "siHungry"
+        );
+        assert_eq!(
+            &captured[health + 2..health + 6],
+            &[0, 0, 0, 0],
+            "siInnerOrg1..4"
+        );
+        assert!(
+            captured[HEALTH_POINT_OFFSET] <= 100,
+            "the capture's uiHealthPoint ({}) is a percentage",
+            captured[HEALTH_POINT_OFFSET]
+        );
+
+        // And what we now send.
+        let generated = encode_all_char_info_one(
+            &BasicInfo {
+                account_idnum: 1471,
+                account_id: "tester".into(),
+                slot: 2,
+                sex: 1,
+                class_kind: 0,
+                home_village: 0,
+                map_index: 158,
+                x: 27,
+                y: 87,
+                character_id: 4242,
+                name: "test3".into(),
+                str_: 5,
+                dex: 5,
+                vit: 5,
+                mag: 5,
+                hnd: 5,
+                luk: 5,
+                wis: 5,
+                level: 1,
+                bonus: 5,
+                life: 40,
+                mana: 20,
+                exp: 0,
+                money: 1000,
+            },
+            0,
+            0,
+            0,
+            0,
+        );
+        assert_eq!(
+            generated[HEALTH_POINT_OFFSET], 100,
+            "cltHealthInfo::Init() seeds 100, which zeroes every siHealth*Rate"
+        );
+        assert_eq!(
+            &generated[HEALTH_INFO_OFFSET..HEALTH_POINT_OFFSET],
+            &[0u8; 10],
+            "the rest of clHealthInfo stays zero"
+        );
+        assert_eq!(
+            &generated[HEALTH_POINT_OFFSET + 1..HEALTH_INFO_OFFSET + CLT_HEALTH_INFO_LEN],
+            &[0u8; 1],
+            "uiHealthPoint is the last member, so the struct is 12 bytes"
+        );
     }
 
     /// The generated `PERSONITEMINFO` must differ from the capture only in the
