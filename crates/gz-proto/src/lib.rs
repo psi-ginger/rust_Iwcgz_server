@@ -10,4 +10,5 @@ pub mod opcodes_auth;
 pub mod opcodes_front;
 pub mod opcodes_game;
 pub mod personalshop;
+pub mod statusinfo;
 pub mod wire;

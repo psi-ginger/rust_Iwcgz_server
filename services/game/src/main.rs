@@ -57,6 +57,7 @@ use gz_proto::item::{
 };
 use gz_proto::opcodes_game::GameMsg;
 use gz_proto::personalshop::{ShopTradeData, decode_personal_shop_request, shop_mode_for_request};
+use gz_proto::statusinfo::{CHANGETYPE_AUTOFOOD, ChangeStatusInfo, decode_change_status_info};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
@@ -287,8 +288,10 @@ async fn handle_client(
     let mut buf = [0u8; 8192];
     // Set once the game login succeeds; select-char and later opcodes need it.
     let mut login: Option<GameSession> = None;
-    // Cursor into `generated_capture::REPLY_PLAN`, so a repeated client opcode
-    // can map to a different captured reply on its second appearance.
+    // Cursor into `generated_capture::REPLY_PLAN`. The plan is the one-shot
+    // world-entry bulk: step 0 is answered on the first `REQUEST_CHANGESTATUSINFO`
+    // (230) and `plan_step` stays past it, so a later 230 is dispatched as the
+    // legacy status message instead of replaying the bulk again (T-018).
     let mut plan_step = 0usize;
     // Which captured frames get rebuilt from PostgreSQL on the way out.
     let mut live = LiveFrames {
@@ -621,22 +624,37 @@ async fn handle_client(
                     .await?;
                 }
                 c if c == GameMsg::RequestChangestatusinfo as u16 => {
-                    // The reference server answers 230 with a 25-frame data
-                    // block (map/object bulk, then ALLCHARINFO one/two), not
-                    // with 231. `REPLY_PLAN` mirrors that verbatim. In live mode
-                    // there is nothing to answer with yet -- 231, the "your
-                    // status is current" reply, is T-017's to introduce, and
-                    // sending it now would tell the client a state this server
-                    // has not computed.
-                    if cfg.prologue == Prologue::Capture {
+                    // 230 has two roles in this port. The *first* one after
+                    // char-select is the reference server's one-shot world
+                    // bulk -- map/object data, then ALLCHARINFO one/two, carried
+                    // by `REPLY_PLAN`'s step 0. Every later 230 is the legacy
+                    // `CHANGESTATUSINFO` message, which the legacy answers with
+                    // at most a 24-byte 231 (`Server-Person.cpp:2831-2860`).
+                    //
+                    // Before T-018 both roles went through the same plan cursor,
+                    // so a repeated 230 hit the cursor's re-sync branch and
+                    // replayed the whole ~65 KB bulk -- the live "movement
+                    // micro-stutter". The plan is now stepped exactly once; see
+                    // [`replay_plan_step`].
+                    let world_bulk_pending = cfg.prologue == Prologue::Capture && plan_step == 0;
+                    if world_bulk_pending {
                         replay_plan_step(&mut stream, &mut outbound, cmd, &mut plan_step, &live)
                             .await?;
                     } else {
-                        println!(
-                            "game: {peer}: changestatusinfo -> no reply \
-                             (live mode; payload-driven 230 is T-017)"
-                        );
+                        handle_change_status_info(
+                            &mut stream,
+                            &mut outbound,
+                            char_unique,
+                            payload.as_ref(),
+                        )
+                        .await?;
                     }
+                }
+                c if c == GameMsg::RequestHeartbeat as u16 => {
+                    // `DoMsg_GAMEMSG_REQUEST_HEARTBEAT` is an empty no-op
+                    // (`Server-System.cpp:520-524`): the client says "still
+                    // here" and the server answers nothing.
+                    println!("game: {peer}: heartbeat -> no reply (legacy no-op)");
                 }
                 // The reference server sends nothing for 246; the data the client
                 // wants arrives after 230.
@@ -1735,15 +1753,17 @@ async fn send_world_entry(
     Ok(())
 }
 
-/// Advances the capture replay plan when `cmd` is the step the reference server
-/// answered at this point, and does nothing otherwise.
+/// Replays `REPLY_PLAN`'s next step and advances the cursor, or does nothing if
+/// `cmd` is not that step.
 ///
-/// Walking the plan as a cursor rather than a lookup keeps the captured
-/// one-to-one ordering: opcode 121 gets a different reply the second time the
-/// client sends it.
-///
-/// A step the client already consumed can still be replayed if it asks for it
-/// again; see the repeat branch below for why `230` depends on that.
+/// The plan is walked exactly once. It used to also re-replay an earlier step
+/// when the client repeated its opcode, on the theory that
+/// `REQUEST_CHANGESTATUSINFO` (230) was a "send me current state" re-sync — but
+/// 230 is the horse auto-food message (`Server-Person.cpp:2831-2860`), and the
+/// only step it ever drove is the ~65 KB world bulk. Re-sending that on every
+/// 230 was the live micro-stutter T-018 fixes; later 230s are now dispatched by
+/// the `230` arm as the legacy message. What remains in the plan is only the
+/// one-shot world bulk.
 ///
 /// # Errors
 ///
@@ -1767,32 +1787,71 @@ async fn replay_plan_step(
         return Ok(());
     }
 
-    // Not the next step. If the client is asking again for a step it already got,
-    // that is a re-sync rather than a protocol error: `REQUEST_CHANGESTATUSINFO`
-    // (230) means "send me current state", and the client sends it every time it
-    // wants a fresh answer — after a move, after a teleport. Answering it again is
-    // what makes a mutation observable at all, since `LiveFrames` re-reads
-    // PostgreSQL on the way out.
-    //
-    // The nearest earlier step wins, so a repeat of 230 cannot consume the 121
-    // entry that follows it and shift every later pairing.
-    //
-    // `resync` is set because a repeat is the one delivery where the captured
-    // bytes are not just out of date but would move the player: 248 in the 230
-    // burst carries the capture's `clPos`, and the client reads its own
-    // coordinates straight out of that. See [`withhold_on_resync`].
-    if let Some(step) = (0..*plan_step)
-        .rev()
-        .find(|&i| generated_capture::REPLY_PLAN[i].0 == cmd)
-    {
-        let label = format!("plan step {cmd} (repeat)");
-        for (start, end) in generated_capture::REPLY_PLAN[step].1 {
-            replay(stream, cipher, (*start, *end), &label, live, true).await?;
-        }
+    println!("game: replay plan waiting for opcode {expect}, client sent {cmd}");
+    Ok(())
+}
+
+/// Answers `GAMEMSG_REQUEST_CHANGESTATUSINFO` (230) with
+/// `GAMEMSG_RESPONSE_CHANGESTATUSINFO` (231) for the one change type the legacy
+/// handles, and stays silent for every other (`Server-Person.cpp:2831-2860`).
+///
+/// The client sends 230 for the horse auto-food toggle (`NCharHorse.cpp:471`,
+/// `NCharStatus-Horse.cpp:232`) and applies the reply in
+/// `Client-Person.cpp:1655-1680`. The legacy branches on exactly
+/// `CHANGETYPE_AUTOFOOD` (`:2841`); its `default:` is a bare `return`
+/// (`:2857-2858`), so an unknown change type is answered with nothing rather
+/// than with a guess.
+///
+/// The response's `siCharUnique` is the session's character — the only one this
+/// server has. The client drops a reply whose unique it cannot resolve
+/// (`Client-Person.cpp:1659-1660`), so echoing the session's own unique is what
+/// lets the toggle take effect.
+///
+/// # Errors
+///
+/// A malformed body ([`gz_proto::wire::WireError`]), a `char_unique` that does
+/// not fit the `SI16` field, or a socket/cipher failure.
+async fn handle_change_status_info(
+    stream: &mut TcpStream,
+    outbound: &mut Cipher,
+    char_unique: i32,
+    payload: &[u8],
+) -> Result<(), AnyError> {
+    let change = decode_change_status_info(payload)?;
+    if change.change_type != CHANGETYPE_AUTOFOOD {
+        println!(
+            "game: changestatusinfo type {} -> no reply (legacy answers only AUTOFOOD; \
+             Server-Person.cpp:2841-2858)",
+            change.change_type
+        );
         return Ok(());
     }
 
-    println!("game: replay plan waiting for opcode {expect}, client sent {cmd}");
+    let own_unique = i16::try_from(char_unique).map_err(|_| {
+        format!("session char_unique {char_unique} does not fit the SI16 siCharUnique")
+    })?;
+    // The legacy builds a fresh change block, so the amount slots go back out as
+    // zero rather than echoing whatever the request carried (`:2851-2852`).
+    let response = ChangeStatusInfo {
+        change_type: CHANGETYPE_AUTOFOOD,
+        change_switch: change.change_switch,
+        amount1: 0,
+        amount2: 0,
+        amount3: 0,
+    };
+    let body = response.encode_response(own_unique);
+    send_raw(
+        stream,
+        outbound,
+        GameMsg::ResponseChangestatusinfo as u16,
+        &body,
+    )
+    .await?;
+    println!(
+        "game: changestatusinfo AUTOFOOD switch={} for char_unique {own_unique} ({} bytes)",
+        change.change_switch,
+        body.len()
+    );
     Ok(())
 }
 
@@ -2872,6 +2931,41 @@ mod tests {
         haystack
             .windows(needle.len())
             .any(|window| window == needle)
+    }
+
+    /// T-018: the plan's first entry is the one-shot world bulk on 230.
+    ///
+    /// The `230` arm only calls [`replay_plan_step`] while `plan_step == 0`, so
+    /// that entry has to be the bulk. If the plan ever grew a leading entry for
+    /// another opcode, the world would silently stop loading.
+    #[test]
+    fn the_first_plan_entry_is_the_230_world_bulk() {
+        let (cmd, _) = generated_capture::REPLY_PLAN
+            .first()
+            .expect("the plan is not empty");
+        assert_eq!(*cmd, GameMsg::RequestChangestatusinfo as u16);
+    }
+
+    /// T-018: a repeated 230 must not become a second world bulk.
+    ///
+    /// The dispatcher answers the first `REQUEST_CHANGESTATUSINFO` (230) from
+    /// the plan and every later one as the legacy status message. That is only
+    /// complete while 230 appears exactly once in the plan -- a second entry
+    /// would make the 65 KB burst reachable again, which is the live
+    /// micro-stutter this change removed.
+    #[test]
+    fn opcode_230_appears_once_and_is_the_twenty_five_frame_bulk() {
+        let entries: Vec<&(u16, &[(u32, u32)])> = generated_capture::REPLY_PLAN
+            .iter()
+            .filter(|(cmd, _)| *cmd == GameMsg::RequestChangestatusinfo as u16)
+            .collect();
+        assert_eq!(entries.len(), 1, "230 must have exactly one plan entry");
+        let frames: usize = entries[0]
+            .1
+            .iter()
+            .map(|&(start, end)| generated_capture::frames_in(start, end).count())
+            .sum();
+        assert_eq!(frames, 25, "the one 230 entry is the 25-frame world bulk");
     }
 
     /// A re-sync has to keep the inventory refresh and lose the position reset.
