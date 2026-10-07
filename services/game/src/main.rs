@@ -714,6 +714,38 @@ async fn handle_client(
                         None => movement = None,
                     }
                 }
+                c if c == GameMsg::RequestHopetoquit as u16
+                    || c == GameMsg::RequestHopetofront as u16 =>
+                {
+                    // Both are client leave requests, answered with an empty
+                    // 108/110 frame; the client then closes the game socket
+                    // itself, so the server tears the connection down here
+                    // rather than parking an active session on a read that will
+                    // never complete. See [`handle_leave_request`].
+                    let ack = if c == GameMsg::RequestHopetoquit as u16 {
+                        GameMsg::ResponseHopetoquit
+                    } else {
+                        GameMsg::ResponseHopetofront
+                    };
+                    handle_leave_request(
+                        &mut stream,
+                        &mut outbound,
+                        &characters,
+                        login.as_ref(),
+                        ack,
+                    )
+                    .await?;
+                    println!(
+                        "game: {peer}: {cmd} ack sent; closing the game connection ({})",
+                        if ack == GameMsg::ResponseHopetoquit {
+                            "quit"
+                        } else {
+                            "return to character select"
+                        }
+                    );
+                    session_state.close(now_tick());
+                    return Ok(());
+                }
                 c if c == GameMsg::RequestHeartbeat as u16 => {
                     // `DoMsg_GAMEMSG_REQUEST_HEARTBEAT` is an empty no-op
                     // (`Server-System.cpp:520-524`): the client says "still
@@ -2239,6 +2271,49 @@ async fn handle_userorder(
     Ok(Some(Movement::new(dest, start, map_id, move_speed)))
 }
 
+/// Persists the character and acknowledges a client leave request (107 quit or
+/// 109 return-to-front).
+///
+/// The legacy handles both leave requests the same way:
+/// `DoMsg_GAMEMSG_REQUEST_HOPETOQUIT` (`Server-System.cpp:1195`) and
+/// `DoMsg_GAMEMSG_REQUEST_HOPETOFRONT` (`:1239`) guard against auto-hunt/PVP and
+/// death, set `bHopeToQuitSwitch`, and answer with the matching empty 108/110
+/// frame. The port has no auto-hunt, no PVP flag, and `life` never reaches zero,
+/// so those guards cannot fire; what remains is the save and the ack.
+///
+/// The client does the rest: 108 makes it quit
+/// (`Client-System.cpp:3002`) and 110 makes it close the game socket and return
+/// to front (`:3025`), which is why the caller closes the session after this
+/// returns instead of waiting for the peer.
+///
+/// The character cell is written before the ack. Every `ORDER_MOVE` persists its
+/// destination already, so this only matters when the character did not move
+/// this session; it mirrors `SendDB_PosLifeMana` on the legacy
+/// `cltCharServer::Close` path (`CharServer-Session.cpp:687`). No character is
+/// selected only if the client leaves before `REQUEST_SELECTCHAR`, in which case
+/// there is nothing to save and the ack is still sent.
+///
+/// # Errors
+///
+/// A database failure while saving, or a socket/cipher failure while sending.
+async fn handle_leave_request(
+    stream: &mut TcpStream,
+    outbound: &mut Cipher,
+    characters: &PgCharacterRepository,
+    session: Option<&GameSession>,
+    ack: GameMsg,
+) -> Result<(), AnyError> {
+    if let Some(session) = session
+        && let Some(character_id) = session.character_id
+        && let Some(cell) = session.entry_cell
+    {
+        characters
+            .update_position(character_id, cell.x, cell.y)
+            .await?;
+    }
+    send_encoded(stream, outbound, ack, &[]).await
+}
+
 /// The captured frames this server owns rather than replays.
 ///
 /// Every frame in the burst still comes from `login_capture.pcapng`; the point
@@ -3691,5 +3766,19 @@ mod tests {
             Some((1, 0))
         );
         assert!(fast.next_delay() < Duration::from_millis(350));
+    }
+
+    /// The quit menu's two requests are the legacy pair, and each is answered by
+    /// the next opcode up with an empty body: 107 `REQUEST_HOPETOQUIT` → 108
+    /// `RESPONSE_HOPETOQUIT`, 109 `REQUEST_HOPETOFRONT` → 110
+    /// `RESPONSE_HOPETOFRONT` (`Server-System.cpp:1195`, `:1239`). Pinning the
+    /// numbers keeps the dispatcher's `c == … as u16` guards honest even if the
+    /// codegen ever renumbers the enum.
+    #[test]
+    fn leave_requests_are_the_legacy_107_109_pair() {
+        assert_eq!(GameMsg::RequestHopetoquit as u16, 107);
+        assert_eq!(GameMsg::ResponseHopetoquit as u16, 108);
+        assert_eq!(GameMsg::RequestHopetofront as u16, 109);
+        assert_eq!(GameMsg::ResponseHopetofront as u16, 110);
     }
 }
