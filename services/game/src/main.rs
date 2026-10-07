@@ -81,18 +81,6 @@ use config::{GameConfig, Prologue};
 /// is 15 entries (`PutCharList` `0x48D040` rejects `GetIndex() > 14`).
 const CHAR_SLOTS: i16 = 15;
 
-/// Base `uiTotalMoveSpeed` (6 bits).
-const BASE_MOVE_SPEED: u8 = 8;
-
-/// The reference session's move speed as carried by its 200 `CHARUPDATE`
-/// (`cltBasicCharUpdateInfo.siMoveSpeed`, built from `GetTotalMoveSpeed()` at
-/// `Server.cpp:1678` / `char-move.cpp:140`).
-///
-/// Stats are not modelled yet, so a move broadcast reuses the one value the live
-/// capture recorded. It only sets the avatar's step animation rate; the position
-/// is what the client actually applies.
-const REFERENCE_MOVE_SPEED: i8 = 14;
-
 /// `MOVE_PERCENT_STEP` — the accumulator level at which the legacy commits a
 /// tile (`clMoveInfo.IncMovePercent(movedlength) >= 50`, `char-move.cpp:159`).
 const MOVE_PERCENT_STEP: i32 = 50;
@@ -339,9 +327,7 @@ async fn handle_client(
         let read_window = if !session_state.state().is_active() {
             Some(cfg.timeouts.handshake)
         } else {
-            movement
-                .as_ref()
-                .map(|m| m.next_delay(i32::from(REFERENCE_MOVE_SPEED)))
+            movement.as_ref().map(Movement::next_delay)
         };
         let n = match read_window {
             Some(window) => match tokio::time::timeout(window, stream.read(&mut buf)).await {
@@ -1019,7 +1005,9 @@ async fn handle_select_char(
         // Shared with the 309 encoder: the client copies this straight into
         // `CurrentMapIndex` and then drops any 309 naming a different map.
         map_index: client_map_index(character.map_id),
-        total_move_speed: BASE_MOVE_SPEED,
+        // The character's effective `GetTotalMoveSpeed()` (base class speed plus
+        // gear; `character_stats.move_speed`), not a fixed reference value.
+        total_move_speed: u8::try_from(character.move_speed.clamp(0, 63)).unwrap_or(0),
         home_village_unique: u8::try_from(character.school_id.clamp(0, 255)).unwrap_or(0),
         game_master_level: u8::try_from(session.gm_level.clamp(0, 255)).unwrap_or(0),
         // 0 lets the client resolve the map type from its own MapData.
@@ -2026,6 +2014,10 @@ struct Movement {
     pos: (i32, i32),
     /// Map the move is on, for the drop cell.
     map_id: i32,
+    /// The mover's effective `GetTotalMoveSpeed()` for the whole walk. Captured
+    /// once when the order is answered, so gear changes mid-walk do not rescale
+    /// an in-flight step.
+    move_speed: i32,
     /// `clMoveInfo.siMovePercent`.
     percent: i32,
     /// When [`Movement::advance`] last ran, i.e. `clMoveInfo.dwLastMoveClock`.
@@ -2033,11 +2025,12 @@ struct Movement {
 }
 
 impl Movement {
-    fn new(dest: (i32, i32), pos: (i32, i32), map_id: i32) -> Self {
+    fn new(dest: (i32, i32), pos: (i32, i32), map_id: i32, move_speed: i32) -> Self {
         Self {
             dest,
             pos,
             map_id,
+            move_speed,
             percent: 0,
             last: Instant::now(),
         }
@@ -2047,11 +2040,11 @@ impl Movement {
     /// (`char-move.cpp:145-171`). The step is limited by
     /// [`MOVE_DELAY_CAP_MS`], so a stalled tick banks no more than one tile.
     /// Returns the new cell when a tile was committed.
-    fn advance(&mut self, now: Instant, move_speed: i32) -> Option<(i32, i32)> {
+    fn advance(&mut self, now: Instant) -> Option<(i32, i32)> {
         let cap = i64::from(MOVE_DELAY_CAP_MS);
         let delay = (now - self.last).as_millis().min(cap as u128) as i64;
         self.last = now;
-        self.percent += (i64::from(move_speed) * delay / 50) as i32;
+        self.percent += (i64::from(self.move_speed) * delay / 50) as i32;
         if self.percent < MOVE_PERCENT_STEP {
             return None;
         }
@@ -2073,9 +2066,9 @@ impl Movement {
 
     /// How long until the accumulator should next reach [`MOVE_PERCENT_STEP`],
     /// capped at [`MOVE_DELAY_CAP_MS`] exactly as one legacy tick is capped.
-    fn next_delay(&self, move_speed: i32) -> Duration {
+    fn next_delay(&self) -> Duration {
         let needed = i64::from((MOVE_PERCENT_STEP - self.percent).max(1));
-        let speed = i64::from(move_speed).max(1);
+        let speed = i64::from(self.move_speed).max(1);
         let ms = ((needed * 50 + speed - 1) / speed)
             .min(i64::from(MOVE_DELAY_CAP_MS))
             .max(1);
@@ -2104,7 +2097,9 @@ async fn send_char_update(
                 live.char_unique
             )
         })?,
-        si_move_speed: REFERENCE_MOVE_SPEED,
+        // The character's effective `GetTotalMoveSpeed()`; the client uses it for
+        // the avatar's step animation rate.
+        si_move_speed: i8::try_from(character.move_speed.clamp(0, i16::from(i8::MAX))).unwrap_or(0),
         b_urgent_mode: false,
         si_life: character.max_life,
         si_reserved_life: 0,
@@ -2142,7 +2137,7 @@ async fn step_movement(
     let Some(mv) = movement.as_mut() else {
         return Ok(());
     };
-    let Some((x, y)) = mv.advance(Instant::now(), i32::from(REFERENCE_MOVE_SPEED)) else {
+    let Some((x, y)) = mv.advance(Instant::now()) else {
         return Ok(());
     };
     let map_id = mv.map_id;
@@ -2207,6 +2202,7 @@ async fn handle_userorder(
     let character_id = character.character_id;
     let map_id = character.map_id;
     let start = (character.pos_x, character.pos_y);
+    let move_speed = i32::from(character.move_speed);
 
     let (x16, y16) = OrderData::move_target(order.si_para1);
     let dest = (i32::from(x16), i32::from(y16));
@@ -2240,7 +2236,7 @@ async fn handle_userorder(
     if start == dest {
         return Ok(None);
     }
-    Ok(Some(Movement::new(dest, start, map_id)))
+    Ok(Some(Movement::new(dest, start, map_id, move_speed)))
 }
 
 /// The captured frames this server owns rather than replays.
@@ -3602,7 +3598,7 @@ mod tests {
     /// ms per tile (≈357 ms for the captured speed 14).
     #[test]
     fn a_move_steps_one_tile_at_a_time_on_the_legacy_cadence() {
-        let mut movement = Movement::new((3, 0), (0, 0), 7);
+        let mut movement = Movement::new((3, 0), (0, 0), 7, 14);
         let start = movement.last;
         let mut now = start;
 
@@ -3610,8 +3606,8 @@ mod tests {
         let mut intervals = Vec::new();
         let mut previous = start;
         while !movement.arrived() {
-            now += movement.next_delay(14);
-            if let Some(pos) = movement.advance(now, 14) {
+            now += movement.next_delay();
+            if let Some(pos) = movement.advance(now) {
                 steps.push(pos);
                 intervals.push(now - previous);
                 previous = now;
@@ -3634,12 +3630,12 @@ mod tests {
     /// `char-move.cpp:107-126`.
     #[test]
     fn a_diagonal_move_steps_both_axes() {
-        let mut movement = Movement::new((2, 2), (0, 0), 1);
+        let mut movement = Movement::new((2, 2), (0, 0), 1, 14);
         let mut now = movement.last;
         let mut steps = Vec::new();
         while !movement.arrived() {
-            now += movement.next_delay(14);
-            if let Some(pos) = movement.advance(now, 14) {
+            now += movement.next_delay();
+            if let Some(pos) = movement.advance(now) {
                 steps.push(pos);
             }
         }
@@ -3651,9 +3647,9 @@ mod tests {
     /// (`char-move.cpp:145`).
     #[test]
     fn a_stalled_tick_commits_at_most_one_tile() {
-        let mut movement = Movement::new((10, 0), (0, 0), 1);
+        let mut movement = Movement::new((10, 0), (0, 0), 1, 14);
         let stalled = movement.last + Duration::from_secs(4);
-        assert_eq!(movement.advance(stalled, 14), Some((1, 0)));
+        assert_eq!(movement.advance(stalled), Some((1, 0)));
         assert_eq!(movement.pos, (1, 0));
     }
 
@@ -3662,11 +3658,38 @@ mod tests {
     /// applies.
     #[test]
     fn next_delay_is_capped_at_the_legacy_tick_bound() {
-        let mut movement = Movement::new((10, 0), (0, 0), 1);
+        let mut movement = Movement::new((10, 0), (0, 0), 1, 14);
         // Commit one tile so the accumulator sits below zero and would ask for
         // more than the cap without it.
         let now = movement.last + Duration::from_millis(179);
-        assert!(movement.advance(now, 14).is_some());
-        assert_eq!(movement.next_delay(14), Duration::from_millis(350));
+        assert!(movement.advance(now).is_some());
+        assert_eq!(movement.next_delay(), Duration::from_millis(350));
+    }
+
+    /// The cadence follows the character, not a fixed reference: `advance` banks
+    /// `move_speed * elapsed / 50`, so a slower mover takes proportionally longer
+    /// per tile. At speed 7 a tile needs `5000 / 7 ≈ 715` ms against 357 ms at
+    /// the captured 14.
+    #[test]
+    fn the_step_cadence_scales_with_the_characters_move_speed() {
+        let mut slow = Movement::new((1, 0), (0, 0), 1, 7);
+        let start = slow.last;
+        // Too early for a speed-7 tile: half the accumulator still falls short.
+        assert!(slow.advance(start + Duration::from_millis(357)).is_none());
+        // A full 715 ms commits exactly one.
+        assert_eq!(
+            slow.advance(start + Duration::from_millis(715)),
+            Some((1, 0))
+        );
+
+        let mut fast = Movement::new((1, 0), (0, 0), 1, 28);
+        let start = fast.last;
+        // The same 179 ms that just missed at speed 7 commits a tile at 28
+        // (28 * 179 / 50 ≈ 100), and the next is due well under the cap.
+        assert_eq!(
+            fast.advance(start + Duration::from_millis(179)),
+            Some((1, 0))
+        );
+        assert!(fast.next_delay() < Duration::from_millis(350));
     }
 }
