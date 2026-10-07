@@ -448,14 +448,29 @@ async fn handle_client(
                 }
                 c if c == GameMsg::RequestSelectchar as u16 => {
                     let slot = decode_select_char(payload.as_ref())?;
-                    if !admit_select_char(login.as_ref().and_then(|s| s.character_id)) {
+                    // The bound character is the currently entered one. A request
+                    // for the *same* slot is the legacy's silent no-op
+                    // (`ServerDB-Person.cpp:1763`); a request for a different slot
+                    // is a real switch (`:1770` `CloseAction`, `:1795`
+                    // `DeleteChar`, then the new character is loaded and announced
+                    // through `SendServerInfo`). World entry is therefore not
+                    // one-shot per connection.
+                    let bound_slot = live.character.as_ref().map(|c| c.slot);
+                    if !admit_select_char(bound_slot, slot) {
                         eprintln!(
-                            "game: {peer}: ignoring selectchar slot {slot}: this session has \
-                             already entered the world, and the legacy answers a repeat with \
-                             silence (ServerDB-Person.cpp:1757,1763)"
+                            "game: {peer}: selectchar slot {slot} ignored: it is already the \
+                             active character (ServerDB-Person.cpp:1763 returns for the same \
+                             PersonID)"
                         );
                         continue;
                     }
+                    // Switching avatars tears the old one down before the new
+                    // world entry, exactly like the legacy `CloseAction`. Stop any
+                    // in-flight step so the old character cannot walk on, and
+                    // rewind the capture reply plan so the new entry's first 230
+                    // resends the world bulk (`ServerDB-Person.cpp:1795`).
+                    movement = None;
+                    plan_step = 0;
                     let character_id = {
                         let session = login
                             .as_ref()
@@ -718,10 +733,21 @@ async fn handle_client(
                     || c == GameMsg::RequestHopetofront as u16 =>
                 {
                     // Both are client leave requests, answered with an empty
-                    // 108/110 frame; the client then closes the game socket
-                    // itself, so the server tears the connection down here
-                    // rather than parking an active session on a read that will
-                    // never complete. See [`handle_leave_request`].
+                    // 108/110 frame. The legacy only acks them
+                    // (`DoMsg_GAMEMSG_REQUEST_HOPETOQUIT`/`_HOPETOFRONT` set a
+                    // `bHopeToQuit`/`bHopeToFront` flag and `SendNetMsg`) and
+                    // lets the client close the socket itself; it never calls
+                    // `CloseSocket` from the handler.
+                    //
+                    // Closing here races the client. The first thing
+                    // `DoMsg_GAMEMSG_RESPONSE_HOPETOFRONT` does is
+                    // `if(pGameSession->CloseSocket())` (`Client-System.cpp:3027`),
+                    // and `ITZSession::CloseSocket` returns FALSE once the socket
+                    // is already invalid. A FIN that lands with -- or just ahead
+                    // of -- the 110 dispatch therefore makes the client skip its
+                    // entire reset: it neither returns to the front nor clears
+                    // its game state. Keeping the socket open lets the ack land
+                    // on a live session and the client tear itself down cleanly.
                     let ack = if c == GameMsg::RequestHopetoquit as u16 {
                         GameMsg::ResponseHopetoquit
                     } else {
@@ -736,15 +762,14 @@ async fn handle_client(
                     )
                     .await?;
                     println!(
-                        "game: {peer}: {cmd} ack sent; closing the game connection ({})",
+                        "game: {peer}: {cmd} ack sent; leaving the socket open for the client \
+                         to close ({})",
                         if ack == GameMsg::ResponseHopetoquit {
                             "quit"
                         } else {
                             "return to character select"
                         }
                     );
-                    session_state.close(now_tick());
-                    return Ok(());
                 }
                 c if c == GameMsg::RequestHeartbeat as u16 => {
                     // `DoMsg_GAMEMSG_REQUEST_HEARTBEAT` is an empty no-op
@@ -825,41 +850,37 @@ struct GameSession {
     entry_cell: Option<DropLocation>,
 }
 
-/// Whether a `GAMEMSG_REQUEST_SELECTCHAR` should be allowed to enter the world.
+/// Whether a `GAMEMSG_REQUEST_SELECTCHAR` should be honoured on this connection.
 ///
-/// **World entry is one-shot per connection, and a repeat is a silent no-op —
-/// in every case the legacy can actually reach.** Verified 2026-10-05 against a
-/// live log that showed seven entries on one socket and a desyncing client:
+/// The old reading here ("world entry is one-shot, a repeat is a silent no-op in
+/// every case the legacy can reach") was **wrong** and is corrected here. The
+/// legacy's guard is the *bound character*, not the act of having entered:
 ///
-/// 1. `Server-Login.cpp:189-190` — `idnum` is read from the **already-bound**
-///    character (`pclCI->clBI.siIDNum`), not from the requested slot, and
-///    `idnum <= 0` returns early.
+/// 1. `Server-Login.cpp:184` reads `idnum` from `pclCI->clBI.siIDNum`, which is
+///    the **account** idnum, not the character's (`LiveFrames` relies on the same
+///    fact for 248). `uiIndex` is the requested slot.
 /// 2. `rsp_PersonIDGet` (`Goonzu_DB\04. GameDB___________.txt:1073`) selects
-///    `WHERE [idnum] = @idnum and [index] = @index` — **`AND`, not `OR`**. So the
-///    requested index is only ever honoured together with the *currently bound*
-///    character's idnum.
-/// 3. Therefore a request for a **different** slot matches no row, `siResult` is
-///    0, and `ServerDB-Person.cpp:1757` returns without sending anything.
-/// 4. A request for the **same** slot does match, and returns the same PersonID,
-///    which `:1763-1766` detects and returns on.
-/// 5. Only a genuinely different character could get past both — and that path
-///    (`:1770` `CloseAction`, `:1795` `DeleteChar`, then a fresh `cltCharServer`)
-///    *tears the old character down*. It still does not replay world state onto
-///    a live session.
+///    `WHERE [idnum] = @idnum and [index] = @index`. With `idnum` the account, a
+///    request for *any* slot of the account matches a row.
+/// 3. `ServerDB-Person.cpp:1757` returns only when the DB result is empty (no
+///    such slot). For an occupied slot, `:1763` returns only when the requested
+///    character is the one already bound (`GetPersonID()` equals the request's).
+///    Otherwise `:1770` runs `CloseAction`, `:1795` `DeleteChar`s the old avatar,
+///    and the new character is announced through `SendServerInfo`.
 ///
-/// So the legacy has no reachable branch in which a second selectchar re-sends
-/// the world, and no branch that tears a character down without a matching
-/// reload either. Implementing real switching is T-017's job and must do the
-/// `CloseAction`/`DeleteChar` teardown; until then the faithful behaviour is to
-/// send nothing, which is what a bare `false` here buys.
-///
-/// The client is built for this: `NSelectChar.cpp:1343-1354` sends selectchar
-/// with an already-bound char client present, and `:1357` closes the dialog
-/// without waiting for a reply. So the client-visible result of a refused switch
-/// is the char-select dialog closing and no world changing — the legacy's own
-/// behaviour, and why this is a no-op rather than a disconnect.
-fn admit_select_char(bound_character_id: Option<i32>) -> bool {
-    bound_character_id.is_none()
+/// So a second selectchar naming a **different** character is legal and must
+/// tear down and reload; only re-selecting the *same* character is a no-op. The
+/// client relies on this: the exit dialog's character-select button sets
+/// `GS_INITCHARLIST` with no server message (`NExitDlg.cpp:288`), reusing the
+/// same connection, and `CNSelectCharDlg::SelectChar()` then sends the request
+/// (`NSelectChar.cpp:1287`).
+fn admit_select_char(bound_slot: Option<i16>, slot: i32) -> bool {
+    match bound_slot {
+        // No character entered yet: the first selectchar always proceeds.
+        None => true,
+        // Same slot: the legacy detects the same PersonID and returns.
+        Some(bound) => i32::from(bound) != slot,
+    }
 }
 
 /// Sends every slot's `cltCharListInfo` (opcode 3), zeroed for empty slots, so
@@ -2283,8 +2304,9 @@ async fn handle_userorder(
 ///
 /// The client does the rest: 108 makes it quit
 /// (`Client-System.cpp:3002`) and 110 makes it close the game socket and return
-/// to front (`:3025`), which is why the caller closes the session after this
-/// returns instead of waiting for the peer.
+/// to front (`:3025`). The handler deliberately does **not** close the session:
+/// the client's own close is gated on the socket still being open (see the
+/// caller), so the server has to leave it for the peer.
 ///
 /// The character cell is written before the ack. Every `ORDER_MOVE` persists its
 /// destination already, so this only matters when the character did not move
@@ -2627,25 +2649,29 @@ mod tests {
         PERSON_HORSE_LEN, RESPONSE_NAME_LEN, SKILLBOOK_MAGIC_INFO_LEN,
     };
 
-    /// The regression this locks down is the 2026-10-05 live failure: seven
-    /// `REQUEST_SELECTCHAR` frames on one socket, each replaying the 45-frame
-    /// world prologue over an already-populated world, and a client that
-    /// desynced. Nothing about the second entry is legal — see the predicate's
-    /// docs — so the state, not the slot, is what decides.
+    /// The regression this locks down is the 2026-10-07 live failure: the client
+    /// reopened the character roster on the **same** connection (the exit
+    /// dialog's character-select button sets `GS_INITCHARLIST` with no server
+    /// message, so no reconnect happens) and sent `REQUEST_SELECTCHAR` again.
+    /// The port silently dropped it, so picking another character never entered
+    /// the world.
+    ///
+    /// The legacy refuses only the *same* character (`ServerDB-Person.cpp:1763`
+    /// matches the PersonID and returns); a different slot is a real
+    /// tear-down-and-reload (`:1770` `CloseAction`, `:1795` `DeleteChar`).
     #[test]
-    fn world_entry_is_one_shot_and_the_state_alone_decides() {
-        assert!(
-            admit_select_char(None),
-            "the first selectchar must be honoured"
-        );
-        // Same slot or a different slot is irrelevant: the predicate is not
-        // given the slot, on purpose, because the legacy's own guard is the
-        // bound character rather than the request.
-        assert!(!admit_select_char(Some(1)));
-        assert!(!admit_select_char(Some(2)));
-        // Idempotent: refusing a repeat must not make a later request admissible
-        // again, which is what would let the prologue replay N times.
-        assert!(!admit_select_char(admit_select_char(None).then_some(7)));
+    fn selectchar_no_ops_the_same_slot_and_switches_a_different_one() {
+        // First entry: nothing is bound, so any slot proceeds.
+        assert!(admit_select_char(None, 0));
+        assert!(admit_select_char(None, 2));
+        // Same slot as the already-bound character: silently ignored.
+        assert!(!admit_select_char(Some(1), 1));
+        assert!(!admit_select_char(Some(0), 0));
+        // A different slot is a real switch and must be honoured.
+        assert!(admit_select_char(Some(1), 0));
+        assert!(admit_select_char(Some(1), 2));
+        // Out-of-range slots never reach the predicate; `handle_select_char`
+        // rejects them.
     }
 
     /// The seven hundred range personal-shop opcodes are the legacy pair, and the
