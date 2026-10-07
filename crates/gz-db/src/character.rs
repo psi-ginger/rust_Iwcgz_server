@@ -206,6 +206,22 @@ pub trait CharacterRepository: Send + Sync {
     /// [`RepositoryError::Database`] if the query fails or the sequence is
     /// exhausted.
     async fn resolve_game_unique(&self, character_id: i32) -> Result<i32, RepositoryError>;
+
+    /// Persist `character_id`'s cell after a move.
+    ///
+    /// Only `pos_x`/`pos_y` change; the map is left alone — an order stays on one
+    /// map, and a map change is a warp, a different message. Called for
+    /// `ORDER_MOVE` (`GAMEMSG_REQUEST_USERORDER`, 240).
+    ///
+    /// # Errors
+    ///
+    /// [`RepositoryError::Database`] if the update fails.
+    async fn update_position(
+        &self,
+        character_id: i32,
+        x: i32,
+        y: i32,
+    ) -> Result<(), RepositoryError>;
 }
 
 /// PostgreSQL implementation. Cheap to clone (shares the pool).
@@ -481,6 +497,21 @@ impl CharacterRepository for PgCharacterRepository {
             .await?
             .ok_or(RepositoryError::NotFound),
         }
+    }
+
+    async fn update_position(
+        &self,
+        character_id: i32,
+        x: i32,
+        y: i32,
+    ) -> Result<(), RepositoryError> {
+        sqlx::query("UPDATE characters SET pos_x = $2, pos_y = $3 WHERE character_id = $1")
+            .bind(character_id)
+            .bind(x)
+            .bind(y)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
     }
 }
 

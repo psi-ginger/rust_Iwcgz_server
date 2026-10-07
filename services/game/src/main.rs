@@ -56,6 +56,7 @@ use gz_proto::item::{
     decode_move_item, decode_split_item, encode_person_item_info,
 };
 use gz_proto::opcodes_game::GameMsg;
+use gz_proto::order::{BasicCharUpdate, ORDER_MOVE, OrderData};
 use gz_proto::personalshop::{ShopTradeData, decode_personal_shop_request, shop_mode_for_request};
 use gz_proto::statusinfo::{CHANGETYPE_AUTOFOOD, ChangeStatusInfo, decode_change_status_info};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -82,6 +83,15 @@ const CHAR_SLOTS: i16 = 15;
 
 /// Base `uiTotalMoveSpeed` (6 bits).
 const BASE_MOVE_SPEED: u8 = 8;
+
+/// The reference session's move speed as carried by its 200 `CHARUPDATE`
+/// (`cltBasicCharUpdateInfo.siMoveSpeed`, built from `GetTotalMoveSpeed()` at
+/// `Server.cpp:1678` / `char-move.cpp:140`).
+///
+/// Stats are not modelled yet, so a move broadcast reuses the one value the live
+/// capture recorded. It only sets the avatar's step animation rate; the position
+/// is what the client actually applies.
+const REFERENCE_MOVE_SPEED: i8 = 14;
 
 /// `< 0x4E20` (20000): the client indexes its `CharUniqueInfo` table by
 /// `uiMakeCharUnique` (`SetCharReservedChar`).
@@ -650,6 +660,16 @@ async fn handle_client(
                         .await?;
                     }
                 }
+                c if c == GameMsg::RequestUserorder as u16 => {
+                    let order = OrderData::decode(payload.as_ref())?;
+                    if let Some(cell) =
+                        handle_userorder(&mut stream, &mut outbound, &characters, &mut live, order)
+                            .await?
+                        && let Some(session) = login.as_mut()
+                    {
+                        session.entry_cell = Some(cell);
+                    }
+                }
                 c if c == GameMsg::RequestHeartbeat as u16 => {
                     // `DoMsg_GAMEMSG_REQUEST_HEARTBEAT` is an empty no-op
                     // (`Server-System.cpp:520-524`): the client says "still
@@ -720,12 +740,12 @@ struct GameSession {
     /// The logged-in account's name (`accounts.username`). Char-list/create
     /// messages echo this back to the client inside `cltCharListInfo.clBI.szAccountID`.
     username: String,
-    /// Where the character stood on entering the world, used as the cell for
+    /// The character's current cell, used as the cell for
     /// `GAMEMSG_REQUEST_INVDROP`.
     ///
-    /// This is deliberately *not* named `position`: the server does not track
-    /// movement, so it stays at the entry coordinates no matter where the player
-    /// walks. A dropped item therefore lands where the character spawned.
+    /// Seeded at world entry and updated on every `ORDER_MOVE`
+    /// ([`handle_userorder`]), so a dropped item lands where the character is
+    /// standing rather than where it spawned.
     entry_cell: Option<DropLocation>,
 }
 
@@ -1928,6 +1948,99 @@ async fn handle_personal_shop_data(
         body.len()
     );
     Ok(())
+}
+
+/// Applies `GAMEMSG_REQUEST_USERORDER` (240). The only order acted on is
+/// `ORDER_MOVE`; every other order type is logged and dropped.
+///
+/// `siPara1` carries the destination as `x | (y << 16)`: the client packs it that
+/// way (`cltOrder::MakeOrder`, `order.cpp:148`) and the `ORDER_MOVE` handler
+/// unpacks it with `LOWORD`/`HIWORD` (`char-order.cpp:139-140`). The move is
+/// persisted to `characters.pos_x`/`pos_y` and mirrored into the cached row, so a
+/// later 248/258 re-generates at the new cell and a re-login resumes there.
+///
+/// The reply mirrors a server-side move: a 241 order ack built the way
+/// `MakeOrder_MOVE` builds it (`order.cpp:257-262`), then a 200 `CHARUPDATE`
+/// broadcast of the new cell (`cltServer::SendCharUpdate`, `Server.cpp:1654`).
+///
+/// Returns the new drop cell so the caller can keep the session's position in
+/// step; `None` for an order that is not modelled.
+///
+/// # Errors
+///
+/// A malformed body, a database failure, or a socket/cipher failure.
+async fn handle_userorder(
+    stream: &mut TcpStream,
+    outbound: &mut Cipher,
+    characters: &PgCharacterRepository,
+    live: &mut LiveFrames<'_>,
+    order: OrderData,
+) -> Result<Option<DropLocation>, AnyError> {
+    if order.si_order != ORDER_MOVE {
+        println!(
+            "game: ignoring USERORDER opcode {} (only ORDER_MOVE={ORDER_MOVE} is modelled)",
+            order.si_order
+        );
+        return Ok(None);
+    }
+
+    let Some(character) = live.character.as_ref() else {
+        return Err("userorder before the character row is loaded".into());
+    };
+    let character_id = character.character_id;
+    let map_id = character.map_id;
+
+    let (x16, y16) = OrderData::move_target(order.si_para1);
+    let x = i32::from(x16);
+    let y = i32::from(y16);
+
+    // Persist first, then mirror: a later 248 (resync) or a re-login reads the row.
+    characters.update_position(character_id, x, y).await?;
+    if let Some(character) = live.character.as_mut() {
+        character.pos_x = x;
+        character.pos_y = y;
+    }
+
+    // 241: the server's own ORDER_MOVE (`MakeOrder_MOVE`, `order.cpp:261`).
+    send_encoded(
+        stream,
+        outbound,
+        GameMsg::ResponseUserorder,
+        &OrderData::move_order(live.char_unique, x16, y16).encode(),
+    )
+    .await?;
+
+    // 200: broadcast the new cell (`cltBasicCharUpdateInfo`, `Server.cpp:1683`).
+    let character = live.character.as_ref().expect("set above");
+    let update = BasicCharUpdate {
+        si_char_unique: u16::try_from(live.char_unique).map_err(|_| {
+            format!(
+                "session char_unique {} does not fit the SI16 siCharUnique",
+                live.char_unique
+            )
+        })? as i16,
+        si_move_speed: REFERENCE_MOVE_SPEED,
+        b_urgent_mode: false,
+        si_life: character.max_life,
+        si_reserved_life: 0,
+        si_mana: character.max_mana,
+        si_x: x16,
+        si_y: y16,
+        ui_gm_mode: 0,
+        b_pc_room: false,
+        si_make_ani_type: 0,
+    };
+    send_encoded(
+        stream,
+        outbound,
+        GameMsg::ResponseCharupdate,
+        &update.encode(),
+    )
+    .await?;
+
+    println!("game: move char {character_id} to ({x}, {y}) on map {map_id}");
+
+    Ok(Some(DropLocation { map_id, x, y }))
 }
 
 /// The captured frames this server owns rather than replays.
