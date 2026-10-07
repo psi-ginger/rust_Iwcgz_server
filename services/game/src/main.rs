@@ -32,7 +32,7 @@
 //! `GAME_LINK_KEY1`, `GAME_LINK_KEY2`.
 
 use std::borrow::Cow;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use gz_cipher::Cipher;
 use gz_db::DropStatus;
@@ -92,6 +92,19 @@ const BASE_MOVE_SPEED: u8 = 8;
 /// capture recorded. It only sets the avatar's step animation rate; the position
 /// is what the client actually applies.
 const REFERENCE_MOVE_SPEED: i8 = 14;
+
+/// `MOVE_PERCENT_STEP` — the accumulator level at which the legacy commits a
+/// tile (`clMoveInfo.IncMovePercent(movedlength) >= 50`, `char-move.cpp:159`).
+const MOVE_PERCENT_STEP: i32 = 50;
+
+/// `MOVE_PERCENT_COST` — what a committed tile subtracts from the accumulator
+/// (`siMovePercent - 100`, `char-move.cpp:164`).
+const MOVE_PERCENT_COST: i32 = 100;
+
+/// `(CHAR_ACTION_INTERVAL_FRAME + 1) * 50` — the cap on one advance's elapsed
+/// time, so a long stall cannot bank more than one tile (`char-move.cpp:145`;
+/// `CHAR_ACTION_INTERVAL_FRAME` is 6 at `Char-Common.h`).
+const MOVE_DELAY_CAP_MS: u32 = 350;
 
 /// `< 0x4E20` (20000): the client indexes its `CharUniqueInfo` table by
 /// `uiMakeCharUnique` (`SetCharReservedChar`).
@@ -303,6 +316,9 @@ async fn handle_client(
     // (230) and `plan_step` stays past it, so a later 230 is dispatched as the
     // legacy status message instead of replaying the bulk again (T-018).
     let mut plan_step = 0usize;
+    // The move being stepped, if any. Driven by the read loop's timer arm; see
+    // [`Movement`].
+    let mut movement: Option<Movement> = None;
     // Which captured frames get rebuilt from PostgreSQL on the way out.
     let mut live = LiveFrames {
         items: &items,
@@ -317,21 +333,37 @@ async fn handle_client(
         // it, a peer that has said nothing is a silent half-open connection and
         // gets reclaimed rather than parked forever -- the fix the legacy's
         // 10 s check does not deliver. See gz_net::session.
-        let deadline = if session_state.state().is_active() {
-            None
-        } else {
+        //
+        // Once a move is in flight the same read is bounded by the next step
+        // instead, so an idle client still has its avatar stepped (`Movement`).
+        let read_window = if !session_state.state().is_active() {
             Some(cfg.timeouts.handshake)
+        } else {
+            movement
+                .as_ref()
+                .map(|m| m.next_delay(i32::from(REFERENCE_MOVE_SPEED)))
         };
-        let n = match deadline {
+        let n = match read_window {
             Some(window) => match tokio::time::timeout(window, stream.read(&mut buf)).await {
                 Ok(result) => result?,
                 Err(_) => {
+                    // A move's next tile is due: step it and keep reading.
+                    if session_state.state().is_active() {
+                        step_movement(
+                            &mut stream,
+                            &mut outbound,
+                            &mut live,
+                            &mut login,
+                            &mut movement,
+                        )
+                        .await?;
+                        continue;
+                    }
                     let now = now_tick();
                     if let Some(reason) = session_state.handshake_expired(now) {
                         eprintln!(
-                            "game: {peer}: {} ms with no inbound frame; disconnecting ({:?})",
-                            window.as_millis(),
-                            reason
+                            "game: {peer}: {} ms with no inbound frame; disconnecting ({reason:?})",
+                            cfg.timeouts.handshake.as_millis()
                         );
                     }
                     session_state.reject(Rejection::HandshakeTimeout, now);
@@ -661,13 +693,39 @@ async fn handle_client(
                     }
                 }
                 c if c == GameMsg::RequestUserorder as u16 => {
-                    let order = OrderData::decode(payload.as_ref())?;
-                    if let Some(cell) =
-                        handle_userorder(&mut stream, &mut outbound, &characters, &mut live, order)
-                            .await?
-                        && let Some(session) = login.as_mut()
+                    // If a move is already being stepped, the authoritative cell
+                    // is the tile it has reached, not the destination the cached
+                    // row was set to when that move started. Re-seat the row
+                    // before the handler reads it as its starting cell.
+                    if let Some(mv) = movement.as_ref()
+                        && let Some(character) = live.character.as_mut()
                     {
-                        session.entry_cell = Some(cell);
+                        character.pos_x = mv.pos.0;
+                        character.pos_y = mv.pos.1;
+                    }
+                    let order = OrderData::decode(payload.as_ref())?;
+                    match handle_userorder(
+                        &mut stream,
+                        &mut outbound,
+                        &characters,
+                        &mut live,
+                        order,
+                    )
+                    .await?
+                    {
+                        Some(mv) => {
+                            if let Some(session) = login.as_mut() {
+                                session.entry_cell = Some(DropLocation {
+                                    map_id: mv.map_id,
+                                    x: mv.pos.0,
+                                    y: mv.pos.1,
+                                });
+                            }
+                            movement = Some(mv);
+                        }
+                        // A modelled stop, or any order this port does not act
+                        // on: stop stepping so the authoritative cell freezes.
+                        None => movement = None,
                     }
                 }
                 c if c == GameMsg::RequestHeartbeat as u16 => {
@@ -1950,21 +2008,180 @@ async fn handle_personal_shop_data(
     Ok(())
 }
 
+/// A move in progress, stepped the way `cltCharCommon::Move` steps it
+/// (`char-move.cpp:38-227`): every tick the accumulator grows by
+/// `movespeed * elapsed / 50`, a tile is committed once it reaches 50, and each
+/// committed tile is broadcast as a 200 `CHARUPDATE`. The legacy server keeps
+/// one of these per character and calls it once per frame; the read loop's timer
+/// arm is the frame here.
+///
+/// Modelling the step rather than teleporting matters for authority: an item
+/// dropped mid-walk has to land on the tile the character is actually on, and
+/// the captured reference session shows the server broadcasting the start cell
+/// and then each stepped cell (`generated_frames.rs`'s 241 + 200 + 200 run).
+struct Movement {
+    /// Destination from the 240's `siPara1` (`x | (y << 16)`).
+    dest: (i32, i32),
+    /// The authoritative tile, advanced one step at a time.
+    pos: (i32, i32),
+    /// Map the move is on, for the drop cell.
+    map_id: i32,
+    /// `clMoveInfo.siMovePercent`.
+    percent: i32,
+    /// When [`Movement::advance`] last ran, i.e. `clMoveInfo.dwLastMoveClock`.
+    last: Instant,
+}
+
+impl Movement {
+    fn new(dest: (i32, i32), pos: (i32, i32), map_id: i32) -> Self {
+        Self {
+            dest,
+            pos,
+            map_id,
+            percent: 0,
+            last: Instant::now(),
+        }
+    }
+
+    /// Advances the accumulator and commits at most one tile
+    /// (`char-move.cpp:145-171`). The step is limited by
+    /// [`MOVE_DELAY_CAP_MS`], so a stalled tick banks no more than one tile.
+    /// Returns the new cell when a tile was committed.
+    fn advance(&mut self, now: Instant, move_speed: i32) -> Option<(i32, i32)> {
+        let cap = i64::from(MOVE_DELAY_CAP_MS);
+        let delay = (now - self.last).as_millis().min(cap as u128) as i64;
+        self.last = now;
+        self.percent += (i64::from(move_speed) * delay / 50) as i32;
+        if self.percent < MOVE_PERCENT_STEP {
+            return None;
+        }
+        self.percent -= MOVE_PERCENT_COST;
+        // One tile toward the destination; moving both axes at once is the
+        // diagonal the legacy's `siNX++`/`siNY++` pair produces
+        // (`char-move.cpp:107-126`).
+        self.pos = (
+            self.pos.0 + (self.dest.0 - self.pos.0).signum(),
+            self.pos.1 + (self.dest.1 - self.pos.1).signum(),
+        );
+        Some(self.pos)
+    }
+
+    /// Whether the character has reached the destination.
+    fn arrived(&self) -> bool {
+        self.pos == self.dest
+    }
+
+    /// How long until the accumulator should next reach [`MOVE_PERCENT_STEP`],
+    /// capped at [`MOVE_DELAY_CAP_MS`] exactly as one legacy tick is capped.
+    fn next_delay(&self, move_speed: i32) -> Duration {
+        let needed = i64::from((MOVE_PERCENT_STEP - self.percent).max(1));
+        let speed = i64::from(move_speed).max(1);
+        let ms = ((needed * 50 + speed - 1) / speed)
+            .min(i64::from(MOVE_DELAY_CAP_MS))
+            .max(1);
+        Duration::from_millis(ms as u64)
+    }
+}
+
+/// Sends one 200 `CHARUPDATE` for the given cell (`cltServer::SendCharUpdate`,
+/// `Server.cpp:1654-1689`). Life, mana and move speed come from the cached row,
+/// because stats are not modelled yet.
+async fn send_char_update(
+    stream: &mut TcpStream,
+    outbound: &mut Cipher,
+    live: &LiveFrames<'_>,
+    x: i32,
+    y: i32,
+) -> Result<(), AnyError> {
+    let character = live
+        .character
+        .as_ref()
+        .ok_or("char update before the character row is loaded")?;
+    let update = BasicCharUpdate {
+        si_char_unique: i16::try_from(live.char_unique).map_err(|_| {
+            format!(
+                "session char_unique {} does not fit the SI16 siCharUnique",
+                live.char_unique
+            )
+        })?,
+        si_move_speed: REFERENCE_MOVE_SPEED,
+        b_urgent_mode: false,
+        si_life: character.max_life,
+        si_reserved_life: 0,
+        si_mana: character.max_mana,
+        si_x: i16::try_from(x).map_err(|_| format!("x {x} does not fit SI16"))?,
+        si_y: i16::try_from(y).map_err(|_| format!("y {y} does not fit SI16"))?,
+        ui_gm_mode: 0,
+        b_pc_room: false,
+        si_make_ani_type: 0,
+    };
+    send_encoded(
+        stream,
+        outbound,
+        GameMsg::ResponseCharupdate,
+        &update.encode(),
+    )
+    .await
+}
+
+/// Advances an in-flight move by one tick. When the tick commits a tile it sends
+/// the 200 `CHARUPDATE` for the new cell and updates the session's drop cell, and
+/// ends the move on arrival. A no-op when no move is active or the tile is not
+/// due yet.
+///
+/// # Errors
+///
+/// A socket or cipher failure while sending the update.
+async fn step_movement(
+    stream: &mut TcpStream,
+    outbound: &mut Cipher,
+    live: &mut LiveFrames<'_>,
+    login: &mut Option<GameSession>,
+    movement: &mut Option<Movement>,
+) -> Result<(), AnyError> {
+    let Some(mv) = movement.as_mut() else {
+        return Ok(());
+    };
+    let Some((x, y)) = mv.advance(Instant::now(), i32::from(REFERENCE_MOVE_SPEED)) else {
+        return Ok(());
+    };
+    let map_id = mv.map_id;
+    if mv.arrived() {
+        *movement = None;
+    }
+    send_char_update(stream, outbound, live, x, y).await?;
+    // The stepped tile is now the authoritative cell: a 248 resync mid-walk and
+    // a re-issued 240 both have to see it, not the destination the row holds.
+    if let Some(character) = live.character.as_mut() {
+        character.pos_x = x;
+        character.pos_y = y;
+    }
+    if let Some(session) = login.as_mut() {
+        session.entry_cell = Some(DropLocation { map_id, x, y });
+    }
+    Ok(())
+}
+
 /// Applies `GAMEMSG_REQUEST_USERORDER` (240). The only order acted on is
 /// `ORDER_MOVE`; every other order type is logged and dropped.
 ///
 /// `siPara1` carries the destination as `x | (y << 16)`: the client packs it that
 /// way (`cltOrder::MakeOrder`, `order.cpp:148`) and the `ORDER_MOVE` handler
-/// unpacks it with `LOWORD`/`HIWORD` (`char-order.cpp:139-140`). The move is
-/// persisted to `characters.pos_x`/`pos_y` and mirrored into the cached row, so a
-/// later 248/258 re-generates at the new cell and a re-login resumes there.
+/// unpacks it with `LOWORD`/`HIWORD` (`char-order.cpp:139-140`).
 ///
-/// The reply mirrors a server-side move: a 241 order ack built the way
-/// `MakeOrder_MOVE` builds it (`order.cpp:257-262`), then a 200 `CHARUPDATE`
-/// broadcast of the new cell (`cltServer::SendCharUpdate`, `Server.cpp:1654`).
+/// The reply mirrors the legacy order handler: a 241 order ack built the way
+/// `MakeOrder_MOVE` builds it (`order.cpp:257-262`), then a 200 `CHARUPDATE` of
+/// the cell the move starts from. The legacy then steps the character a tile at a
+/// time and broadcasts the new cell on each step (`char-move.cpp:159-182`); the
+/// returned [`Movement`] drives the same behaviour from the read loop, so the
+/// avatar lands where it was sent and a mid-walk drop lands underfoot.
 ///
-/// Returns the new drop cell so the caller can keep the session's position in
-/// step; `None` for an order that is not modelled.
+/// The destination is persisted to `characters.pos_x`/`pos_y` and mirrored into
+/// the cached row up front, so a later 248/258 re-generates at the new cell and
+/// a re-login resumes there even if the connection drops mid-walk.
+///
+/// Returns the move to drive; `None` for an order that is not modelled or a
+/// click on the current cell.
 ///
 /// # Errors
 ///
@@ -1975,7 +2192,7 @@ async fn handle_userorder(
     characters: &PgCharacterRepository,
     live: &mut LiveFrames<'_>,
     order: OrderData,
-) -> Result<Option<DropLocation>, AnyError> {
+) -> Result<Option<Movement>, AnyError> {
     if order.si_order != ORDER_MOVE {
         println!(
             "game: ignoring USERORDER opcode {} (only ORDER_MOVE={ORDER_MOVE} is modelled)",
@@ -1989,19 +2206,14 @@ async fn handle_userorder(
     };
     let character_id = character.character_id;
     let map_id = character.map_id;
+    let start = (character.pos_x, character.pos_y);
 
     let (x16, y16) = OrderData::move_target(order.si_para1);
-    let x = i32::from(x16);
-    let y = i32::from(y16);
+    let dest = (i32::from(x16), i32::from(y16));
 
-    // Persist first, then mirror: a later 248 (resync) or a re-login reads the row.
-    characters.update_position(character_id, x, y).await?;
-    if let Some(character) = live.character.as_mut() {
-        character.pos_x = x;
-        character.pos_y = y;
-    }
-
-    // 241: the server's own ORDER_MOVE (`MakeOrder_MOVE`, `order.cpp:261`).
+    // The legacy answers the order in the handler itself (`char-order.cpp:169`);
+    // the position reaches the database on a separate flush, so the client's
+    // local walk is not held up by a round trip here.
     send_encoded(
         stream,
         outbound,
@@ -2009,38 +2221,26 @@ async fn handle_userorder(
         &OrderData::move_order(live.char_unique, x16, y16).encode(),
     )
     .await?;
+    // The reference server broadcasts the cell the move starts from, then one
+    // 200 per committed tile (`generated_frames.rs`: 241, 200, 200).
+    send_char_update(stream, outbound, live, start.0, start.1).await?;
 
-    // 200: broadcast the new cell (`cltBasicCharUpdateInfo`, `Server.cpp:1683`).
-    let character = live.character.as_ref().expect("set above");
-    let update = BasicCharUpdate {
-        si_char_unique: u16::try_from(live.char_unique).map_err(|_| {
-            format!(
-                "session char_unique {} does not fit the SI16 siCharUnique",
-                live.char_unique
-            )
-        })? as i16,
-        si_move_speed: REFERENCE_MOVE_SPEED,
-        b_urgent_mode: false,
-        si_life: character.max_life,
-        si_reserved_life: 0,
-        si_mana: character.max_mana,
-        si_x: x16,
-        si_y: y16,
-        ui_gm_mode: 0,
-        b_pc_room: false,
-        si_make_ani_type: 0,
-    };
-    send_encoded(
-        stream,
-        outbound,
-        GameMsg::ResponseCharupdate,
-        &update.encode(),
-    )
-    .await?;
+    // Persist the destination, then mirror: a later 248 (resync) or a re-login
+    // reads the row. The stepped cell is tracked in memory for drops.
+    characters
+        .update_position(character_id, dest.0, dest.1)
+        .await?;
+    if let Some(character) = live.character.as_mut() {
+        character.pos_x = dest.0;
+        character.pos_y = dest.1;
+    }
 
-    println!("game: move char {character_id} to ({x}, {y}) on map {map_id}");
+    println!("game: move char {character_id} from {start:?} to {dest:?} on map {map_id}");
 
-    Ok(Some(DropLocation { map_id, x, y }))
+    if start == dest {
+        return Ok(None);
+    }
+    Ok(Some(Movement::new(dest, start, map_id)))
 }
 
 /// The captured frames this server owns rather than replays.
@@ -3394,5 +3594,79 @@ mod tests {
                 "opcode {cmd} in the state-sync burst is neither generated, withheld, nor a documented static blob"
             );
         }
+    }
+
+    /// A move commits one tile at a time along the direction of the destination
+    /// and stops there, at the cadence `char-move.cpp` gives: 100 accumulator
+    /// units per tile at `movespeed` units per 50 ms, i.e. `5000 / movespeed`
+    /// ms per tile (≈357 ms for the captured speed 14).
+    #[test]
+    fn a_move_steps_one_tile_at_a_time_on_the_legacy_cadence() {
+        let mut movement = Movement::new((3, 0), (0, 0), 7);
+        let start = movement.last;
+        let mut now = start;
+
+        let mut steps = Vec::new();
+        let mut intervals = Vec::new();
+        let mut previous = start;
+        while !movement.arrived() {
+            now += movement.next_delay(14);
+            if let Some(pos) = movement.advance(now, 14) {
+                steps.push(pos);
+                intervals.push(now - previous);
+                previous = now;
+            }
+            assert!(now - start < Duration::from_secs(5), "move never arrived");
+        }
+
+        assert_eq!(steps, vec![(1, 0), (2, 0), (3, 0)]);
+        // After the first (cold-start) tile the cadence settles at one tile per
+        // ~357 ms; the cap only reshapes a delayed tick, never the average.
+        for interval in &intervals[1..] {
+            assert!(
+                *interval >= Duration::from_millis(340) && *interval <= Duration::from_millis(360),
+                "tile interval {interval:?} is off the legacy cadence"
+            );
+        }
+    }
+
+    /// A diagonal click steps both axes at once, the `siNX++/siNY++` pair at
+    /// `char-move.cpp:107-126`.
+    #[test]
+    fn a_diagonal_move_steps_both_axes() {
+        let mut movement = Movement::new((2, 2), (0, 0), 1);
+        let mut now = movement.last;
+        let mut steps = Vec::new();
+        while !movement.arrived() {
+            now += movement.next_delay(14);
+            if let Some(pos) = movement.advance(now, 14) {
+                steps.push(pos);
+            }
+        }
+        assert_eq!(steps, vec![(1, 1), (2, 2)]);
+    }
+
+    /// A stalled tick must not bank more than one tile: `advance` caps its
+    /// elapsed time at `(CHAR_ACTION_INTERVAL_FRAME + 1) * 50` ms
+    /// (`char-move.cpp:145`).
+    #[test]
+    fn a_stalled_tick_commits_at_most_one_tile() {
+        let mut movement = Movement::new((10, 0), (0, 0), 1);
+        let stalled = movement.last + Duration::from_secs(4);
+        assert_eq!(movement.advance(stalled, 14), Some((1, 0)));
+        assert_eq!(movement.pos, (1, 0));
+    }
+
+    /// `next_delay` never exceeds the legacy cap, so the read loop's timer arm
+    /// wakes at the same bound the legacy's `min((CHAR_ACTION_INTERVAL_FRAME+1)*50, …)`
+    /// applies.
+    #[test]
+    fn next_delay_is_capped_at_the_legacy_tick_bound() {
+        let mut movement = Movement::new((10, 0), (0, 0), 1);
+        // Commit one tile so the accumulator sits below zero and would ask for
+        // more than the cap without it.
+        let now = movement.last + Duration::from_millis(179);
+        assert!(movement.advance(now, 14).is_some());
+        assert_eq!(movement.next_delay(14), Duration::from_millis(350));
     }
 }
