@@ -56,6 +56,7 @@ use gz_proto::item::{
     decode_move_item, decode_split_item, encode_person_item_info,
 };
 use gz_proto::opcodes_game::GameMsg;
+use gz_proto::personalshop::{ShopTradeData, decode_personal_shop_request, shop_mode_for_request};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
@@ -641,6 +642,19 @@ async fn handle_client(
                 // wants arrives after 230.
                 c if c == GameMsg::RequestAllcharinfo as u16 => {
                     println!("game: {peer}: allcharinfo request -> no reply (matches capture)");
+                }
+                c if c == GameMsg::RequestPersonalshopdata as u16 => {
+                    let session = login
+                        .as_ref()
+                        .ok_or("personal shop request before a successful game login")?;
+                    handle_personal_shop_data(
+                        &mut stream,
+                        &mut outbound,
+                        session,
+                        char_unique,
+                        payload.as_ref(),
+                    )
+                    .await?;
                 }
                 other => println!("game: {peer}: unhandled opcode {other}"),
             }
@@ -1782,6 +1796,81 @@ async fn replay_plan_step(
     Ok(())
 }
 
+/// Answers `GAMEMSG_REQUEST_PERSONALSHOPDATA` (7002) with
+/// `GAMEMSG_RESPONSE_PERSONALSHOPDATA` (7003), which is what makes the client
+/// create the personal-shop or manufacture dialog (`Client-PersonalShop.cpp:87-88`
+/// and `:127-128`).
+///
+/// The legacy handler is `Server-PersonalShop.cpp:41-101`: it resolves the
+/// target by `siCharUnique` (`:45`), and for a shop that is not open fills
+/// `clShopData` from the character — mode from the request's flags (`:54-68`),
+/// person id (`:70`) and account name (`:71`) — then sends the whole
+/// `cltShopTradeData` back (`:97-99`).
+///
+/// This server knows exactly one character: the session's own. A request naming
+/// any other `siCharUnique` has no data behind it, so it is logged rather than
+/// answered with someone else's identity. In a world with no other avatars the
+/// client can only ever name its own character anyway — the send site passes the
+/// right-clicked character's id (`NRightMouseMenuDlg.cpp:349`), and the only
+/// avatar it has is itself.
+///
+/// # Errors
+///
+/// A malformed body ([`gz_proto::wire::WireError`]) or a socket/cipher failure.
+async fn handle_personal_shop_data(
+    stream: &mut TcpStream,
+    outbound: &mut Cipher,
+    session: &GameSession,
+    char_unique: i32,
+    payload: &[u8],
+) -> Result<(), AnyError> {
+    let request = decode_personal_shop_request(payload)?;
+
+    let Some(character_id) = session.character_id else {
+        println!(
+            "game: personal shop request for char_unique {} before a character was selected; \
+             not answering",
+            request.char_unique
+        );
+        return Ok(());
+    };
+    let own_unique = i16::try_from(char_unique).map_err(|_| {
+        format!("session char_unique {char_unique} does not fit the SI16 siCharUnique")
+    })?;
+    if request.char_unique != own_unique {
+        println!(
+            "game: personal shop request for char_unique {} but this session is {own_unique}; \
+             another character's shop is not modelled yet, not answering",
+            request.char_unique
+        );
+        return Ok(());
+    }
+
+    let shop = ShopTradeData {
+        shop_mode: shop_mode_for_request(request.manufacture, request.maker),
+        person_id: character_id,
+        account_id: session.username.clone(),
+    };
+    let body = shop.encode_response(request.char_unique);
+    send_raw(
+        stream,
+        outbound,
+        GameMsg::ResponsePersonalshopdata as u16,
+        &body,
+    )
+    .await?;
+    println!(
+        "game: personal shop reply for char_unique {}: mode {}, person_id {}, account {:?} \
+         ({} bytes)",
+        request.char_unique,
+        shop.shop_mode,
+        shop.person_id,
+        shop.account_id,
+        body.len()
+    );
+    Ok(())
+}
+
 /// The captured frames this server owns rather than replays.
 ///
 /// Every frame in the burst still comes from `login_capture.pcapng`; the point
@@ -2114,6 +2203,42 @@ mod tests {
         // Idempotent: refusing a repeat must not make a later request admissible
         // again, which is what would let the prologue replay N times.
         assert!(!admit_select_char(admit_select_char(None).then_some(7)));
+    }
+
+    /// The seven hundred range personal-shop opcodes are the legacy pair, and the
+    /// reply body opens the dialog at the offsets the client reads
+    /// (`Client-PersonalShop.cpp:94,117,131`).
+    #[test]
+    fn personal_shop_reply_opens_the_dialog() {
+        use gz_proto::personalshop::{PSHOP_MODE_SELL, RESPONSE_PERSONALSHOPDATA_SIZE};
+
+        assert_eq!(GameMsg::RequestPersonalshopdata as u16, 7002);
+        assert_eq!(GameMsg::ResponsePersonalshopdata as u16, 7003);
+
+        let shop = ShopTradeData {
+            shop_mode: shop_mode_for_request(false, false),
+            person_id: 7,
+            account_id: "Tester".to_owned(),
+        };
+        let body = shop.encode_response(0x05BF);
+        assert_eq!(body.len(), RESPONSE_PERSONALSHOPDATA_SIZE);
+        assert_eq!(&body[0..2], &0x05BFu16.to_le_bytes());
+        assert_eq!(body[8], PSHOP_MODE_SELL as u8);
+        assert_eq!(&body[12..16], &7i32.to_le_bytes());
+        assert_eq!(&body[16..22], b"Tester");
+    }
+
+    /// The request flags select the legacy's shop mode
+    /// (`Server-PersonalShop.cpp:54-68`).
+    #[test]
+    fn personal_shop_request_flags_pick_the_legacy_mode() {
+        use gz_proto::personalshop::{
+            PSHOP_MODE_MAKEITEM, PSHOP_MODE_MAKEITEM_WANT, PSHOP_MODE_SELL,
+        };
+        // An ordinary "open the shop" click (both flags false) is a seller shop.
+        assert_eq!(shop_mode_for_request(false, false), PSHOP_MODE_SELL);
+        assert_eq!(shop_mode_for_request(true, false), PSHOP_MODE_MAKEITEM);
+        assert_eq!(shop_mode_for_request(true, true), PSHOP_MODE_MAKEITEM_WANT);
     }
 
     #[test]
