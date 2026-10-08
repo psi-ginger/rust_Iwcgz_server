@@ -54,6 +54,14 @@ $env:GAME_LINK_KEY2 = if ($env:GAME_LINK_KEY2) { $env:GAME_LINK_KEY2 } else { "3
 # the default, and T-017 flips it to live.
 $env:GAME_PROLOGUE = if ($env:GAME_PROLOGUE) { $env:GAME_PROLOGUE } else { "capture" }
 
+# When the ~67 KB world bulk goes out after char-select. "on230" waits for the
+# client's first REQUEST_CHANGESTATUSINFO, exactly as captured - but that 230
+# rides a 30 s timer anchored at *first* world entry, so on re-entry the bulk
+# can land up to 30 s after char-select. "at-selectchar" pushes it with the
+# entry prologue instead; set it to time the re-entry stall against the
+# 2026-10-08 baseline (25.56 s of client silence) in the handoff.
+$env:GAME_WORLD_BULK = if ($env:GAME_WORLD_BULK) { $env:GAME_WORLD_BULK } else { "on230" }
+
 $front = Start-Process -FilePath (Join-Path $bin "front.exe") -WorkingDirectory $root `
     -RedirectStandardOutput (Join-Path $logDir "front.log") `
     -RedirectStandardError (Join-Path $logDir "front.err.log") -PassThru
@@ -66,5 +74,5 @@ Write-Host "Logs: $logDir\front.log, $logDir\game.log (+ .err.log)."
 # Every log line is stamped +mm:ss.mmm since that service started, so gaps in
 # the trace are readable directly; this is the wall clock that +0:00.000 maps to.
 Write-Host "Log clock origin: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss.fff')."
-Write-Host "Link key $($env:GAME_LINK_KEY1)/$($env:GAME_LINK_KEY2), prologue $($env:GAME_PROLOGUE)."
+Write-Host "Link key $($env:GAME_LINK_KEY1)/$($env:GAME_LINK_KEY2), prologue $($env:GAME_PROLOGUE), world bulk $($env:GAME_WORLD_BULK)."
 Write-Host "Point the client at 127.0.0.1 and log in as test / test."

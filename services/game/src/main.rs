@@ -80,7 +80,7 @@ mod import_capture;
 mod registry;
 mod world_entry;
 
-use config::{GameConfig, Prologue};
+use config::{GameConfig, Prologue, WorldBulk};
 use registry::{Outbound, Registered, Registry, SessionInfo, SessionKey};
 
 /// `MAX_TOTAL_CHAR_PER_USER` (3 main + 12 char-house) — the legacy sends one
@@ -207,8 +207,9 @@ async fn serve(cfg: &GameConfig) -> Result<(), AnyError> {
         cfg.timeouts.close_throttle.as_millis()
     );
     logln!(
-        "game: link key from configuration; prologue={:?} char_unique={}",
+        "game: link key from configuration; prologue={:?} world_bulk={:?} char_unique={}",
         cfg.prologue,
+        cfg.world_bulk,
         match cfg.prologue {
             Prologue::Capture => "capture-pinned".to_string(),
             Prologue::Live => "allocated per session".to_string(),
@@ -370,7 +371,9 @@ async fn handle_client(
     // Cursor into `generated_capture::REPLY_PLAN`. The plan is the one-shot
     // world-entry bulk: step 0 is answered on the first `REQUEST_CHANGESTATUSINFO`
     // (230) and `plan_step` stays past it, so a later 230 is dispatched as the
-    // legacy status message instead of replaying the bulk again (T-018).
+    // legacy status message instead of replaying the bulk again (T-018). With
+    // `GAME_WORLD_BULK=at-selectchar` the step is pushed at char-select instead,
+    // so by the time that 230 arrives the cursor is already past it.
     let mut plan_step = 0usize;
     // The move being stepped, if any. Driven by the read loop's timer arm; see
     // [`Movement`].
@@ -653,6 +656,23 @@ async fn handle_client(
                             .await?
                         }
                     }
+                    // Deliver the ~67 KB world bulk with the entry prologue
+                    // instead of waiting for the client's first
+                    // `REQUEST_CHANGESTATUSINFO` (230). That 230 rides a 30 s
+                    // timer anchored at *first* world entry and never restarts
+                    // across a logout, so on re-entry the bulk can land up to
+                    // 30 s after char-select — after the client has already
+                    // built a world from the prologue above. See
+                    // `config::WorldBulk` for the measurement behind this.
+                    if cfg.prologue == Prologue::Capture
+                        && cfg.world_bulk == WorldBulk::AtSelectchar
+                    {
+                        logln!(
+                            "game: {peer}: pushing the world bulk with the entry prologue \
+                             (GAME_WORLD_BULK=at-selectchar)"
+                        );
+                        push_plan_step(&mut stream, &mut outbound, &mut plan_step, &live).await?;
+                    }
                 }
                 c if c == GameMsg::RequestItemsplit as u16 => {
                     let character_id = login
@@ -804,6 +824,11 @@ async fn handle_client(
                     // replayed the whole ~65 KB bulk -- the live "movement
                     // micro-stutter". The plan is now stepped exactly once; see
                     // [`replay_plan_step`].
+                    //
+                    // With `GAME_WORLD_BULK=at-selectchar` the cursor is
+                    // already past step 0 before any 230 arrives, so no 230
+                    // ever takes the plan branch and every one of them is
+                    // dispatched as the legacy message.
                     let world_bulk_pending = cfg.prologue == Prologue::Capture && plan_step == 0;
                     if world_bulk_pending {
                         replay_plan_step(&mut stream, &mut outbound, cmd, &mut plan_step, &live)
@@ -2054,19 +2079,41 @@ async fn replay_plan_step(
     plan_step: &mut usize,
     live: &LiveFrames<'_>,
 ) -> Result<(), AnyError> {
+    let Some((expect, _)) = generated_capture::REPLY_PLAN.get(*plan_step) else {
+        return Ok(());
+    };
+    if *expect != cmd {
+        logln!("game: replay plan waiting for opcode {expect}, client sent {cmd}");
+        return Ok(());
+    }
+    push_plan_step(stream, cipher, plan_step, live).await
+}
+
+/// Replays `REPLY_PLAN`'s current step unconditionally and advances the cursor.
+///
+/// The unconditional half of [`replay_plan_step`], used when this side decides
+/// the step's timing rather than waiting for the client's opcode — the
+/// [`WorldBulk::AtSelectchar`] experiment. With the default
+/// [`WorldBulk::On230`] the cursor is only ever stepped through
+/// [`replay_plan_step`], so this changes nothing.
+///
+/// # Errors
+///
+/// Propagates any cipher or socket failure from [`replay`].
+async fn push_plan_step(
+    stream: &mut TcpStream,
+    cipher: &mut Cipher,
+    plan_step: &mut usize,
+    live: &LiveFrames<'_>,
+) -> Result<(), AnyError> {
     let Some((expect, ranges)) = generated_capture::REPLY_PLAN.get(*plan_step) else {
         return Ok(());
     };
-    if *expect == cmd {
-        *plan_step += 1;
-        let label = format!("plan step {expect}");
-        for (start, end) in *ranges {
-            replay(stream, cipher, (*start, *end), &label, live, false).await?;
-        }
-        return Ok(());
+    *plan_step += 1;
+    let label = format!("plan step {expect}");
+    for (start, end) in *ranges {
+        replay(stream, cipher, (*start, *end), &label, live, false).await?;
     }
-
-    logln!("game: replay plan waiting for opcode {expect}, client sent {cmd}");
     Ok(())
 }
 

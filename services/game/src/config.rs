@@ -28,6 +28,7 @@
 //! | `GAME_CONNECT_TIMEOUT_MS` | no | override for the 7 s outbound connect window |
 //! | `GAME_CLOSE_THROTTLE_MS` | no | override for the 600 ms close throttle |
 //! | `GAME_PROLOGUE` | no | `capture` (default) or `live` — see [`Prologue`] |
+//! | `GAME_WORLD_BULK` | no | `on230` (default) or `at-selectchar` — see [`WorldBulk`] |
 
 use std::time::Duration;
 
@@ -99,6 +100,54 @@ impl Prologue {
     }
 }
 
+/// When the ~67 KB world bulk (`REPLY_PLAN`'s step 0) is delivered after
+/// char-select.
+///
+/// The bulk is one-shot either way: the plan cursor is stepped exactly once and
+/// every later `REQUEST_CHANGESTATUSINFO` (230) is dispatched as the legacy
+/// `CHANGESTATUSINFO` message. Only the *timing* of that one delivery is in
+/// question.
+///
+/// `On230` is how the capture behaves, and is the default: the bulk goes out
+/// when the client asks with its first 230.
+///
+/// `AtSelectchar` is an experiment for the ~20 s re-entry stall observed on
+/// 2026-10-08. The timestamped run showed the stall **beginning at the moment
+/// the bulk arrived** — on first entry the client asked 1 ms after the entry
+/// prologue and was moving 6.56 s later, while on re-entry the client's 230
+/// runs on a 30 s timer anchored at *first* world entry (observed at
+/// `0:17.164`, `0:47.154`, `1:17.154` — exactly 30.000 s apart and never
+/// restarted across the logout), so the bulk landed 8.79 s after char-select.
+/// By then the client had already built a world from the 45-frame prologue and
+/// moved once, so a full world rebuild was forced mid-session. Pushing the bulk
+/// with the prologue makes re-entry look like first entry.
+///
+/// The experiment is decisive either way: if the stall is a client-internal
+/// wait unrelated to our timing, this changes nothing and the setting is
+/// removed. Only meaningful under [`Prologue::Capture`], the only mode that has
+/// a bulk to push.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum WorldBulk {
+    /// Answer the client's first 230, exactly as captured.
+    #[default]
+    On230,
+    /// Push it with the entry prologue, before the client asks.
+    AtSelectchar,
+}
+
+impl WorldBulk {
+    /// Parse the `GAME_WORLD_BULK` value. Case-insensitive.
+    fn parse(value: &str) -> Result<Self, String> {
+        match value.to_ascii_lowercase().as_str() {
+            "on230" => Ok(Self::On230),
+            "at-selectchar" => Ok(Self::AtSelectchar),
+            other => Err(format!(
+                "GAME_WORLD_BULK must be \"on230\" or \"at-selectchar\", got {other:?}"
+            )),
+        }
+    }
+}
+
 /// Everything the game service reads from outside its source.
 #[derive(Debug, Clone)]
 pub struct GameConfig {
@@ -112,6 +161,8 @@ pub struct GameConfig {
     pub server_unique: i16,
     pub timeouts: SessionTimeouts,
     pub prologue: Prologue,
+    /// When the world bulk goes out; see [`WorldBulk`].
+    pub world_bulk: WorldBulk,
 }
 
 impl GameConfig {
@@ -150,6 +201,10 @@ impl GameConfig {
             Ok(value) => Prologue::parse(&value)?,
             Err(_) => Prologue::default(),
         };
+        let world_bulk = match std::env::var("GAME_WORLD_BULK") {
+            Ok(value) => WorldBulk::parse(&value)?,
+            Err(_) => WorldBulk::default(),
+        };
 
         Ok(Self {
             database_url,
@@ -160,6 +215,7 @@ impl GameConfig {
             server_unique,
             timeouts,
             prologue,
+            world_bulk,
         })
     }
 
@@ -244,7 +300,7 @@ mod tests {
     /// would let two tests interleave and each see the other's values.
     static ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-    const TOUCHED: [&str; 11] = [
+    const TOUCHED: [&str; 12] = [
         "DATABASE_URL",
         "GAME_LISTEN",
         "GAME_LINK_KEY1",
@@ -256,6 +312,7 @@ mod tests {
         "GAME_CONNECT_TIMEOUT_MS",
         "GAME_CLOSE_THROTTLE_MS",
         "GAME_PROLOGUE",
+        "GAME_WORLD_BULK",
     ];
 
     /// Exclusive access to the environment for one test, restoring it after.
@@ -385,6 +442,9 @@ mod tests {
         // Capture stays the default until T-017 generates the world bulk; see
         // the Prologue docs for why the two are not separable today.
         assert_eq!(cfg.prologue, Prologue::Capture);
+        // The bulk keeps its captured timing until the re-entry experiment
+        // below is either confirmed or discarded.
+        assert_eq!(cfg.world_bulk, WorldBulk::On230);
     }
 
     #[test]
@@ -443,6 +503,24 @@ mod tests {
         let err = GameConfig::from_env().unwrap_err();
         assert!(err.contains("live"), "{err}");
         assert!(err.contains("capture"), "{err}");
+    }
+
+    #[test]
+    fn the_world_bulk_timing_is_explicit_about_its_two_values() {
+        let env = EnvGuard::take();
+        env.key_only();
+        assert_eq!(GameConfig::from_env().unwrap().world_bulk, WorldBulk::On230);
+
+        env.set("GAME_WORLD_BULK", "AT-SELECTCHAR");
+        assert_eq!(
+            GameConfig::from_env().unwrap().world_bulk,
+            WorldBulk::AtSelectchar
+        );
+
+        env.set("GAME_WORLD_BULK", "whenever");
+        let err = GameConfig::from_env().unwrap_err();
+        assert!(err.contains("on230"), "{err}");
+        assert!(err.contains("at-selectchar"), "{err}");
     }
 
     #[test]
