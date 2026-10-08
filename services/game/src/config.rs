@@ -28,7 +28,7 @@
 //! | `GAME_CONNECT_TIMEOUT_MS` | no | override for the 7 s outbound connect window |
 //! | `GAME_CLOSE_THROTTLE_MS` | no | override for the 600 ms close throttle |
 //! | `GAME_PROLOGUE` | no | `capture` (default) or `live` — see [`Prologue`] |
-//! | `GAME_WORLD_BULK` | no | `on230` (default) or `at-selectchar` — see [`WorldBulk`] |
+//! | `GAME_WORLD_BULK` | no | `at-selectchar` (default) or `on230` — see [`WorldBulk`] |
 
 use std::time::Duration;
 
@@ -108,30 +108,28 @@ impl Prologue {
 /// `CHANGESTATUSINFO` message. Only the *timing* of that one delivery is in
 /// question.
 ///
-/// `On230` is how the capture behaves, and is the default: the bulk goes out
-/// when the client asks with its first 230.
+/// `AtSelectchar` — push it with the entry prologue — is **the default**, on
+/// the strength of the 2026-10-08 re-entry measurement. Waiting for the
+/// client's first 230 costs up to 30 s on a re-entry, because that 230 rides a
+/// timer anchored at *first* world entry (observed at `0:17.164`, `0:47.154`,
+/// `1:17.154`, never restarted across the logout). So the bulk landed 8.79 s
+/// after char-select — by which time the client had already built a world from
+/// the 45-frame prologue and moved once, forcing a full rebuild mid-session.
+/// The live A/B run against that baseline took the re-entry stall from a
+/// 25.555 s client freeze to **instant**: selecting a character loads straight
+/// into the world.
 ///
-/// `AtSelectchar` is an experiment for the ~20 s re-entry stall observed on
-/// 2026-10-08. The timestamped run showed the stall **beginning at the moment
-/// the bulk arrived** — on first entry the client asked 1 ms after the entry
-/// prologue and was moving 6.56 s later, while on re-entry the client's 230
-/// runs on a 30 s timer anchored at *first* world entry (observed at
-/// `0:17.164`, `0:47.154`, `1:17.154` — exactly 30.000 s apart and never
-/// restarted across the logout), so the bulk landed 8.79 s after char-select.
-/// By then the client had already built a world from the 45-frame prologue and
-/// moved once, so a full world rebuild was forced mid-session. Pushing the bulk
-/// with the prologue makes re-entry look like first entry.
-///
-/// The experiment is decisive either way: if the stall is a client-internal
-/// wait unrelated to our timing, this changes nothing and the setting is
-/// removed. Only meaningful under [`Prologue::Capture`], the only mode that has
-/// a bulk to push.
+/// `On230` is retained only as an escape hatch — it reproduces the capture's
+/// timing exactly, sending the bulk when the client asks. It has no effect
+/// under [`Prologue::Live`], and only under [`Prologue::Capture`] is there a
+/// bulk to push at all.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum WorldBulk {
-    /// Answer the client's first 230, exactly as captured.
-    #[default]
+    /// Answer the client's first 230, exactly as captured. The capture's own
+    /// timing, kept as the non-default escape hatch.
     On230,
-    /// Push it with the entry prologue, before the client asks.
+    /// Push it with the entry prologue, before the client asks. The default.
+    #[default]
     AtSelectchar,
 }
 
@@ -442,9 +440,10 @@ mod tests {
         // Capture stays the default until T-017 generates the world bulk; see
         // the Prologue docs for why the two are not separable today.
         assert_eq!(cfg.prologue, Prologue::Capture);
-        // The bulk keeps its captured timing until the re-entry experiment
-        // below is either confirmed or discarded.
-        assert_eq!(cfg.world_bulk, WorldBulk::On230);
+        // The world bulk ships with the entry prologue: the 2026-10-08 A/B run
+        // confirmed waiting for the client's first 230 stalls re-entry for
+        // ~25 s. See the WorldBulk docs.
+        assert_eq!(cfg.world_bulk, WorldBulk::AtSelectchar);
     }
 
     #[test]
@@ -509,13 +508,14 @@ mod tests {
     fn the_world_bulk_timing_is_explicit_about_its_two_values() {
         let env = EnvGuard::take();
         env.key_only();
-        assert_eq!(GameConfig::from_env().unwrap().world_bulk, WorldBulk::On230);
-
-        env.set("GAME_WORLD_BULK", "AT-SELECTCHAR");
+        // The push is the default; the capture's timing is the opt-in.
         assert_eq!(
             GameConfig::from_env().unwrap().world_bulk,
             WorldBulk::AtSelectchar
         );
+
+        env.set("GAME_WORLD_BULK", "ON230");
+        assert_eq!(GameConfig::from_env().unwrap().world_bulk, WorldBulk::On230);
 
         env.set("GAME_WORLD_BULK", "whenever");
         let err = GameConfig::from_env().unwrap_err();

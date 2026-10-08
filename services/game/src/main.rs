@@ -369,11 +369,12 @@ async fn handle_client(
     // Set once the game login succeeds; select-char and later opcodes need it.
     let mut login: Option<GameSession> = None;
     // Cursor into `generated_capture::REPLY_PLAN`. The plan is the one-shot
-    // world-entry bulk: step 0 is answered on the first `REQUEST_CHANGESTATUSINFO`
-    // (230) and `plan_step` stays past it, so a later 230 is dispatched as the
-    // legacy status message instead of replaying the bulk again (T-018). With
-    // `GAME_WORLD_BULK=at-selectchar` the step is pushed at char-select instead,
-    // so by the time that 230 arrives the cursor is already past it.
+    // world-entry bulk, pushed at char-select (the default) so it travels with
+    // the entry prologue; `plan_step` stays past step 0, so the client's first
+    // `REQUEST_CHANGESTATUSINFO` (230) finds the cursor already advanced and is
+    // dispatched as the legacy status message instead of replaying the bulk
+    // again (T-018). Under `GAME_WORLD_BULK=on230` the push is deferred to that
+    // first 230 instead, and the cursor starts at 0.
     let mut plan_step = 0usize;
     // The move being stepped, if any. Driven by the read loop's timer arm; see
     // [`Movement`].
@@ -825,10 +826,12 @@ async fn handle_client(
                     // micro-stutter". The plan is now stepped exactly once; see
                     // [`replay_plan_step`].
                     //
-                    // With `GAME_WORLD_BULK=at-selectchar` the cursor is
+                    // Under the default `WorldBulk::AtSelectchar` the cursor is
                     // already past step 0 before any 230 arrives, so no 230
                     // ever takes the plan branch and every one of them is
-                    // dispatched as the legacy message.
+                    // dispatched as the legacy message. Only
+                    // `GAME_WORLD_BULK=on230` still leaves step 0 for the
+                    // client's first 230 to pick up.
                     let world_bulk_pending = cfg.prologue == Prologue::Capture && plan_step == 0;
                     if world_bulk_pending {
                         replay_plan_step(&mut stream, &mut outbound, cmd, &mut plan_step, &live)
@@ -2092,10 +2095,10 @@ async fn replay_plan_step(
 /// Replays `REPLY_PLAN`'s current step unconditionally and advances the cursor.
 ///
 /// The unconditional half of [`replay_plan_step`], used when this side decides
-/// the step's timing rather than waiting for the client's opcode — the
-/// [`WorldBulk::AtSelectchar`] experiment. With the default
-/// [`WorldBulk::On230`] the cursor is only ever stepped through
-/// [`replay_plan_step`], so this changes nothing.
+/// the step's timing rather than waiting for the client's opcode — which is the
+/// default path, [`WorldBulk::AtSelectchar`]. Under `GAME_WORLD_BULK=on230` the
+/// cursor is only ever stepped through [`replay_plan_step`], so this is not
+/// called.
 ///
 /// # Errors
 ///

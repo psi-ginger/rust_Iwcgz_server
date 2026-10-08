@@ -54,13 +54,11 @@ $env:GAME_LINK_KEY2 = if ($env:GAME_LINK_KEY2) { $env:GAME_LINK_KEY2 } else { "3
 # the default, and T-017 flips it to live.
 $env:GAME_PROLOGUE = if ($env:GAME_PROLOGUE) { $env:GAME_PROLOGUE } else { "capture" }
 
-# When the ~67 KB world bulk goes out after char-select. "on230" waits for the
-# client's first REQUEST_CHANGESTATUSINFO, exactly as captured - but that 230
-# rides a 30 s timer anchored at *first* world entry, so on re-entry the bulk
-# can land up to 30 s after char-select. "at-selectchar" pushes it with the
-# entry prologue instead; set it to time the re-entry stall against the
-# 2026-10-08 baseline (25.56 s of client silence) in the handoff.
-$env:GAME_WORLD_BULK = if ($env:GAME_WORLD_BULK) { $env:GAME_WORLD_BULK } else { "on230" }
+# When the ~67 KB world bulk goes out after char-select. "at-selectchar" (the
+# default) pushes it with the entry prologue; "on230" waits for the client's
+# first REQUEST_CHANGESTATUSINFO exactly as captured, which stalls re-entry for
+# ~25 s because that 230 rides a 30 s timer anchored at *first* world entry.
+$env:GAME_WORLD_BULK = if ($env:GAME_WORLD_BULK) { $env:GAME_WORLD_BULK } else { "at-selectchar" }
 
 $front = Start-Process -FilePath (Join-Path $bin "front.exe") -WorkingDirectory $root `
     -RedirectStandardOutput (Join-Path $logDir "front.log") `
