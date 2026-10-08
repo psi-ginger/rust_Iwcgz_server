@@ -32,6 +32,7 @@
 //! `GAME_LINK_KEY1`, `GAME_LINK_KEY2`.
 
 use std::borrow::Cow;
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use gz_cipher::Cipher;
@@ -43,6 +44,14 @@ use gz_db::{
 };
 use gz_net::session::{Rejection, Session};
 use gz_net::{COMPRESSION_FLAG, Frame, FrameParser, HEADER_SIZE, MAX_FRAME_SIZE, Tick};
+use gz_proto::chat::{
+    CHATMODE_GUILD, CHATMODE_HEAD, CHATMODE_HOME, CHATMODE_KING, CHATMODE_NEWSITEM, CHATMODE_PARTY,
+    CHATMODE_SECRET, CHATMODE_TOWN, CHATMODE_VILLAGER, ChatRequest, MAX_HEAD_CHAT_TEXT_SIZE,
+    MAX_PLAYER_NAME, SECRETCHAT_FAIL_INVALIDNAME, SECRETCHAT_FAIL_NOTUSER, SECRETCHAT_SUCCESS,
+    SecretChatRequest, cut, decode_chat_request, decode_head_chat_request,
+    decode_secret_chat_request, encode_chat_response, encode_head_chat_response, encode_notice,
+    encode_secret_chat_result,
+};
 use gz_proto::game::{
     BasicInfo, CharListEntry, CharUnique, GameLogin, MAX_CONSTRUCTION_NUM, MAX_VILLAGE_NUMBER,
     MakeCharInfo, ServerInfo, VillageStruct, client_map_index, decode_make_new_char,
@@ -68,9 +77,11 @@ mod config;
 mod generated_capture;
 mod generated_frames;
 mod import_capture;
+mod registry;
 mod world_entry;
 
 use config::{GameConfig, Prologue};
+use registry::{Outbound, Registered, Registry, SessionInfo, SessionKey};
 
 /// `MAX_TOTAL_CHAR_PER_USER` (3 main + 12 char-house) — the legacy sends one
 /// char-list packet for every slot, occupied or not
@@ -152,6 +163,9 @@ async fn serve(cfg: &GameConfig) -> Result<(), AnyError> {
     let accounts = PgAccountRepository::connect(&cfg.database_url).await?;
     let characters = PgCharacterRepository::connect(&cfg.database_url).await?;
     let items = PgItemRepository::connect(&cfg.database_url).await?;
+    // One table for every connection: the chat family is the first code here
+    // that addresses players other than the one asking.
+    let registry = Arc::new(Registry::new());
     let listener = TcpListener::bind(&cfg.listen).await?;
     println!("game: listening on {}", cfg.listen);
     println!(
@@ -181,10 +195,13 @@ async fn serve(cfg: &GameConfig) -> Result<(), AnyError> {
         let accounts = accounts.clone();
         let characters = characters.clone();
         let items = items.clone();
+        let registry = registry.clone();
         let peer = peer.to_string();
         let cfg = cfg.clone();
         tokio::spawn(async move {
-            if let Err(e) = handle_client(stream, &peer, &cfg, accounts, characters, items).await {
+            if let Err(e) =
+                handle_client(stream, &peer, &cfg, accounts, characters, items, registry).await
+            {
                 eprintln!("game: {peer}: {e}");
             }
         });
@@ -225,6 +242,24 @@ async fn run_command(command: &str, database_url: &str, args: Vec<String>) -> Re
     }
 }
 
+/// One turn of the read loop's `select!`.
+///
+/// Three things can end the wait: a frame from the peer, a frame queued for
+/// this connection by a broadcast ([`Outbound`]), or the window that bounds the
+/// wait (the handshake deadline before the first frame, the next movement step
+/// after it). Every branch is cancel-safe — `TcpStream::read` consumes nothing
+/// while pending, an `mpsc` `recv` that loses the race has taken nothing, and a
+/// sleep holds no state — so a frame cannot be lost by the switch.
+enum LoopTick {
+    /// Bytes arrived (or the socket reported EOF, or the read failed).
+    Read(std::io::Result<usize>),
+    /// A queued outbound frame is due. `None` would mean every sender is gone,
+    /// which cannot happen while this task holds `out_tx`.
+    Send(Option<Outbound>),
+    /// The wait's window elapsed.
+    TimedOut,
+}
+
 /// Drives one client connection through the `ITZSession` lifecycle.
 ///
 /// The state machine, the three timings and "a rejection is a disconnect" live
@@ -253,6 +288,7 @@ async fn handle_client(
     accounts: PgAccountRepository,
     characters: PgCharacterRepository,
     items: PgItemRepository,
+    registry: Arc<Registry>,
 ) -> Result<(), AnyError> {
     let mut session_state = Session::new(cfg.timeouts);
     if !session_state.accept(now_tick()) {
@@ -316,6 +352,19 @@ async fn handle_client(
         char_unique,
     };
 
+    // The registry key this connection answers under, plus the removal guard.
+    // The guard is armed here — before the first frame — so that every exit
+    // (EOF, framing rejection, cipher desync, handshake timeout) cleans up after
+    // a character that *did* register, while a drop before `REQUEST_SELECTCHAR`
+    // is the no-op it should be. See `Registered`.
+    let session_key = Registry::next_key();
+    let _registered = Registered::new(registry.clone(), session_key);
+    // Everything aimed at this connection but produced elsewhere — a whisper,
+    // a head-chat fan, the general-chat broadcast this speaker is also part of
+    // — is queued here and written by this loop, so only this task ever writes
+    // to the socket (`Outbound`).
+    let (out_tx, mut out_rx) = tokio::sync::mpsc::unbounded_channel::<Outbound>();
+
     loop {
         // The handshake window runs from accept to the first inbound frame. Past
         // it, a peer that has said nothing is a silent half-open connection and
@@ -329,34 +378,53 @@ async fn handle_client(
         } else {
             movement.as_ref().map(Movement::next_delay)
         };
-        let n = match read_window {
-            Some(window) => match tokio::time::timeout(window, stream.read(&mut buf)).await {
-                Ok(result) => result?,
-                Err(_) => {
-                    // A move's next tile is due: step it and keep reading.
-                    if session_state.state().is_active() {
-                        step_movement(
-                            &mut stream,
-                            &mut outbound,
-                            &mut live,
-                            &mut login,
-                            &mut movement,
-                        )
-                        .await?;
-                        continue;
-                    }
-                    let now = now_tick();
-                    if let Some(reason) = session_state.handshake_expired(now) {
-                        eprintln!(
-                            "game: {peer}: {} ms with no inbound frame; disconnecting ({reason:?})",
-                            cfg.timeouts.handshake.as_millis()
-                        );
-                    }
-                    session_state.reject(Rejection::HandshakeTimeout, now);
-                    return Ok(());
+        let tick = tokio::select! {
+            read = stream.read(&mut buf) => LoopTick::Read(read),
+            queued = out_rx.recv() => LoopTick::Send(queued),
+            _ = async {
+                match read_window {
+                    Some(window) => tokio::time::sleep(window).await,
+                    // No window: nothing but a read or a queued frame can end
+                    // the wait, exactly as the blocking read did before.
+                    None => std::future::pending::<()>().await,
                 }
-            },
-            None => stream.read(&mut buf).await?,
+            } => LoopTick::TimedOut,
+        };
+        let n = match tick {
+            LoopTick::Send(Some(frame)) => {
+                send_raw(&mut stream, &mut outbound, frame.cmd, &frame.payload).await?;
+                continue;
+            }
+            LoopTick::Send(None) => {
+                // Unreachable: `out_tx` is held for the whole connection.
+                return Err("outbound channel closed while the session was live".into());
+            }
+            LoopTick::TimedOut => {
+                if session_state.state().is_active() {
+                    // A move's next tile is due: step it and keep reading.
+                    step_movement(
+                        &mut stream,
+                        &mut outbound,
+                        &mut live,
+                        &mut login,
+                        &mut movement,
+                        &registry,
+                        session_key,
+                    )
+                    .await?;
+                    continue;
+                }
+                let now = now_tick();
+                if let Some(reason) = session_state.handshake_expired(now) {
+                    eprintln!(
+                        "game: {peer}: {} ms with no inbound frame; disconnecting ({reason:?})",
+                        cfg.timeouts.handshake.as_millis()
+                    );
+                }
+                session_state.reject(Rejection::HandshakeTimeout, now);
+                return Ok(());
+            }
+            LoopTick::Read(read) => read?,
         };
         if n == 0 {
             println!(
@@ -499,6 +567,31 @@ async fn handle_client(
                         live.account_name = session.username.clone();
                     }
                     live.character = Some(character_id.clone());
+                    // Enter the character into the shared table. From here on
+                    // this player is visible to the chat family, and a second
+                    // REQUEST_SELECTCHAR re-enters the same key with a fresh
+                    // row and no head chat (`Registry::register`). The key is
+                    // the connection's serial, never `char_unique` — see the
+                    // registry module docs for why capture mode makes those
+                    // differ.
+                    registry.register(
+                        session_key,
+                        out_tx.clone(),
+                        SessionInfo {
+                            char_unique: i16::try_from(char_unique).map_err(|_| {
+                                format!(
+                                    "session char_unique {char_unique} does not fit the \
+                                     SI16 siCharUnique"
+                                )
+                            })?,
+                            name: character_id.name.clone(),
+                            level: i32::from(character_id.level),
+                            map_id: character_id.map_id,
+                            x: character_id.pos_x,
+                            y: character_id.pos_y,
+                            school_id: character_id.school_id,
+                        },
+                    );
                     // The world bulk after char-select. Capture mode replays it;
                     // live mode generates it (T-017). See `Prologue` for why the
                     // two cannot be mixed today.
@@ -794,6 +887,24 @@ async fn handle_client(
                         payload.as_ref(),
                     )
                     .await?;
+                }
+                // ---- the chat family: 117, 119, 121 (T-018 slice 5) ----
+                //
+                // All three are handled synchronously: they read the registry,
+                // encode, and queue. Nothing but this task writes to the
+                // socket, so a reply to *this* connection goes out through the
+                // same queue as a broadcast to everybody else, in order.
+                c if c == GameMsg::RequestChat as u16 => {
+                    let request = decode_chat_request(payload.as_ref())?;
+                    handle_chat(&registry, session_key, request);
+                }
+                c if c == GameMsg::RequestSecretchat as u16 => {
+                    let request = decode_secret_chat_request(payload.as_ref())?;
+                    handle_secret_chat(&registry, session_key, request);
+                }
+                c if c == GameMsg::RequestHeadchat as u16 => {
+                    let subject = decode_head_chat_request(payload.as_ref())?;
+                    handle_head_chat_request(&registry, session_key, subject);
                 }
                 other => println!("game: {peer}: unhandled opcode {other}"),
             }
@@ -2173,9 +2284,10 @@ async fn send_char_update(
 }
 
 /// Advances an in-flight move by one tick. When the tick commits a tile it sends
-/// the 200 `CHARUPDATE` for the new cell and updates the session's drop cell, and
-/// ends the move on arrival. A no-op when no move is active or the tile is not
-/// due yet.
+/// the 200 `CHARUPDATE` for the new cell, updates the session's drop cell and
+/// the registry's copy of the position (so the near fan sees where the avatar
+/// actually stands), and ends the move on arrival. A no-op when no move is
+/// active or the tile is not due yet.
 ///
 /// # Errors
 ///
@@ -2186,6 +2298,8 @@ async fn step_movement(
     live: &mut LiveFrames<'_>,
     login: &mut Option<GameSession>,
     movement: &mut Option<Movement>,
+    registry: &Registry,
+    session_key: SessionKey,
 ) -> Result<(), AnyError> {
     let Some(mv) = movement.as_mut() else {
         return Ok(());
@@ -2207,6 +2321,10 @@ async fn step_movement(
     if let Some(session) = login.as_mut() {
         session.entry_cell = Some(DropLocation { map_id, x, y });
     }
+    // The registry tracks the *stepped* tile, not the destination the cached
+    // row was set to when the order was answered: a head-chat fan has to reach
+    // the cells the avatar is standing in, not the cell it is walking to.
+    registry.update_pos(session_key, x, y);
     Ok(())
 }
 
@@ -2334,6 +2452,343 @@ async fn handle_leave_request(
             .await?;
     }
     send_encoded(stream, outbound, ack, &[]).await
+}
+
+// ---------------------------------------------------------------------------
+// The chat family (T-018 slice 5): 117, 119, 121 and the 112 notice
+// ---------------------------------------------------------------------------
+//
+// `gz_proto::chat` is the wire half; this is the routing half. It re-expresses
+// `DoMsg_GAMEMSG_REQUEST_CHAT` (`Server-System.cpp:722-1192`),
+// `DoMsg_GAMEMSG_REQUEST_SECRETCHAT` (`:527-600`) and
+// `DoMsg_GAMEMSG_REQUEST_HEADCHAT` (`:693-720`) as functions over the
+// registry: no I/O, no `await`, just lookups, encodes and queued frames. The
+// read loop writes them, so a reply to this connection and a broadcast to
+// everybody else travel the same queue in order.
+
+/// Where one 117 request goes.
+///
+/// The order of the tests is the legacy's and is not interchangeable: the text
+/// is checked for a leading `/` *before* the mode is looked at
+/// (`pChatMsg[0] == TEXT('/')` at `:859` runs ahead of the mode chain at
+/// `:1018-1184`), so `/t name` typed with some other mode selected is still a
+/// whisper.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ChatRoute {
+    /// `chatbuffer[0] == NULL` (`:762`): nothing to say, nothing sent.
+    Ignore,
+    /// `/t ` or `/T ` — the 117 whisper, answered with an 118 plus a 120.
+    Whisper,
+    /// `/p ` or `/P ` — a party invite. The legacy answers with a
+    /// `SRVAL_PARTYINVITE_*` server response (`:912-969`) this port does not
+    /// carry, so the request is dropped silently.
+    Party,
+    /// Any other leading `/`: a GM order. `OperateGameMasterOrder` (`:978`) has
+    /// no orders modelled, so it always fails and the client always gets the
+    /// 112 notice.
+    Command,
+    /// `CHATMODE_HEAD` — store the text and fan the 122 out.
+    Head,
+    /// `CHATMODE_HOME` — fan the 118 out over the home village.
+    Home,
+    /// A mode the legacy gates behind something this port does not carry
+    /// (city-hall rank, party, guild, king, news ticket): it returns without
+    /// sending anything (`:1018-1042`, `:1069-1138`), and so does this port.
+    /// The mode rides along for the log line.
+    Dropped(i16),
+    /// The default branch (`:1139`) — and the one place this port deliberately
+    /// differs from it; see [`handle_chat`].
+    Broadcast,
+}
+
+/// The legacy's decision tree for one 117 request, with no side effects.
+fn route_chat(text: &str, mode: i16) -> ChatRoute {
+    let bytes = text.as_bytes();
+    // The empty test comes first and is unconditional (`:762`): a request with
+    // no text at all is not a command, not a mode, just nothing.
+    if bytes.is_empty() {
+        return ChatRoute::Ignore;
+    }
+    if bytes[0] == b'/' {
+        // The legacy reads `pChatMsg[1]` and `pChatMsg[2]` as whole characters,
+        // and a text too short to hold them lands on the zero-filled tail of
+        // `chatbuffer` (`:726`) — so "/t" without a space is *not* a whisper.
+        // The length guard reproduces that instead of indexing absent bytes.
+        if bytes.len() >= 3 {
+            match (bytes[1], bytes[2]) {
+                (b't', b' ') | (b'T', b' ') => return ChatRoute::Whisper,
+                (b'p', b' ') | (b'P', b' ') => return ChatRoute::Party,
+                _ => {}
+            }
+        }
+        return ChatRoute::Command;
+    }
+    match mode {
+        CHATMODE_HEAD => ChatRoute::Head,
+        CHATMODE_HOME => ChatRoute::Home,
+        CHATMODE_TOWN | CHATMODE_VILLAGER | CHATMODE_PARTY | CHATMODE_GUILD | CHATMODE_KING
+        | CHATMODE_NEWSITEM => ChatRoute::Dropped(mode),
+        // Anything else is the default branch — including `CHATMODE_SECRET`
+        // sent *without* a slash, which the legacy's mode chain at `:1018-1138`
+        // does not catch either, so plain text under the whisper mode is
+        // broadcast as ordinary chat there and here.
+        _ => ChatRoute::Broadcast,
+    }
+}
+
+/// The `/t` line split the way the legacy splits it.
+///
+/// `_stscanf(&pChatMsg[1], TEXT("%s %s"), code, szname)` (`:865`) takes the
+/// second whitespace-separated token as the target, then forces
+/// `szname[MAX_PLAYER_NAME - 1] = NULL` (`:867`) — at most 19 bytes. The
+/// message is *not* tokenised: it is recomputed as
+/// `&pChatMsg[1 + 1 + 1 + (_tcslen(szname) + 1)]` (`:999`), a fixed
+/// `4 + target.len()` bytes from the start of the line. So extra whitespace, a
+/// target over the cap, or no message at all all shift or miss exactly as that
+/// arithmetic shifts and misses — which is what [`tail_at`] reproduces.
+///
+/// Returns `(target, message)`.
+fn whisper_parts(text: &str) -> (String, String) {
+    let mut tokens = text.split_whitespace();
+    let _command = tokens.next();
+    let mut target = tokens.next().unwrap_or("").to_owned();
+    cut(&mut target, MAX_PLAYER_NAME - 1);
+    let message = tail_at(text, 4 + target.len()).to_owned();
+    (target, message)
+}
+
+/// `&text[index..]`, rounded down to a character boundary; `""` past the end.
+///
+/// The legacy indexes a `TCHAR` buffer that was zero-filled and only ever
+/// written by `StringCchCopy` (`:726-728`), so a position past the terminator
+/// reads zeros and yields an empty string rather than faulting. Rounding down
+/// instead of panicking is this port's half of the same "it just reads nothing"
+/// behaviour; the legacy would read a truncated multi-byte character here.
+fn tail_at(text: &str, index: usize) -> &str {
+    if index >= text.len() {
+        return "";
+    }
+    let mut start = index;
+    while start > 0 && !text.is_char_boundary(start) {
+        start -= 1;
+    }
+    &text[start..]
+}
+
+/// Handles 117 `REQUEST_CHAT`.
+///
+/// The mode chain, the two slash commands that have a wire representation and
+/// the GM-order fall-through all live in [`route_chat`]; what is decided here
+/// is what each route *sends*.
+///
+/// **Deviation, the owner's instruction:** the default branch fans out to the
+/// whole server instead of the near cells. The legacy sends to the 3×3 cell
+/// neighbourhood (`SendNeighbourMsg(&clMsg, true)`, `:1149`); general chat is
+/// deliberately global here, modern-server style, with every connected player —
+/// the speaker included — receiving it. Whispers, head chat and the home-village
+/// branch keep their legacy reach.
+fn handle_chat(registry: &Registry, session_key: SessionKey, request: ChatRequest) {
+    let Some(sender) = registry.info(session_key) else {
+        // The legacy's `IsValidID(id)` guard (`:730`): a character that has not
+        // been selected is not in the world and cannot speak.
+        return;
+    };
+    match route_chat(&request.text, request.mode) {
+        ChatRoute::Ignore => {}
+        ChatRoute::Whisper => {
+            let (target, message) = whisper_parts(&request.text);
+            match registry.find_by_name(&target) {
+                // `GetIDFromName` returned 0 (`:871`): the name resolves to
+                // nobody, and the client is told so with
+                // `SECRETCHAT_FAIL_INVALIDNAME` — the 120 ctor's `siCharUnique`
+                // defaults to 0 (`MsgType-System.h:1011`).
+                None => {
+                    registry.send_to(
+                        session_key,
+                        GameMsg::ResponseSecretchatresult as u16,
+                        encode_secret_chat_result(SECRETCHAT_FAIL_INVALIDNAME, &target, 0),
+                    );
+                }
+                // The 118 goes to the target with `CHATMODE_SECRET`, level 0
+                // and system text 0 — the ctor's defaults at `:1001` — then a
+                // `SECRETCHAT_SUCCESS` ack carrying the *target's* name and
+                // `siCharUnique` 0 goes to the speaker (`:1008`).
+                Some(target_key) => {
+                    registry.send_to(
+                        target_key,
+                        GameMsg::ResponseChat as u16,
+                        encode_chat_response(
+                            sender.char_unique,
+                            &sender.name,
+                            0,
+                            CHATMODE_SECRET,
+                            0,
+                            &message,
+                        ),
+                    );
+                    registry.send_to(
+                        session_key,
+                        GameMsg::ResponseSecretchatresult as u16,
+                        encode_secret_chat_result(SECRETCHAT_SUCCESS, &target, 0),
+                    );
+                }
+            }
+        }
+        ChatRoute::Party => {}
+        ChatRoute::Command => {
+            // `OperateGameMasterOrder` failed (`:978-984`) — it always does
+            // here, no order is modelled — so the speaker gets the 34-byte
+            // FAIL notice, and only the speaker.
+            registry.send_to(
+                session_key,
+                GameMsg::ResponseNotice as u16,
+                encode_notice("FAIL", "Master Order Error", true),
+            );
+        }
+        ChatRoute::Head => {
+            // `SetHeadChat(true, pChatMsg)` (`:1050`), whose `MStrCpy` caps the
+            // stored text at 127 bytes (`char.cpp:6628`), then the 122 fan to
+            // the near cells *including* the speaker
+            // (`SendNeighbourMsg(&clMsg, true)`, `:1055`).
+            //
+            // The legacy's gate at `:1047` is "not in a personal shop"; that
+            // switch is unmodelled and treated as always off, on both this side
+            // and 121's.
+            let mut text = request.text.clone();
+            cut(&mut text, MAX_HEAD_CHAT_TEXT_SIZE - 1);
+            registry.set_head_chat(session_key, Some(text.clone()));
+            registry.broadcast_near(
+                &sender,
+                GameMsg::ResponseHeadchat as u16,
+                encode_head_chat_response(sender.char_unique, &text),
+            );
+        }
+        ChatRoute::Home => {
+            // `if (pclchar->pclCI->clBI.siHomeVillage)` (`:1061`) then
+            // `SendAllPersonHomeMsg(..., siHomeVillage)` (`:1066`), which
+            // reaches every character of that home village *including* the
+            // speaker (`CharManager.cpp:751`).
+            if sender.school_id != 0 {
+                registry.broadcast_school(
+                    sender.school_id,
+                    GameMsg::ResponseChat as u16,
+                    encode_chat_response(
+                        sender.char_unique,
+                        &sender.name,
+                        0,
+                        request.mode,
+                        0,
+                        &request.text,
+                    ),
+                );
+            }
+        }
+        ChatRoute::Dropped(mode) => {
+            println!(
+                "game: {}: chat mode {mode} dropped (the legacy gates it behind a rank, \
+                 party, guild, king or ticket this port does not model)",
+                sender.name
+            );
+        }
+        ChatRoute::Broadcast => {
+            // The default branch: the head chat is cleared
+            // (`SetHeadChat(false, NULL)`, `:1142`) and the message goes out
+            // with the request's `siSystemTxt` echoed and level 0 (`:1144`).
+            // The summon-emote side effect at `:1151-1181` is a documented
+            // skip; summons are not modelled.
+            registry.set_head_chat(session_key, None);
+            registry.broadcast_all(
+                GameMsg::ResponseChat as u16,
+                encode_chat_response(
+                    sender.char_unique,
+                    &sender.name,
+                    0,
+                    request.mode,
+                    request.system_txt,
+                    &request.text,
+                ),
+            );
+        }
+    }
+}
+
+/// Handles 119 `REQUEST_SECRETCHAT` (`Server-System.cpp:527-600`).
+///
+/// Two lookups, deliberately independent: the target is resolved *by
+/// `siCharUnique`* (`:551`) and *again by `szCharName`* (`:561`), and the
+/// legacy never compares them — a message carrying Alice's id and Bob's name is
+/// delivered to **Alice**, as long as both names exist. That quirk is locked
+/// down by a test; nothing here "fixes" it.
+///
+/// A miss on either lookup answers `SECRETCHAT_FAIL_NOTUSER` with the literal
+/// name `"NULL"` and the request's `siCharUnique` echoed (`:554`, `:564`). And
+/// there is **no** success ack on this path: the `SECRETCHAT_SUCCESS` 120 is
+/// sent only by the 117 `/t` branch (`:1008`).
+fn handle_secret_chat(registry: &Registry, session_key: SessionKey, request: SecretChatRequest) {
+    let Some(sender) = registry.info(session_key) else {
+        return;
+    };
+    let not_user = encode_secret_chat_result(
+        SECRETCHAT_FAIL_NOTUSER,
+        "NULL",
+        i32::from(request.char_unique),
+    );
+    let target = match registry.find_by_charunique(request.char_unique) {
+        Some(target) => target,
+        None => {
+            registry.send_to(
+                session_key,
+                GameMsg::ResponseSecretchatresult as u16,
+                not_user,
+            );
+            return;
+        }
+    };
+    if registry.find_by_name(&request.name).is_none() {
+        registry.send_to(
+            session_key,
+            GameMsg::ResponseSecretchatresult as u16,
+            not_user,
+        );
+        return;
+    }
+    // The delivery goes to the *charunique* target, and it is the only path
+    // that fills in 118's `siLevel`: `level = pclCM->CR[id]->pclCI->clIP.
+    // GetLevel()` (`:591`), the sender's level.
+    registry.send_to(
+        target,
+        GameMsg::ResponseChat as u16,
+        encode_chat_response(
+            sender.char_unique,
+            &sender.name,
+            sender.level,
+            CHATMODE_SECRET,
+            0,
+            &request.text,
+        ),
+    );
+}
+
+/// Handles 121 `REQUEST_HEADCHAT` (`Server-System.cpp:693-720`).
+///
+/// The request names the **subject**, not the asker, and the reply goes to
+/// whoever asked: it carries the subject's stored text and the subject's
+/// `siCharUnique`. Nothing is sent when the subject is not online
+/// (`GetIDFromCharUnique` fails, `:708`) or when its head-chat switch is off
+/// (`:712`), which is `None` in the registry. The personal-shop gate at `:713`
+/// is treated as always open, exactly as 117's is.
+fn handle_head_chat_request(registry: &Registry, session_key: SessionKey, subject: i16) {
+    let Some(subject_key) = registry.find_by_charunique(subject) else {
+        return;
+    };
+    let Some(text) = registry.head_chat(subject_key) else {
+        return;
+    };
+    registry.send_to(
+        session_key,
+        GameMsg::ResponseHeadchat as u16,
+        encode_head_chat_response(subject, &text),
+    );
 }
 
 /// The captured frames this server owns rather than replays.
@@ -3806,5 +4261,606 @@ mod tests {
         assert_eq!(GameMsg::ResponseHopetoquit as u16, 108);
         assert_eq!(GameMsg::RequestHopetofront as u16, 109);
         assert_eq!(GameMsg::ResponseHopetofront as u16, 110);
+    }
+
+    // ------------------------------------------------------------------ chat
+    //
+    // T-018 slice 5: the routing half of the chat family. The wire half is
+    // `gz_proto::chat`'s own tests; these pin the opcodes, the route order and
+    // the frames each handler actually queues.
+
+    /// A character with the defaults a chat test cares about.
+    fn chat_info(char_unique: i16, name: &str, x: i32, y: i32) -> SessionInfo {
+        SessionInfo {
+            char_unique,
+            name: name.to_owned(),
+            level: 34,
+            map_id: 7,
+            x,
+            y,
+            school_id: 3,
+        }
+    }
+
+    /// Registers a connection and hands back its key and inbox.
+    fn chat_join(
+        registry: &Registry,
+        info: SessionInfo,
+    ) -> (SessionKey, tokio::sync::mpsc::UnboundedReceiver<Outbound>) {
+        let key = Registry::next_key();
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        registry.register(key, tx, info);
+        (key, rx)
+    }
+
+    /// Nothing queued, as distinct from "the sender is gone".
+    fn assert_chat_silent(rx: &mut tokio::sync::mpsc::UnboundedReceiver<Outbound>, what: &str) {
+        assert!(
+            matches!(
+                rx.try_recv(),
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+            ),
+            "{what}: expected no frame"
+        );
+    }
+
+    /// The chat family's opcodes are the legacy's, and the dispatcher's
+    /// `c == … as u16` guards depend on them: 117 `REQUEST_CHAT`, 118
+    /// `RESPONSE_CHAT`, 119 `REQUEST_SECRETCHAT`, 120
+    /// `RESPONSE_SECRETCHATRESULT`, 121 `REQUEST_HEADCHAT`, 122
+    /// `RESPONSE_HEADCHAT`, 112 `RESPONSE_NOTICE`
+    /// (`MsgType-System.h:961-1160`, `MsgType.h:3256`).
+    #[test]
+    fn chat_opcodes_are_the_legacy_pair_plus_the_notice() {
+        assert_eq!(GameMsg::RequestChat as u16, 117);
+        assert_eq!(GameMsg::ResponseChat as u16, 118);
+        assert_eq!(GameMsg::RequestSecretchat as u16, 119);
+        assert_eq!(GameMsg::ResponseSecretchatresult as u16, 120);
+        assert_eq!(GameMsg::RequestHeadchat as u16, 121);
+        assert_eq!(GameMsg::ResponseHeadchat as u16, 122);
+        assert_eq!(GameMsg::ResponseNotice as u16, 112);
+    }
+
+    /// The route decision reproduces the legacy's order, which is not
+    /// interchangeable: the leading `/` is tested *before* the mode
+    /// (`pChatMsg[0] == TEXT('/')` at `Server-System.cpp:859` runs ahead of the
+    /// mode chain at `:1018-1184`), a text too short to hold the command's two
+    /// characters is not a command at all, and the modes the legacy gates are
+    /// dropped rather than broadcast.
+    #[test]
+    fn route_chat_tests_the_slash_before_the_mode_and_drops_the_gated_modes() {
+        use gz_proto::chat::{
+            CHATMODE_ASK, CHATMODE_GUILD, CHATMODE_HEAD, CHATMODE_HOME, CHATMODE_KING,
+            CHATMODE_NEWSITEM, CHATMODE_NORMAL, CHATMODE_PARTY, CHATMODE_SECRET, CHATMODE_TOWN,
+            CHATMODE_VILLAGER,
+        };
+
+        // Empty text is nothing, whatever the mode.
+        assert_eq!(route_chat("", CHATMODE_NORMAL), ChatRoute::Ignore);
+        assert_eq!(route_chat("", CHATMODE_HEAD), ChatRoute::Ignore);
+
+        // The slash wins over the mode: `/t ` under the head-chat mode is still
+        // a whisper.
+        assert_eq!(route_chat("/t Bob hi", CHATMODE_HEAD), ChatRoute::Whisper);
+        assert_eq!(route_chat("/T Bob hi", CHATMODE_NORMAL), ChatRoute::Whisper);
+        assert_eq!(route_chat("/p Bob", CHATMODE_NORMAL), ChatRoute::Party);
+        assert_eq!(route_chat("/P Bob", CHATMODE_NORMAL), ChatRoute::Party);
+
+        // "/t" without the space reads the zero-filled tail of the legacy's
+        // `chatbuffer` (`:726`), so it is not a whisper — and neither is a
+        // single "/".
+        assert_eq!(route_chat("/t", CHATMODE_NORMAL), ChatRoute::Command);
+        assert_eq!(route_chat("/", CHATMODE_NORMAL), ChatRoute::Command);
+        assert_eq!(route_chat("/x", CHATMODE_NORMAL), ChatRoute::Command);
+
+        // The gated modes drop, whatever the text.
+        for mode in [
+            CHATMODE_TOWN,
+            CHATMODE_VILLAGER,
+            CHATMODE_PARTY,
+            CHATMODE_GUILD,
+            CHATMODE_KING,
+            CHATMODE_NEWSITEM,
+        ] {
+            assert_eq!(route_chat("hello", mode), ChatRoute::Dropped(mode));
+        }
+
+        // Head and home route by mode.
+        assert_eq!(route_chat("hello", CHATMODE_HEAD), ChatRoute::Head);
+        assert_eq!(route_chat("hello", CHATMODE_HOME), ChatRoute::Home);
+
+        // `CHATMODE_SECRET` *without* a slash falls through the legacy's mode
+        // chain (`:1018-1138`) exactly as it falls through here: plain text
+        // under the whisper mode is ordinary chat.
+        assert_eq!(route_chat("hello", CHATMODE_SECRET), ChatRoute::Broadcast);
+        assert_eq!(route_chat("hello", CHATMODE_ASK), ChatRoute::Broadcast);
+        assert_eq!(route_chat("hello", CHATMODE_NORMAL), ChatRoute::Broadcast);
+    }
+
+    /// The `/t` split reproduces the legacy's `_stscanf` + fixed-offset
+    /// arithmetic (`:865`, `:999`): the target is the second whitespace token
+    /// capped at 19 bytes, and the message starts `4 + target.len()` bytes into
+    /// the line — so extra whitespace, an over-cap target and no message at all
+    /// all shift or miss exactly as that arithmetic does.
+    #[test]
+    fn whisper_parts_reproduces_the_legacy_offset_arithmetic() {
+        // "/t Target" — the message starts past the end of the line.
+        let (target, message) = whisper_parts("/t Target");
+        assert_eq!(target, "Target");
+        assert_eq!(message, "", "the fixed offset runs off the end");
+
+        // The message begins right after the target and one space, wherever the
+        // whitespace actually was.
+        let (target, message) = whisper_parts("/t  Bob   hello there");
+        assert_eq!(target, "Bob");
+        assert_eq!(message, "   hello there", "offset 4 + len, not a tokeniser");
+
+        // A target over the cap is cut, and the offset follows the *cut* name.
+        let long = "abcdefghijklmnopqrs"; // 19 bytes, the cap
+        let (target, message) = whisper_parts(&format!("/t {long} hi"));
+        assert_eq!(target, long);
+        assert_eq!(message, "hi");
+
+        let over = format!("/t {}X hi", "a".repeat(30));
+        let (target, message) = whisper_parts(&over);
+        assert_eq!(target.len(), 19, "the cap");
+        assert_eq!(message, "aaaaaaaaaaX hi", "the offset follows the cut name");
+
+        // No target at all: the legacy's `szname` stays empty and the message
+        // starts at byte 4.
+        let (target, message) = whisper_parts("/t ");
+        assert_eq!(target, "");
+        assert_eq!(message, "", "nothing after the command");
+
+        // A multi-byte target is cut on a character boundary, and the offset
+        // still follows the cut length.
+        let (target, message) = whisper_parts("/t éééééééééé hi");
+        assert_eq!(target, "é".repeat(9), "19 bytes of whole characters");
+        assert_eq!(message, "é hi");
+    }
+
+    /// General chat is server-wide (the owner's instruction): every connected
+    /// player — the speaker included — gets the 118, with the request's
+    /// `siSystemTxt` echoed and level 0 (`:1144`).
+    #[test]
+    fn general_chat_reaches_the_whole_server_including_the_speaker() {
+        use gz_proto::chat::CHATMODE_NORMAL;
+
+        let registry = Registry::new();
+        let (alice, mut ra) = chat_join(&registry, chat_info(11, "Alice", 0, 0));
+        let (_bob, mut rb) = chat_join(&registry, chat_info(12, "Bob", 500, 500));
+        let (_carol, mut rc) = chat_join(&registry, chat_info(13, "Carol", 0, 0));
+
+        handle_chat(
+            &registry,
+            alice,
+            ChatRequest {
+                mode: CHATMODE_NORMAL,
+                system_txt: 7,
+                text: "hello world".to_owned(),
+            },
+        );
+
+        for (rx, who) in [
+            (&mut ra, "the speaker"),
+            (&mut rb, "Bob"),
+            (&mut rc, "Carol"),
+        ] {
+            let frame = rx
+                .try_recv()
+                .unwrap_or_else(|_| panic!("{who} gets the frame"));
+            assert_eq!(frame.cmd, GameMsg::ResponseChat as u16);
+            let body = &frame.payload;
+            assert_eq!(i16::from_le_bytes([body[2], body[3]]), 11, "the sender");
+            assert_eq!(i16::from_le_bytes([body[6], body[7]]), CHATMODE_NORMAL);
+            assert_eq!(
+                i32::from_le_bytes(body[12..16].try_into().unwrap()),
+                7,
+                "siSystemTxt echoed"
+            );
+            assert_eq!(
+                i32::from_le_bytes(body[16..20].try_into().unwrap()),
+                0,
+                "level 0"
+            );
+            assert_eq!(&body[20..25], b"Alice");
+            assert_eq!(&body[25..], b"hello world\0");
+        }
+    }
+
+    /// A `/t` whisper delivers the 118 to the target with `CHATMODE_SECRET`,
+    /// level 0 and system text 0, then a `SECRETCHAT_SUCCESS` 120 carrying the
+    /// target's name to the speaker (`:1001-1008`).
+    #[test]
+    fn a_whisper_reaches_the_target_and_acks_the_speaker() {
+        let registry = Registry::new();
+        let (alice, mut ra) = chat_join(&registry, chat_info(11, "Alice", 0, 0));
+        let (_bob, mut rb) = chat_join(&registry, chat_info(12, "Bob", 0, 0));
+
+        handle_chat(
+            &registry,
+            alice,
+            ChatRequest {
+                mode: CHATMODE_SECRET,
+                system_txt: 0,
+                text: "/t Bob secret message".to_owned(),
+            },
+        );
+
+        // The target gets the 118.
+        let frame = rb.try_recv().expect("Bob gets the whisper");
+        assert_eq!(frame.cmd, GameMsg::ResponseChat as u16);
+        let body = &frame.payload;
+        assert_eq!(i16::from_le_bytes([body[2], body[3]]), 11, "the sender");
+        assert_eq!(i16::from_le_bytes([body[6], body[7]]), CHATMODE_SECRET);
+        assert_eq!(
+            i32::from_le_bytes(body[16..20].try_into().unwrap()),
+            0,
+            "level 0"
+        );
+        assert_eq!(&body[20..25], b"Alice");
+        assert_eq!(&body[25..], b"secret message\0");
+
+        // The speaker gets the 120 ack.
+        let frame = ra.try_recv().expect("Alice gets the ack");
+        assert_eq!(frame.cmd, GameMsg::ResponseSecretchatresult as u16);
+        assert_eq!(
+            i16::from_le_bytes([frame.payload[0], frame.payload[1]]),
+            SECRETCHAT_SUCCESS
+        );
+        assert_eq!(&frame.payload[2..5], b"Bob");
+        assert_eq!(
+            i32::from_le_bytes(frame.payload[24..28].try_into().unwrap()),
+            0
+        );
+    }
+
+    /// A `/t` to a name that is not online answers `SECRETCHAT_FAIL_INVALIDNAME`
+    /// with the requested name and `siCharUnique` 0 (`:871`).
+    #[test]
+    fn a_whisper_to_an_unknown_name_fails_with_invalidname() {
+        let registry = Registry::new();
+        let (alice, mut ra) = chat_join(&registry, chat_info(11, "Alice", 0, 0));
+
+        handle_chat(
+            &registry,
+            alice,
+            ChatRequest {
+                mode: CHATMODE_SECRET,
+                system_txt: 0,
+                text: "/t Nobody hello".to_owned(),
+            },
+        );
+
+        let frame = ra.try_recv().expect("Alice gets the failure");
+        assert_eq!(frame.cmd, GameMsg::ResponseSecretchatresult as u16);
+        assert_eq!(
+            i16::from_le_bytes([frame.payload[0], frame.payload[1]]),
+            SECRETCHAT_FAIL_INVALIDNAME
+        );
+        assert_eq!(&frame.payload[2..8], b"Nobody");
+        assert_eq!(
+            i32::from_le_bytes(frame.payload[24..28].try_into().unwrap()),
+            0
+        );
+    }
+
+    /// `/p` is a party invite, and the legacy's `SRVAL_PARTYINVITE_*` responses
+    /// are not modelled — so the request is dropped silently (`:912-969`).
+    #[test]
+    fn a_party_invite_is_dropped_silently() {
+        let registry = Registry::new();
+        let (alice, mut ra) = chat_join(&registry, chat_info(11, "Alice", 0, 0));
+        let (_bob, mut rb) = chat_join(&registry, chat_info(12, "Bob", 0, 0));
+
+        handle_chat(
+            &registry,
+            alice,
+            ChatRequest {
+                mode: CHATMODE_SECRET,
+                system_txt: 0,
+                text: "/p Bob".to_owned(),
+            },
+        );
+
+        assert_chat_silent(&mut ra, "the speaker");
+        assert_chat_silent(&mut rb, "Bob");
+    }
+
+    /// Any other leading `/` is a GM order, and `OperateGameMasterOrder` always
+    /// fails here — so the speaker gets the 34-byte FAIL notice (`:978-984`).
+    #[test]
+    fn a_gm_order_fails_with_the_34_byte_notice() {
+        let registry = Registry::new();
+        let (alice, mut ra) = chat_join(&registry, chat_info(11, "Alice", 0, 0));
+        let (_bob, mut rb) = chat_join(&registry, chat_info(12, "Bob", 0, 0));
+
+        handle_chat(
+            &registry,
+            alice,
+            ChatRequest {
+                mode: CHATMODE_SECRET,
+                system_txt: 0,
+                text: "/w something".to_owned(),
+            },
+        );
+
+        let frame = ra.try_recv().expect("Alice gets the notice");
+        assert_eq!(frame.cmd, GameMsg::ResponseNotice as u16);
+        assert_eq!(frame.payload.len(), 34, "the FAIL notice is 34 bytes");
+        assert_eq!(&frame.payload[10..14], b"FAIL");
+        assert_eq!(&frame.payload[14..32], b"Master Order Error");
+        assert_chat_silent(&mut rb, "Bob");
+    }
+
+    /// Head chat stores the text (capped at 127) and fans the 122 out over the
+    /// near cells including the speaker (`:1050-1055`).
+    #[test]
+    fn head_chat_stores_and_fans_to_the_near_cells() {
+        let registry = Registry::new();
+        let (alice, mut ra) = chat_join(&registry, chat_info(11, "Alice", 0, 0));
+        let (_bob, mut rb) = chat_join(&registry, chat_info(12, "Bob", 5, 5));
+        let (_carol, mut rc) = chat_join(&registry, chat_info(13, "Carol", 500, 500));
+
+        handle_chat(
+            &registry,
+            alice,
+            ChatRequest {
+                mode: CHATMODE_HEAD,
+                system_txt: 0,
+                text: "top of the world".to_owned(),
+            },
+        );
+
+        // The text is stored for 121.
+        assert_eq!(
+            registry.head_chat(alice).as_deref(),
+            Some("top of the world")
+        );
+
+        // Alice and Bob are in the same cell; Carol is not.
+        for (rx, who) in [(&mut ra, "Alice"), (&mut rb, "Bob")] {
+            let frame = rx
+                .try_recv()
+                .unwrap_or_else(|_| panic!("{who} gets the 122"));
+            assert_eq!(frame.cmd, GameMsg::ResponseHeadchat as u16);
+            assert_eq!(i16::from_le_bytes([frame.payload[0], frame.payload[1]]), 11);
+            assert_eq!(&frame.payload[4..], b"top of the world\0\0");
+        }
+        assert_chat_silent(&mut rc, "Carol");
+    }
+
+    /// 121 asks for a *subject's* stored head chat and replies to the asker with
+    /// the subject's text — or nothing if the subject is offline or the switch
+    /// is off (`:708-712`).
+    #[test]
+    fn head_chat_request_replies_with_the_subjects_stored_text() {
+        let registry = Registry::new();
+        let (alice, mut ra) = chat_join(&registry, chat_info(11, "Alice", 0, 0));
+        let (bob, mut rb) = chat_join(&registry, chat_info(12, "Bob", 0, 0));
+
+        // Alice sets her head chat; both get the 122 fan.
+        handle_chat(
+            &registry,
+            alice,
+            ChatRequest {
+                mode: CHATMODE_HEAD,
+                system_txt: 0,
+                text: "look at me".to_owned(),
+            },
+        );
+        let _ = ra.try_recv().expect("Alice gets her own 122");
+        let _ = rb.try_recv().expect("Bob gets Alice's 122");
+
+        // Bob asks for Alice's head chat.
+        handle_head_chat_request(&registry, bob, 11);
+
+        let frame = rb.try_recv().expect("Bob gets the 121 reply");
+        assert_eq!(frame.cmd, GameMsg::ResponseHeadchat as u16);
+        assert_eq!(
+            i16::from_le_bytes([frame.payload[0], frame.payload[1]]),
+            11,
+            "the subject"
+        );
+        assert_eq!(&frame.payload[4..], b"look at me\0\0");
+        assert_chat_silent(&mut ra, "Alice");
+    }
+
+    /// 121 is silent when the subject's switch is off or the subject is not
+    /// online (`:708-712`).
+    #[test]
+    fn head_chat_request_is_silent_when_the_subject_is_offline_or_off() {
+        use gz_proto::chat::CHATMODE_NORMAL;
+
+        let registry = Registry::new();
+        let (alice, mut ra) = chat_join(&registry, chat_info(11, "Alice", 0, 0));
+        let (bob, mut rb) = chat_join(&registry, chat_info(12, "Bob", 0, 0));
+
+        // Bob asks for Alice's head chat before she sets it: the switch is off.
+        handle_head_chat_request(&registry, bob, 11);
+        assert_chat_silent(&mut rb, "switch off");
+
+        // Alice sets it, then clears it with a normal chat.
+        handle_chat(
+            &registry,
+            alice,
+            ChatRequest {
+                mode: CHATMODE_HEAD,
+                system_txt: 0,
+                text: "on".to_owned(),
+            },
+        );
+        let _ = ra.try_recv();
+        let _ = rb.try_recv();
+        handle_chat(
+            &registry,
+            alice,
+            ChatRequest {
+                mode: CHATMODE_NORMAL,
+                system_txt: 0,
+                text: "off".to_owned(),
+            },
+        );
+        let _ = ra.try_recv();
+        let _ = rb.try_recv();
+
+        // The switch is off again.
+        handle_head_chat_request(&registry, bob, 11);
+        assert_chat_silent(&mut rb, "switch off again");
+
+        // An unknown subject is silent too.
+        handle_head_chat_request(&registry, bob, 999);
+        assert_chat_silent(&mut rb, "unknown subject");
+    }
+
+    /// The HOME branch fans the 118 out over the speaker's home village,
+    /// speaker included (`:1061-1066`).
+    #[test]
+    fn home_chat_reaches_the_speaker_school() {
+        let registry = Registry::new();
+        let (alice, mut ra) = chat_join(&registry, chat_info(11, "Alice", 0, 0));
+        let (_bob, mut rb) = {
+            let mut info = chat_info(12, "Bob", 0, 0);
+            info.school_id = 4;
+            chat_join(&registry, info)
+        };
+        let (_carol, mut rc) = chat_join(&registry, chat_info(13, "Carol", 0, 0));
+
+        handle_chat(
+            &registry,
+            alice,
+            ChatRequest {
+                mode: CHATMODE_HOME,
+                system_txt: 0,
+                text: "home sweet home".to_owned(),
+            },
+        );
+
+        for (rx, who) in [(&mut ra, "Alice"), (&mut rc, "Carol")] {
+            let frame = rx
+                .try_recv()
+                .unwrap_or_else(|_| panic!("{who} gets the 118"));
+            assert_eq!(frame.cmd, GameMsg::ResponseChat as u16);
+            assert_eq!(
+                i16::from_le_bytes([frame.payload[6], frame.payload[7]]),
+                CHATMODE_HOME
+            );
+        }
+        assert_chat_silent(&mut rb, "Bob is in another school");
+    }
+
+    /// Empty text is nothing to say, nothing sent (`:762`).
+    #[test]
+    fn empty_chat_text_is_silent() {
+        use gz_proto::chat::CHATMODE_NORMAL;
+
+        let registry = Registry::new();
+        let (alice, mut ra) = chat_join(&registry, chat_info(11, "Alice", 0, 0));
+        let (_bob, mut rb) = chat_join(&registry, chat_info(12, "Bob", 0, 0));
+
+        handle_chat(
+            &registry,
+            alice,
+            ChatRequest {
+                mode: CHATMODE_NORMAL,
+                system_txt: 0,
+                text: String::new(),
+            },
+        );
+
+        assert_chat_silent(&mut ra, "the speaker");
+        assert_chat_silent(&mut rb, "Bob");
+    }
+
+    /// 119 resolves the target by `siCharUnique` *and* by name, independently,
+    /// and delivers to the charunique target with the sender's level (`:551-593`)
+    /// — the quirk where a message carrying Alice's id and Bob's name reaches
+    /// Alice is locked down here.
+    #[test]
+    fn secret_chat_delivers_to_the_charunique_target_with_the_senders_level() {
+        let registry = Registry::new();
+        let (alice, mut ra) = chat_join(&registry, chat_info(11, "Alice", 0, 0));
+        let (_bob, mut rb) = chat_join(&registry, chat_info(12, "Bob", 0, 0));
+
+        // Alice sends to char_unique 12 (Bob) but names "Alice" — the legacy
+        // delivers to the charunique target (Bob) because it never compares.
+        handle_secret_chat(
+            &registry,
+            alice,
+            SecretChatRequest {
+                char_unique: 12,
+                name: "Alice".to_owned(),
+                text: "for Bob".to_owned(),
+            },
+        );
+
+        // Bob gets the 118 with Alice's level.
+        let frame = rb.try_recv().expect("Bob gets the 119 delivery");
+        assert_eq!(frame.cmd, GameMsg::ResponseChat as u16);
+        let body = &frame.payload;
+        assert_eq!(i16::from_le_bytes([body[2], body[3]]), 11, "the sender");
+        assert_eq!(i16::from_le_bytes([body[6], body[7]]), CHATMODE_SECRET);
+        assert_eq!(
+            i32::from_le_bytes(body[16..20].try_into().unwrap()),
+            34,
+            "the sender's level"
+        );
+        assert_eq!(&body[20..25], b"Alice");
+        assert_eq!(&body[25..], b"for Bob\0");
+
+        // No success ack on this path.
+        assert_chat_silent(&mut ra, "Alice");
+    }
+
+    /// A 119 with an unknown char_unique or name answers `SECRETCHAT_FAIL_NOTUSER`
+    /// with the literal name `"NULL"` and the request's `siCharUnique` echoed
+    /// (`:554`, `:564`).
+    #[test]
+    fn secret_chat_failure_names_null_and_echoes_the_request_id() {
+        let registry = Registry::new();
+        let (alice, mut ra) = chat_join(&registry, chat_info(11, "Alice", 0, 0));
+
+        // Unknown char_unique.
+        handle_secret_chat(
+            &registry,
+            alice,
+            SecretChatRequest {
+                char_unique: 999,
+                name: "Bob".to_owned(),
+                text: "hello".to_owned(),
+            },
+        );
+        let frame = ra.try_recv().expect("Alice gets the failure");
+        assert_eq!(frame.cmd, GameMsg::ResponseSecretchatresult as u16);
+        assert_eq!(
+            i16::from_le_bytes([frame.payload[0], frame.payload[1]]),
+            SECRETCHAT_FAIL_NOTUSER
+        );
+        assert_eq!(&frame.payload[2..6], b"NULL");
+        assert_eq!(
+            i32::from_le_bytes(frame.payload[24..28].try_into().unwrap()),
+            999
+        );
+
+        // Known char_unique but unknown name.
+        handle_secret_chat(
+            &registry,
+            alice,
+            SecretChatRequest {
+                char_unique: 11,
+                name: "Nobody".to_owned(),
+                text: "hello".to_owned(),
+            },
+        );
+        let frame = ra.try_recv().expect("Alice gets the second failure");
+        assert_eq!(
+            i16::from_le_bytes([frame.payload[0], frame.payload[1]]),
+            SECRETCHAT_FAIL_NOTUSER
+        );
+        assert_eq!(&frame.payload[2..6], b"NULL");
+        assert_eq!(
+            i32::from_le_bytes(frame.payload[24..28].try_into().unwrap()),
+            11
+        );
     }
 }
