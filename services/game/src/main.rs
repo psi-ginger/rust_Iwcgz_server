@@ -140,6 +140,38 @@ fn now_tick() -> Tick {
     ORIGIN.get_or_init(Instant::now).elapsed().as_millis() as u64
 }
 
+/// Elapsed-since-process-start stamp, `+mm:ss.mmm`, prefixed to every log line.
+///
+/// Added for the live run's one open question: where the ~20 s between
+/// `REQUEST_SELECTCHAR` and the world appearing goes (handoff 2026-10-08).
+/// Two adjacent stamps 20 s apart are time the *server* spent, while a stamp
+/// followed 20 s later by the next *inbound* frame is time the *client*
+/// spent — the distinction the unstamped log could not make. It reads
+/// [`now_tick`]'s clock, so stamps also agree with the session ticks.
+fn log_stamp() -> String {
+    let ms = now_tick();
+    let secs = ms / 1000;
+    format!("+{:>3}:{:02}.{:03}", secs / 60, secs % 60, ms % 1000)
+}
+
+/// Wraps one log call in [`log_stamp`], in place of a bare `println!`.
+///
+/// The bodies name the `std::` forms directly, and this block was inserted
+/// after the mechanical `println!` → `logln!` rewrite — so the rewrite can
+/// never reach inside these macros and recurse.
+macro_rules! logln {
+    ($($arg:tt)*) => {
+        std::println!("[{}] {}", log_stamp(), std::format_args!($($arg)*))
+    };
+}
+
+/// [`logln`]'s stderr twin, in place of the bare `eprintln!` the error paths used.
+macro_rules! logln_err {
+    ($($arg:tt)*) => {
+        std::eprintln!("[{}] {}", log_stamp(), std::format_args!($($arg)*))
+    };
+}
+
 #[tokio::main]
 async fn main() -> Result<(), AnyError> {
     let database_url =
@@ -167,14 +199,14 @@ async fn serve(cfg: &GameConfig) -> Result<(), AnyError> {
     // that addresses players other than the one asking.
     let registry = Arc::new(Registry::new());
     let listener = TcpListener::bind(&cfg.listen).await?;
-    println!("game: listening on {}", cfg.listen);
-    println!(
+    logln!("game: listening on {}", cfg.listen);
+    logln!(
         "game: session timeouts: handshake {}ms, connect {}ms, close throttle {}ms",
         cfg.timeouts.handshake.as_millis(),
         cfg.timeouts.connect.as_millis(),
         cfg.timeouts.close_throttle.as_millis()
     );
-    println!(
+    logln!(
         "game: link key from configuration; prologue={:?} char_unique={}",
         cfg.prologue,
         match cfg.prologue {
@@ -183,7 +215,7 @@ async fn serve(cfg: &GameConfig) -> Result<(), AnyError> {
         }
     );
     if cfg.prologue == Prologue::Capture {
-        println!(
+        logln!(
             "game: WARNING replaying the captured world prologue; T-017 replaces this \
              with payload-driven frames (set GAME_PROLOGUE=live to select the \
              locally-generated path)"
@@ -202,7 +234,7 @@ async fn serve(cfg: &GameConfig) -> Result<(), AnyError> {
             if let Err(e) =
                 handle_client(stream, &peer, &cfg, accounts, characters, items, registry).await
             {
-                eprintln!("game: {peer}: {e}");
+                logln_err!("game: {peer}: {e}");
             }
         });
     }
@@ -227,7 +259,7 @@ async fn run_command(command: &str, database_url: &str, args: Vec<String>) -> Re
                 .await?
                 .ok_or_else(|| format!("no live character named {name:?}"))?;
             let report = import_capture::run(&items, character.character_id).await?;
-            println!(
+            logln!(
                 "game: imported {} item(s) into {:?} (character_id {}); \
                  {} empty slot(s), {} with only a unique and a count",
                 report.occupied,
@@ -326,7 +358,7 @@ async fn handle_client(
         .encode(),
     )
     .await?;
-    println!("game: {peer}: charunique={char_unique} -> ({key1:#04x}, {key2:#04x})");
+    logln!("game: {peer}: charunique={char_unique} -> ({key1:#04x}, {key2:#04x})");
 
     // Inbound frames use the negotiated session cipher, keyed by the bytes just
     // sent -- the exact pairing at char.cpp:5177-5219.
@@ -416,7 +448,7 @@ async fn handle_client(
                 }
                 let now = now_tick();
                 if let Some(reason) = session_state.handshake_expired(now) {
-                    eprintln!(
+                    logln_err!(
                         "game: {peer}: {} ms with no inbound frame; disconnecting ({reason:?})",
                         cfg.timeouts.handshake.as_millis()
                     );
@@ -427,7 +459,7 @@ async fn handle_client(
             LoopTick::Read(read) => read?,
         };
         if n == 0 {
-            println!(
+            logln!(
                 "game: {peer}: disconnected after {} ms",
                 now_tick().saturating_sub(session_state.since())
             );
@@ -436,7 +468,7 @@ async fn handle_client(
         }
         parser.feed(&buf[..n]).map_err(|e| {
             let reason = session_state.reject(Rejection::Framing(e), now_tick());
-            eprintln!("game: {peer}: framing rejection {reason:?}; disconnecting");
+            logln_err!("game: {peer}: framing rejection {reason:?}; disconnecting");
             AnyError::from(e)
         })?;
 
@@ -449,7 +481,7 @@ async fn handle_client(
                 Ok(Some(frame)) => frame,
                 Err(e) => {
                     let reason = session_state.reject(Rejection::Framing(e), now_tick());
-                    eprintln!("game: {peer}: framing rejection {reason:?}; disconnecting");
+                    logln_err!("game: {peer}: framing rejection {reason:?}; disconnecting");
                     return Ok(());
                 }
             };
@@ -464,7 +496,7 @@ async fn handle_client(
                 Ok(integrity) => integrity,
                 Err(e) => {
                     let reason = session_state.reject(Rejection::Integrity, now_tick());
-                    eprintln!("game: {peer}: cipher error {e} ({reason:?}); disconnecting");
+                    logln_err!("game: {peer}: cipher error {e} ({reason:?}); disconnecting");
                     return Ok(());
                 }
             };
@@ -475,7 +507,7 @@ async fn handle_client(
                 // conclusion -- ITZNetIOCP.cpp:145-150 turns a FALSE from the
                 // recv guard into SESSION_STATE_DISCONNECTED.
                 let reason = session_state.reject(Rejection::Integrity, now_tick());
-                eprintln!(
+                logln_err!(
                     "game: {peer}: cipher desync at opcode {:#06x} ({reason:?}); disconnecting",
                     frame.cmd()
                 );
@@ -490,7 +522,7 @@ async fn handle_client(
                     // recovery to copy: NLZF::Decompress failing means the frame
                     // was never decodable.
                     let reason = session_state.reject(Rejection::Integrity, now_tick());
-                    eprintln!(
+                    logln_err!(
                         "game: {peer}: LZF failure at opcode {:#06x} ({reason:?}); \
                          disconnecting: {e}",
                         frame.cmd()
@@ -498,7 +530,7 @@ async fn handle_client(
                     return Ok(());
                 }
             };
-            println!("game: {peer}: recv opcode {cmd} ({} bytes)", payload.len());
+            logln!("game: {peer}: recv opcode {cmd} ({} bytes)", payload.len());
 
             match cmd {
                 c if c == GameMsg::RequestLogin as u16 => {
@@ -525,7 +557,7 @@ async fn handle_client(
                     // one-shot per connection.
                     let bound_slot = live.character.as_ref().map(|c| c.slot);
                     if !admit_select_char(bound_slot, slot) {
-                        eprintln!(
+                        logln_err!(
                             "game: {peer}: selectchar slot {slot} ignored: it is already the \
                              active character (ServerDB-Person.cpp:1763 returns for the same \
                              PersonID)"
@@ -854,7 +886,7 @@ async fn handle_client(
                         ack,
                     )
                     .await?;
-                    println!(
+                    logln!(
                         "game: {peer}: {cmd} ack sent; leaving the socket open for the client \
                          to close ({})",
                         if ack == GameMsg::ResponseHopetoquit {
@@ -868,12 +900,12 @@ async fn handle_client(
                     // `DoMsg_GAMEMSG_REQUEST_HEARTBEAT` is an empty no-op
                     // (`Server-System.cpp:520-524`): the client says "still
                     // here" and the server answers nothing.
-                    println!("game: {peer}: heartbeat -> no reply (legacy no-op)");
+                    logln!("game: {peer}: heartbeat -> no reply (legacy no-op)");
                 }
                 // The reference server sends nothing for 246; the data the client
                 // wants arrives after 230.
                 c if c == GameMsg::RequestAllcharinfo as u16 => {
-                    println!("game: {peer}: allcharinfo request -> no reply (matches capture)");
+                    logln!("game: {peer}: allcharinfo request -> no reply (matches capture)");
                 }
                 c if c == GameMsg::RequestPersonalshopdata as u16 => {
                     let session = login
@@ -906,7 +938,7 @@ async fn handle_client(
                     let subject = decode_head_chat_request(payload.as_ref())?;
                     handle_head_chat_request(&registry, session_key, subject);
                 }
-                other => println!("game: {peer}: unhandled opcode {other}"),
+                other => logln!("game: {peer}: unhandled opcode {other}"),
             }
         }
     }
@@ -1080,9 +1112,11 @@ async fn handle_game_login(
     )
     .await?;
 
-    println!(
+    logln!(
         "game: login ok for {:?} (account {}, auth_key {}): {occupied} character(s)",
-        login.userid, account.account_id, login.auth_key
+        login.userid,
+        account.account_id,
+        login.auth_key
     );
     Ok(GameSession {
         account_id: account.account_id,
@@ -1138,7 +1172,7 @@ async fn handle_select_char(
         .resolve_game_unique(character.character_id)
         .await?;
     if stored_unique != char_unique {
-        println!(
+        logln!(
             "game: selectchar {:?} has durable game_unique {stored_unique} but this session's \
              char_unique is {char_unique}; harmless while the world is replayed (every frame \
              carries the session id), but T-017 must make these agree or the client will discard \
@@ -1186,9 +1220,12 @@ async fn handle_select_char(
     )
     .await?;
 
-    println!(
+    logln!(
         "game: selectchar slot {slot} char {:?} -> map {} at ({}, {})",
-        character.name, character.map_id, character.pos_x, character.pos_y
+        character.name,
+        character.map_id,
+        character.pos_x,
+        character.pos_y
     );
     Ok(character)
 }
@@ -1239,7 +1276,7 @@ async fn handle_item_move(
             Some((new_from, new_to)),
         ),
     };
-    println!("game: itemmove {from} -> {to} for character {character_id}: {detail}",);
+    logln!("game: itemmove {from} -> {to} for character {character_id}: {detail}",);
 
     // SourceEmpty moves nothing; every other outcome rewrites both slots back
     // out so the client's bag agrees with the store — most importantly the
@@ -1290,7 +1327,7 @@ async fn handle_item_split(
         }
         SplitStatus::SelfSplit => "from == to, nothing to split".to_string(),
     };
-    println!("game: itemsplit {from} -> {to} x{count} for character {character_id}: {detail}");
+    logln!("game: itemsplit {from} -> {to} x{count} for character {character_id}: {detail}");
 
     // Only a real split changes the bag; refusals are logged, matching the
     // itemmove rules — the client asked for a visible change, and a no-op
@@ -1354,7 +1391,7 @@ async fn handle_make_new_char(
         &entry.encode(),
     )
     .await?;
-    println!("game: created char {name:?} id={character_id} slot={slot} for account {account_id}");
+    logln!("game: created char {name:?} id={character_id} slot={slot} for account {account_id}");
     Ok(())
 }
 
@@ -1374,7 +1411,7 @@ async fn handle_userchar_deletion(
 ) -> Result<(), AnyError> {
     let slot = payload.first().copied().unwrap_or(0) as i16;
     if !(0..CHAR_SLOTS).contains(&slot) {
-        println!("game: char-del slot {slot} out of range for account {account_id}");
+        logln!("game: char-del slot {slot} out of range for account {account_id}");
         send_encoded(
             stream,
             outbound,
@@ -1410,7 +1447,7 @@ async fn handle_userchar_deletion(
                 &encode_del_result(1, 0, slot as i8),
             )
             .await?;
-            println!("game: char-del slot {slot} id {id} for account {account_id}: done");
+            logln!("game: char-del slot {slot} id {id} for account {account_id}: done");
             // The slot is now removed locally but the client's roster dialog
             // does not repaint until its existing cache is refreshed (no
             // notification flows with opcode 10/84). Re-emit all 15 char-list
@@ -1428,7 +1465,7 @@ async fn handle_userchar_deletion(
                 &encode_del_result(0, 0, slot as i8),
             )
             .await?;
-            println!("game: char-del slot {slot} for account {account_id}: slot already empty");
+            logln!("game: char-del slot {slot} for account {account_id}: slot already empty");
         }
     }
     Ok(())
@@ -1485,7 +1522,7 @@ async fn handle_inv_drop(
 
     // `Server-Item.cpp:2462` drops out of range positions silently.
     if request.slot < 0 || request.slot >= MAX_ITEM_PER_PERSON as i32 {
-        println!(
+        logln!(
             "game: ignoring invdrop of item {} from slot {} (outside 0..{MAX_ITEM_PER_PERSON})",
             request.item.unique(),
             request.slot
@@ -1531,7 +1568,7 @@ async fn handle_inv_drop(
             format!("drop cell ({x}, {y}) and all eight neighbours are occupied")
         }
     };
-    println!("game: invdrop slot {slot} for character {character_id}: {detail}");
+    logln!("game: invdrop slot {slot} for character {character_id}: {detail}");
 
     // Every outcome is answered: the client needs its slot overwritten either to
     // show the removal or to undo an optimistic one it should not have made.
@@ -1556,9 +1593,13 @@ async fn handle_inv_drop(
         // The client discards this frame without a word if the cell is outside its
         // map, and we hold no map model to check against — so the log is the only
         // way to tell "drew" from "silently ignored".
-        println!(
+        logln!(
             "game: sent itemdrop 309: map {} ({}, {}) unique {} handle {}",
-            grounded.map_index, grounded.x, grounded.y, grounded.item_unique, grounded.list_index
+            grounded.map_index,
+            grounded.x,
+            grounded.y,
+            grounded.item_unique,
+            grounded.list_index
         );
     }
     Ok(())
@@ -1603,9 +1644,10 @@ async fn handle_inv_pickup(
         || i32::from(request.item_unique) >= MAX_ITEM_UNIQUE
         || request.item_index < 0
     {
-        println!(
+        logln!(
             "game: ignoring invpickup of unique {} at handle {} (outside the legacy's range)",
-            request.item_unique, request.item_index
+            request.item_unique,
+            request.item_index
         );
         return Ok(());
     }
@@ -1629,32 +1671,37 @@ async fn handle_inv_pickup(
             // The repository builds both together on this path; a missing one is a
             // bug in it rather than a state we can meaningfully answer.
             _ => {
-                println!("game: invpickup reported success without a slot or item");
+                logln!("game: invpickup reported success without a slot or item");
                 return Ok(());
             }
         },
         PickupStatus::NoSuchItem { handle } => {
-            println!("game: invpickup: no ground item has handle {handle}");
+            logln!("game: invpickup: no ground item has handle {handle}");
             return Ok(());
         }
         PickupStatus::ItemMismatch { stored, claimed } => {
-            println!("game: invpickup: handle names unique {stored}, not {claimed}");
+            logln!("game: invpickup: handle names unique {stored}, not {claimed}");
             return Ok(());
         }
         PickupStatus::CellMismatch { stored, claimed } => {
-            println!(
+            logln!(
                 "game: invpickup: item is at ({}, {}, {}), client said ({}, {}, {})",
-                stored.0, stored.1, stored.2, claimed.0, claimed.1, claimed.2
+                stored.0,
+                stored.1,
+                stored.2,
+                claimed.0,
+                claimed.1,
+                claimed.2
             );
             return Ok(());
         }
         PickupStatus::NoFreeSlot => {
-            println!("game: invpickup: every carry slot is occupied");
+            logln!("game: invpickup: every carry slot is occupied");
             return Ok(());
         }
     };
 
-    println!(
+    logln!(
         "game: picked up item {} x{} into slot {slot} for character {character_id}",
         item.unique(),
         item.count()
@@ -1682,9 +1729,11 @@ async fn handle_inv_pickup(
             &cleared.encode(),
         )
         .await?;
-        println!(
+        logln!(
             "game: sent itemdrop 309 removal for map {} ({}, {})",
-            cleared.map_index, cleared.x, cleared.y
+            cleared.map_index,
+            cleared.x,
+            cleared.y
         );
     }
 
@@ -1701,7 +1750,7 @@ async fn handle_village_struct(
     village_ref: i32,
 ) -> Result<(), AnyError> {
     if village_ref <= 0 || village_ref >= i32::from(MAX_VILLAGE_NUMBER) {
-        println!("game: ignoring village-struct request for ref {village_ref}");
+        logln!("game: ignoring village-struct request for ref {village_ref}");
         return Ok(());
     }
 
@@ -1716,7 +1765,7 @@ async fn handle_village_struct(
         &body.encode(),
     )
     .await?;
-    println!("game: sent village {village_ref} structure");
+    logln!("game: sent village {village_ref} structure");
     Ok(())
 }
 
@@ -1897,13 +1946,13 @@ async fn replay(
 ) -> Result<(), AnyError> {
     let frames: Vec<(u16, &'static [u8])> = generated_capture::frames_in(start, end).collect();
     let total: usize = frames.iter().map(|(_, body)| body.len()).sum();
-    println!(
+    logln!(
         "game: replaying {what}: {} frames, {total} payload bytes",
         frames.len()
     );
     for (cmd, body) in frames {
         if let Some(why) = withhold_always(cmd) {
-            println!("game: withholding {what} frame {cmd}: {why}");
+            logln!("game: withholding {what} frame {cmd}: {why}");
             continue;
         }
         if resync && withhold_on_resync(cmd) {
@@ -1914,7 +1963,7 @@ async fn replay(
             } else {
                 "it would re-announce a notification we already sent"
             };
-            println!("game: withholding {what} frame {cmd}: {why}");
+            logln!("game: withholding {what} frame {cmd}: {why}");
             continue;
         }
         match live.regenerate(cmd).await? {
@@ -1971,7 +2020,7 @@ async fn send_world_entry(
     });
 
     let total: usize = sequence.iter().map(|(_, body)| body.len()).sum();
-    println!(
+    logln!(
         "game: generating world-entry prologue: {} frames, {total} payload bytes",
         sequence.len()
     );
@@ -2017,7 +2066,7 @@ async fn replay_plan_step(
         return Ok(());
     }
 
-    println!("game: replay plan waiting for opcode {expect}, client sent {cmd}");
+    logln!("game: replay plan waiting for opcode {expect}, client sent {cmd}");
     Ok(())
 }
 
@@ -2049,7 +2098,7 @@ async fn handle_change_status_info(
 ) -> Result<(), AnyError> {
     let change = decode_change_status_info(payload)?;
     if change.change_type != CHANGETYPE_AUTOFOOD {
-        println!(
+        logln!(
             "game: changestatusinfo type {} -> no reply (legacy answers only AUTOFOOD; \
              Server-Person.cpp:2841-2858)",
             change.change_type
@@ -2077,7 +2126,7 @@ async fn handle_change_status_info(
         &body,
     )
     .await?;
-    println!(
+    logln!(
         "game: changestatusinfo AUTOFOOD switch={} for char_unique {own_unique} ({} bytes)",
         change.change_switch,
         body.len()
@@ -2116,7 +2165,7 @@ async fn handle_personal_shop_data(
     let request = decode_personal_shop_request(payload)?;
 
     let Some(character_id) = session.character_id else {
-        println!(
+        logln!(
             "game: personal shop request for char_unique {} before a character was selected; \
              not answering",
             request.char_unique
@@ -2127,7 +2176,7 @@ async fn handle_personal_shop_data(
         format!("session char_unique {char_unique} does not fit the SI16 siCharUnique")
     })?;
     if request.char_unique != own_unique {
-        println!(
+        logln!(
             "game: personal shop request for char_unique {} but this session is {own_unique}; \
              another character's shop is not modelled yet, not answering",
             request.char_unique
@@ -2148,7 +2197,7 @@ async fn handle_personal_shop_data(
         &body,
     )
     .await?;
-    println!(
+    logln!(
         "game: personal shop reply for char_unique {}: mode {}, person_id {}, account {:?} \
          ({} bytes)",
         request.char_unique,
@@ -2360,7 +2409,7 @@ async fn handle_userorder(
     order: OrderData,
 ) -> Result<Option<Movement>, AnyError> {
     if order.si_order != ORDER_MOVE {
-        println!(
+        logln!(
             "game: ignoring USERORDER opcode {} (only ORDER_MOVE={ORDER_MOVE} is modelled)",
             order.si_order
         );
@@ -2402,7 +2451,7 @@ async fn handle_userorder(
         character.pos_y = dest.1;
     }
 
-    println!("game: move char {character_id} from {start:?} to {dest:?} on map {map_id}");
+    logln!("game: move char {character_id} from {start:?} to {dest:?} on map {map_id}");
 
     if start == dest {
         return Ok(None);
@@ -2684,7 +2733,7 @@ fn handle_chat(registry: &Registry, session_key: SessionKey, request: ChatReques
             }
         }
         ChatRoute::Dropped(mode) => {
-            println!(
+            logln!(
                 "game: {}: chat mode {mode} dropped (the legacy gates it behind a rank, \
                  party, guild, king or ticket this port does not model)",
                 sender.name

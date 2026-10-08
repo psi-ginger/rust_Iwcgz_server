@@ -63,5 +63,8 @@ $game = Start-Process -FilePath (Join-Path $bin "game.exe") -WorkingDirectory $r
 
 Write-Host "front pid $($front.Id) listening on :5700, game pid $($game.Id) on :4010."
 Write-Host "Logs: $logDir\front.log, $logDir\game.log (+ .err.log)."
+# Every log line is stamped +mm:ss.mmm since that service started, so gaps in
+# the trace are readable directly; this is the wall clock that +0:00.000 maps to.
+Write-Host "Log clock origin: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss.fff')."
 Write-Host "Link key $($env:GAME_LINK_KEY1)/$($env:GAME_LINK_KEY2), prologue $($env:GAME_PROLOGUE)."
 Write-Host "Point the client at 127.0.0.1 and log in as test / test."

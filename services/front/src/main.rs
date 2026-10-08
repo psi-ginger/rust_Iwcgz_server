@@ -48,6 +48,39 @@ struct GameTarget {
     port: u16,
 }
 
+/// Elapsed-since-process-start stamp, `+mm:ss.mmm`, prefixed to every log line.
+///
+/// The front half of the instrument the game service carries (handoff
+/// 2026-10-08): a gap between two stamps is time *this* process spent, so the
+/// ~20 s re-entry delay can be assigned to one side of the wire rather than
+/// guessed at.
+fn log_stamp() -> String {
+    use std::sync::OnceLock;
+    use std::time::Instant;
+    static ORIGIN: OnceLock<Instant> = OnceLock::new();
+    let ms = ORIGIN.get_or_init(Instant::now).elapsed().as_millis() as u64;
+    let secs = ms / 1000;
+    format!("+{:>3}:{:02}.{:03}", secs / 60, secs % 60, ms % 1000)
+}
+
+/// Wraps one log call in [`log_stamp`], in place of a bare `println!`.
+///
+/// The bodies name the `std::` forms directly, and this block was inserted
+/// after the mechanical `println!` → `logln!` rewrite — so the rewrite can
+/// never reach inside these macros and recurse.
+macro_rules! logln {
+    ($($arg:tt)*) => {
+        std::println!("[{}] {}", log_stamp(), std::format_args!($($arg)*))
+    };
+}
+
+/// [`logln`]'s stderr twin, in place of the bare `eprintln!` the error paths used.
+macro_rules! logln_err {
+    ($($arg:tt)*) => {
+        std::eprintln!("[{}] {}", log_stamp(), std::format_args!($($arg)*))
+    };
+}
+
 #[tokio::main]
 async fn main() -> Result<(), AnyError> {
     let database_url =
@@ -63,9 +96,10 @@ async fn main() -> Result<(), AnyError> {
 
     let repo = PgAccountRepository::connect(&database_url).await?;
     let listener = TcpListener::bind(&listen).await?;
-    println!(
+    logln!(
         "front: listening on {listen} (game at {}:{})",
-        game.ip, game.port
+        game.ip,
+        game.port
     );
 
     loop {
@@ -75,7 +109,7 @@ async fn main() -> Result<(), AnyError> {
         let peer = peer.to_string();
         tokio::spawn(async move {
             if let Err(e) = handle_client(stream, &peer, repo, game).await {
-                eprintln!("front: {peer}: {e}");
+                logln_err!("front: {peer}: {e}");
             }
         });
     }
@@ -106,7 +140,7 @@ async fn handle_client(
     loop {
         let n = stream.read(&mut buf).await?;
         if n == 0 {
-            println!("front: {peer}: disconnected");
+            logln!("front: {peer}: disconnected");
             return Ok(());
         }
         parser.feed(&buf[..n])?;
@@ -117,7 +151,7 @@ async fn handle_client(
             let integrity = cipher.decode(wire, &mut plain)?;
             if !integrity {
                 // Keys have desynced; continuing would only produce garbage.
-                eprintln!(
+                logln_err!(
                     "front: {peer}: cipher desync at opcode {:#06x}",
                     frame.cmd()
                 );
@@ -126,7 +160,7 @@ async fn handle_client(
 
             let cmd = u16::from_le_bytes([plain[3], plain[4]]);
             let payload = &plain[HEADER_SIZE..];
-            println!("front: {peer}: recv opcode {cmd} ({} bytes)", payload.len());
+            logln!("front: {peer}: recv opcode {cmd} ({} bytes)", payload.len());
 
             match cmd {
                 c if c == FrontMsg::RequestLogin as u16
@@ -142,9 +176,10 @@ async fn handle_client(
                         &response.encode(),
                     )
                     .await?;
-                    println!(
+                    logln!(
                         "front: {peer}: login result={} auth_key={} user={userid:?}",
-                        response.result, response.auth_key
+                        response.result,
+                        response.auth_key
                     );
                 }
                 c if c == FrontMsg::RequestNotice as u16 => {
@@ -154,7 +189,7 @@ async fn handle_client(
                         &front::notice_payload(),
                     )
                     .await?;
-                    println!("front: {peer}: notice sent");
+                    logln!("front: {peer}: notice sent");
                 }
                 c if c == FrontMsg::RequestWorldlist as u16 => {
                     let request = WorldListRequest::decode(payload)?;
@@ -164,7 +199,7 @@ async fn handle_client(
                         &front::encode_world_list(&[world_info(&game)]),
                     )
                     .await?;
-                    println!(
+                    logln!(
                         "front: {peer}: world list sent for {:?}",
                         request.account_id
                     );
@@ -172,7 +207,7 @@ async fn handle_client(
                 c if c == FrontMsg::Heartbeat as u16 => {
                     // Sent while the world-select dialog is open; nothing to do.
                 }
-                other => println!("front: {peer}: unhandled opcode {other}"),
+                other => logln!("front: {peer}: unhandled opcode {other}"),
             }
         }
     }
@@ -227,7 +262,7 @@ async fn authenticate(repo: &PgAccountRepository, userid: &str, password: &str) 
         }
         Err(RepositoryError::NotFound) => base(1),
         Err(e) => {
-            eprintln!("front: account lookup failed for {userid:?}: {e}");
+            logln_err!("front: account lookup failed for {userid:?}: {e}");
             base(5)
         }
     }
