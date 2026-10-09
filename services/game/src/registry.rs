@@ -122,6 +122,19 @@ pub struct SessionInfo {
     pub y: i32,
     /// `clBI.siHomeVillage` — `CharacterFull.school_id`.
     pub school_id: i16,
+    /// `clBI.uiKind` — the avatar/class id. Needed because `MakeCharInfo` is what
+    /// gives a client an avatar to draw (`ServerMap.cpp:103`, and the appearance is
+    /// read off `uiMakeCharKind`), not off the name or the id.
+    pub class_kind: u16,
+    /// `clIP.Life` — current life, in the 20 bits `uiLife` packs.
+    pub life: u32,
+    /// The character's effective `GetTotalMoveSpeed()` (`character_stats.move_speed`),
+    /// in the 6 bits `uiTotalMoveSpeed` packs.
+    pub move_speed: u8,
+    /// `clBI.uiSex` — 1 male, 0 female.
+    pub sex: u8,
+    /// `clBI.uiGMMode` / `siGameMasterLevel`, from the authenticated account.
+    pub gm_level: u8,
 }
 
 /// One registered connection.
@@ -318,6 +331,30 @@ impl Registry {
         self.fan(origin, None, cmd, payload)
     }
 
+    /// Every *other* session in `origin`'s 3×3 near block, with its key, ordered
+    /// by key so a caller sees a deterministic list.
+    ///
+    /// This is the newcomer-side query of [`cltServerMap::SendNewOthersInfoToPerson`]
+    /// (`ServerMap.cpp:73-150`): the set of characters a just-arrived player has to
+    /// be told about. `skip` is the newcomer's own key — the legacy never lists the
+    /// receiver among "others", and a client that receives its own record in a 6
+    /// would re-`SetChar` itself.
+    #[must_use]
+    pub fn near_others(
+        &self,
+        origin: &SessionInfo,
+        skip: SessionKey,
+    ) -> Vec<(SessionKey, SessionInfo)> {
+        let sessions = self.lock();
+        let mut out: Vec<(SessionKey, SessionInfo)> = sessions
+            .iter()
+            .filter(|(key, session)| **key != skip && is_near(origin, &session.info))
+            .map(|(key, session)| (*key, session.info.clone()))
+            .collect();
+        out.sort_by_key(|(key, _)| *key);
+        out
+    }
+
     /// [`Self::broadcast_near`] minus the sender's own connection.
     ///
     /// The legacy has no equivalent because it has no split between "write to my
@@ -471,6 +508,11 @@ mod tests {
             x,
             y,
             school_id: 3,
+            class_kind: 1,
+            life: 161,
+            move_speed: 12,
+            sex: 1,
+            gm_level: 0,
         }
     }
 

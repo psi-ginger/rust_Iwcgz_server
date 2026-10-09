@@ -26,7 +26,7 @@
 
 use gz_cipher::Cipher;
 use gz_net::{Frame, FrameParser, HEADER_SIZE};
-use gz_proto::game::MAKE_CHAR_INFO_PAYLOAD_LEN;
+use gz_proto::game::{MAKE_CHAR_INFO_PAYLOAD_LEN, MakeCharInfo};
 use gz_proto::item::{CLT_ITEM_SIZE, Item};
 use gz_proto::opcodes_front::FrontMsg;
 use gz_proto::opcodes_game::GameMsg;
@@ -379,8 +379,9 @@ async fn main() -> Result<(), AnyError> {
         },
         Who {
             char_unique,
-            spawn_x: i32::try_from(x).unwrap_or(0),
+            spawn_x: x as i32,
             spawn_y: i32::try_from(y).unwrap_or(0),
+            spawn_map: (y_map_speed >> 10) & 0x3FF,
         },
     );
 
@@ -401,13 +402,22 @@ async fn main() -> Result<(), AnyError> {
 ///
 /// # What is asserted
 ///
-/// The observer must receive `RESPONSE_CHARUPDATE` (200) frames naming the
-/// **mover's** session id, with `siX`/`siY` changing as the mover walks. The id
-/// matters as much as the position: under `GAME_PROLOGUE=capture` every session is
-/// pinned to one id, so the observer would receive frames it believes are its own
-/// and skip the position branch (`bselfswitch`,
-/// `Client-Person-BigInfo.cpp:1160-1190`). Asserting the id is what makes this
-/// probe fail loudly in capture mode instead of passing vacuously.
+/// Two things, and the **order matters** — one without the other proves nothing:
+///
+/// 1. **A `RESPONSE_LOGINMANY` (6) naming the mover, delivered *before* the walk.**
+///    This is the frame that makes another player exist: the client `PushChar`es
+///    each record (`Client-Login.cpp:53-85`) and `SetCharReservedChar` turns that
+///    queue into avatars (`Client-SetChar.cpp:112-138`). Without it there is no
+///    `CR[id]` for the mover and **every** later frame about them is discarded at
+///    `Client-Person-BigInfo.cpp:1166-1169`.
+/// 2. **`RESPONSE_CHARUPDATE` (200) frames naming the mover**, with `siX`/`siY`
+///    changing as it walks.
+///
+/// An earlier version of this probe asserted only the 200s. It **passed** while the
+/// GUI showed no avatar at all: the fan was arriving correctly and the client was
+/// throwing it away, because it had never been told the other player existed. A
+/// socket-level assertion sits below exactly the layer that discarded them, so the
+/// 6 is now checked first — otherwise the same blind spot returns.
 ///
 /// It deliberately does *not* look for a health bar. The client draws the floating
 /// gauge for `CR[1]` only (`NCharPerson.cpp:3920`), so no bystander ever sees one;
@@ -421,6 +431,7 @@ async fn probe_observer_fan(
     (observer_user, observer_password): (String, String),
 ) -> Result<(), AnyError> {
     let mover_id = mover.char_unique;
+    let mover_map = mover.spawn_map;
     let mut observer = Session::enter(front_addr, &observer_user, &observer_password).await?;
     println!(
         "probe: observer {observer_user:?} in the world as char_unique {} (mover is {mover_id})",
@@ -435,9 +446,43 @@ async fn probe_observer_fan(
         .into());
     }
 
-    // Three tiles along x, from the observer's own spawn: a 3-tile walk commits one
-    // tile per `5000 / move_speed` ms, so at the base speed of 10 that is ~500 ms
-    // per tile and three distinct cells are comfortably inside the deadline.
+    // (1) The observer must already know the mover exists. `Session::enter` sends
+    // REQUEST_SELECTCHAR for *this* connection, and the server answers that by
+    // telling everyone already in the near block about the newcomer — so the mover
+    // is the one being announced here, and the record is already waiting.
+    let announced = observer
+        .await_login_many_naming(mover_id, std::time::Duration::from_secs(10))
+        .await?
+        .ok_or_else(|| {
+            format!(
+                "observer {observer_user:?} never received a LOGINMANY naming the mover \
+                 (char_unique {mover_id}): the other player does not exist on this client, \
+                 so its 200 updates would be discarded (CharUniqueInfo is 0). This is the \
+                 frame that makes an avatar appear"
+            )
+        })?;
+    println!(
+        "probe: observer was told about the mover — kind={} level={} life={} at ({}, {}) map {}",
+        announced.make_char_kind,
+        announced.level,
+        announced.life,
+        announced.x,
+        announced.y,
+        announced.map_index
+    );
+    if announced.map_index != (mover_map & 0x3FF) as u16 {
+        return Err(format!(
+            "the announced record names map {} but the observer's client holds map {} — \
+             SetCharReservedChar skips a record whose uiMapIndex differs, so the avatar \
+             would never be built",
+            announced.map_index, mover_map
+        )
+        .into());
+    }
+
+    // (2) Three tiles along x: a 3-tile walk commits one tile per
+    // `5000 / move_speed` ms, so at the base speed of 10 that is ~500 ms per tile and
+    // three distinct cells are comfortably inside the deadline.
     let dest = (mover.spawn_x + 3, mover.spawn_y);
     println!(
         "probe: mover walking ({}, {}) -> {dest:?}",
@@ -519,6 +564,9 @@ struct Session {
     /// Where the character was placed on entry, from `RESPONSE_LOGIN`'s `clPos`.
     spawn_x: i32,
     spawn_y: i32,
+    /// The map from the same frame's `uiMapIndex`, needed to check that a record
+    /// naming this character is on a map the client already holds.
+    spawn_map: u32,
 }
 
 /// The socket half of a [`Session`]: how its bytes are framed and deciphered.
@@ -537,6 +585,8 @@ struct Who {
     /// The entry cell, from `RESPONSE_LOGIN`'s `clPos`.
     spawn_x: i32,
     spawn_y: i32,
+    /// The entry map, from the same frame's `uiMapIndex`.
+    spawn_map: u32,
 }
 
 impl Session {
@@ -555,6 +605,7 @@ impl Session {
             char_unique: who.char_unique,
             spawn_x: who.spawn_x,
             spawn_y: who.spawn_y,
+            spawn_map: who.spawn_map,
         }
     }
 
@@ -689,9 +740,12 @@ impl Session {
         }
         let life_x = u32::from_le_bytes([p[8], p[9], p[10], p[11]]);
         let y_map_speed = u32::from_le_bytes([p[12], p[13], p[14], p[15]]);
-        let x = i32::try_from((life_x >> 20) & 0x3FF).unwrap_or(0);
-        let y = i32::try_from(y_map_speed & 0x3FF).unwrap_or(0);
-        println!("probe: {user:?} in the world at ({x}, {y}) as char_unique {char_unique}");
+        let x = ((life_x >> 20) & 0x3FF) as i32;
+        let y = (y_map_speed & 0x3FF) as i32;
+        let spawn_map = (y_map_speed >> 10) & 0x3FF;
+        println!(
+            "probe: {user:?} in the world at ({x}, {y}) map {spawn_map} as char_unique {char_unique}"
+        );
 
         // S13: the village-struct round trip the client blocks movement on.
         let mut w = Writer::with_capacity(4);
@@ -724,6 +778,7 @@ impl Session {
                 char_unique,
                 spawn_x: x,
                 spawn_y: y,
+                spawn_map,
             },
         ))
     }
@@ -742,6 +797,41 @@ impl Session {
             Err(e) if e.to_string().contains("closed") => Ok(None),
             Err(e) => Err(e),
         }
+    }
+
+    /// Waits for a `RESPONSE_LOGINMANY` (6) record naming `char_unique`, or `None`
+    /// if the deadline passes first.
+    ///
+    /// Records are packed with no length prefix, so a body is a whole number of
+    /// 592-byte records and the whole body is walked looking for the id. Returns the
+    /// decoded record so the caller can check the fields the client actually reads
+    /// before it builds an avatar from it.
+    ///
+    /// Reads past the target are *not* buffered — anything else on the socket is
+    /// dropped, which is acceptable here because this runs immediately after entry,
+    /// when the only thing in flight is the announcement itself.
+    async fn await_login_many_naming(
+        &mut self,
+        char_unique: i32,
+        within: std::time::Duration,
+    ) -> Result<Option<MakeCharInfo>, AnyError> {
+        let deadline = std::time::Instant::now() + within;
+        while std::time::Instant::now() < deadline {
+            let Some((cmd, plain)) = self.read_frame().await? else {
+                return Ok(None);
+            };
+            if cmd != GameMsg::ResponseLoginmany as u16 {
+                continue;
+            }
+            let body = &plain[HEADER_SIZE..];
+            for record in body.chunks(MAKE_CHAR_INFO_PAYLOAD_LEN) {
+                let info = MakeCharInfo::decode(record)?;
+                if i32::from(info.make_char_unique) == char_unique {
+                    return Ok(Some(info));
+                }
+            }
+        }
+        Ok(None)
     }
 
     /// Sends `REQUEST_USERORDER` (240) with an `ORDER_MOVE` to `dest`.

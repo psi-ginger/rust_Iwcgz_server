@@ -59,6 +59,14 @@ pub const MAX_VILLAGE_NUMBER: i16 = 100;
 /// player character.
 pub const MAKECHARTYPE_PC: u32 = 1;
 
+/// `MAX_CLTMSG_DATA_SIZE` (`CommonLogic/MsgType.h:2943`) — the `cltMsg` payload
+/// ceiling, and so the largest body one LOGINMANY may carry.
+///
+/// The legacy packs `cltMakeCharInfo` records until the next one would not fit and
+/// flushes (`ServerMap.cpp:122-132`), so a busy cell arrives as a *series* of
+/// frames rather than one oversized one.
+pub const MAX_CLTMSG_DATA_SIZE: usize = 11_000;
+
 /// `GAMEMSG_RESPONSE_CLIENTCHARUNIQUE` (opcode 1). `char.cpp:5212-5219`.
 ///
 /// The advertised version is `CLIENT_COMPAT_VERSION = 1`, **not** the build
@@ -1026,6 +1034,66 @@ pub const fn client_map_index(map_id: i32) -> u16 {
 }
 
 impl MakeCharInfo {
+    /// Decodes one packed `cltMakeCharInfo` record — the mirror of [`Self::encode`],
+    /// and the oracle for the LOGINMANY (6) batch the game service builds for
+    /// observers.
+    ///
+    /// The record is the client's stride for a 6 body, so this is what proves a
+    /// generated record is one a real client can walk.
+    ///
+    /// # Errors
+    ///
+    /// A body shorter than [`MAKE_CHAR_INFO_PAYLOAD_LEN`], or a truncated bitfield.
+    pub fn decode(payload: &[u8]) -> Result<Self, WireError> {
+        if payload.len() < MAKE_CHAR_INFO_PAYLOAD_LEN {
+            return Err(WireError::Truncated {
+                needed: MAKE_CHAR_INFO_PAYLOAD_LEN,
+                have: payload.len(),
+            });
+        }
+        // Offsets are read explicitly rather than through `Reader`, because the
+        // header is interleaved with **pad bytes** (0x07, 0x11) that a sequential
+        // reader would walk straight past and shift every field after them by one.
+        let u32_at = |at: usize| {
+            u32::from_le_bytes([
+                payload[at],
+                payload[at + 1],
+                payload[at + 2],
+                payload[at + 3],
+            ])
+        };
+        // 0x00 uiType:1 | uiMakeCharKind:16 (declared order = low bits first).
+        let type_kind = u32_at(0x00);
+        // 0x04 uiMakeCharUnique:16, 0x06 uiLevel:8, 0x07 pad.
+        let make_char_unique = u16::from_le_bytes([payload[0x04], payload[0x05]]);
+        let level = payload[0x06];
+        // 0x08 uiLife:20 | uiX:10.
+        let life_x = u32_at(0x08);
+        // 0x0C uiY:10 | uiMapIndex:10 | uiTotalMoveSpeed:6.
+        let y_map_speed = u32_at(0x0C);
+        // 0x10 siHomeVillageUnique, 0x11 pad, 0x12 siJimCharUnique.
+        let home_village_unique = payload[0x10];
+        // 0x51 siGameMasterLevel, 0x52 siMapUnique (the encoder skips to them).
+        let game_master_level = payload[0x51];
+        let map_unique = i16::from_le_bytes([payload[0x52], payload[0x53]]);
+        // 0x92 siMakeAniType.
+        let make_ani_type = i16::from_le_bytes([payload[0x92], payload[0x93]]);
+        Ok(Self {
+            make_char_unique,
+            make_char_kind: (type_kind >> 1) as u16,
+            level,
+            life: life_x & 0xF_FFFF,
+            x: ((life_x >> 20) & 0x3FF) as u16,
+            y: (y_map_speed & 0x3FF) as u16,
+            map_index: ((y_map_speed >> 10) & 0x3FF) as u16,
+            total_move_speed: (y_map_speed >> 20) as u8,
+            home_village_unique,
+            game_master_level,
+            map_unique,
+            make_ani_type,
+        })
+    }
+
     /// Encodes the 592-byte body.
     #[must_use]
     pub fn encode(&self) -> Vec<u8> {
@@ -1074,6 +1142,66 @@ impl MakeCharInfo {
         debug_assert_eq!(w.len(), MAKE_CHAR_INFO_PAYLOAD_LEN);
         w.finish()
     }
+}
+
+/// Splits `others` into `GAMEMSG_RESPONSE_LOGINMANY` (opcode 6) bodies.
+///
+/// Returns an empty `Vec` for no records at all — never a `None` element and never a
+/// zero-length body, both of which the client would walk as garbage. Every returned
+/// body is non-empty and a whole number of records.
+///
+/// ## Why this frame exists at all
+///
+/// It is the **only** thing that makes another player exist on a client. The chain
+/// is: this frame -> `DoMsg_GAMEMSG_RESPONSE_LOGINMANY` walks the body and
+/// `PushChar`es each record (`Client-Login.cpp:53-85`) -> `SetCharReservedChar`
+/// pops that queue and calls `SetChar` (`Client-SetChar.cpp:112-138`), which is the
+/// sole creator of an avatar object and the sole filler of
+/// `cltCharCommon::CharUniqueInfo`.
+///
+/// Without it a client has no `CR[id]` for anybody else, and every per-character
+/// frame about them is then discarded at `Client-Person-BigInfo.cpp:1166-1169`
+/// (`charid = CharUniqueInfo[charunique]; if(charid <= 0) return;`). That is why the
+/// 200 fan could arrive correctly on a socket and still render nothing.
+///
+/// The server half is `cltServerMap::SendNewOthersInfoToPerson`
+/// (`ServerMap.cpp:73-150`): it walks the cells in the newcomer's block, packs each
+/// occupant's `cltMakeCharInfo`, and flushes when the next record would overflow
+/// `MAX_CLTMSG_DATA_SIZE`.
+///
+/// ## Record layout
+///
+/// Records are packed back to back, **not** length-prefixed. The stride comes from
+/// the leading bitfield: `uiType == MAKECHARTYPE_PC` means the record is a full
+/// `sizeof(cltMakeCharInfo)` = [`MAKE_CHAR_INFO_PAYLOAD_LEN`]; anything else is a
+/// `cltMakeCharInfoCommon`. We model only player characters, so every record here is
+/// the 592-byte PC form and the reader's stride is constant.
+///
+/// ## Why the batch may be empty
+///
+/// An empty body must be *sent as nothing*, never as a zero-length frame: the client
+/// casts the payload and reads `uiType` before checking it got any bytes
+/// (`Client-Login.cpp:61-63`), so a zero-length body is walked as garbage. Callers
+/// must skip an empty `chunks` — this returns `None` for no records, which is the
+/// legacy's own `if(index)` guard at `ServerMap.cpp:140`.
+#[must_use]
+pub fn encode_login_many_batches(others: &[MakeCharInfo]) -> Vec<Vec<u8>> {
+    let mut out: Vec<Vec<u8>> = Vec::new();
+    let mut batch: Vec<u8> = Vec::new();
+    for other in others {
+        let record = other.encode();
+        // The legacy flushes *before* overflowing: `if(index + sizeof(cltMakeCharInfo)
+        // >= MAX_CLTMSG_DATA_SIZE)` (`ServerMap.cpp:122`). Reproduced verbatim, so a
+        // batch never exceeds the ceiling.
+        if !batch.is_empty() && batch.len() + record.len() >= MAX_CLTMSG_DATA_SIZE {
+            out.push(std::mem::take(&mut batch));
+        }
+        batch.extend_from_slice(&record);
+    }
+    if !batch.is_empty() {
+        out.push(batch);
+    }
+    out
 }
 
 /// `cltGameMsgResponse_VillageStruct` (opcode 1102). Sent in answer to

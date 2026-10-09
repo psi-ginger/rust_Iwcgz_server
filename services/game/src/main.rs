@@ -57,8 +57,8 @@ use gz_proto::game::{
     MakeCharInfo, ServerInfo, UseBonus, VillageStruct, client_map_index, decode_make_new_char,
     decode_select_char, decode_use_bonus, decode_village_struct_request, encode_all_char_info_one,
     encode_all_char_info_two, encode_change_horse, encode_del_result, encode_family_update,
-    encode_get_village_info, encode_person_horse, encode_person_ip, encode_response_name,
-    encode_skillbook_magic_info,
+    encode_get_village_info, encode_login_many_batches, encode_person_horse, encode_person_ip,
+    encode_response_name, encode_skillbook_magic_info,
 };
 use gz_proto::item::{
     Item, MAX_ITEM_PER_PERSON, MAX_ITEM_UNIQUE, decode_inv_drop, decode_inv_pickup,
@@ -626,8 +626,33 @@ async fn handle_client(
                             x: character_id.pos_x,
                             y: character_id.pos_y,
                             school_id: character_id.school_id,
+                            class_kind: u16::try_from(character_id.class_kind.max(0)).unwrap_or(0),
+                            life: u32::try_from(character_id.max_life.max(0)).unwrap_or(0),
+                            move_speed: u8::try_from(character_id.move_speed.clamp(0, 63))
+                                .unwrap_or(0),
+                            sex: u8::try_from(character_id.gender.clamp(0, 1)).unwrap_or(0),
+                            // `gm_level` lives on the authenticated account, not the
+                            // character row (`GameSession`), so it is read from the
+                            // login rather than from `character_id`.
+                            gm_level: login
+                                .as_ref()
+                                .map(|s| u8::try_from(s.gm_level.clamp(0, 255)).unwrap_or(0))
+                                .unwrap_or(0),
                         },
                     );
+                    // Make the newcomer visible, and make it visible to everyone
+                    // already here — both halves of
+                    // `cltServerMap::SendNewOthersInfoToPerson` (`ServerMap.cpp:73-150`).
+                    // Skipped in capture mode, where the reference prologue already
+                    // carries a 6 and the ids do not line up.
+                    if cfg.prologue == Prologue::Live {
+                        announce_nearby_characters(
+                            &registry,
+                            session_key,
+                            &character_id,
+                            char_unique,
+                        )?;
+                    }
                     // The world bulk after char-select. Capture mode replays it;
                     // live mode generates it (T-017). See `Prologue` for why the
                     // two cannot be mixed today.
@@ -1925,13 +1950,17 @@ fn withhold_always(cmd: u16) -> Option<&'static str> {
             "generated on request (1101); the captured burst copy carries the reference village's structures",
         );
     }
-    // The client walks the payload record-by-record with no length guard
-    // (`Client-Login.cpp:60-82`); with nobody else on the map there are no
-    // records, and there is no valid "empty list" body. The legacy omits the
-    // frame entirely (`ServerMap.cpp:140`).
-    if cmd == GameMsg::ResponseLoginmany as u16 {
-        return Some("no other characters on the map; an empty body would be walked as garbage");
-    }
+    // `GAMEMSG_RESPONSE_LOGINMANY` (6) is **no longer withheld.** It used to be,
+    // with the reason "no other characters on the map" — true when there was one
+    // character, false as soon as a second logged in. Withholding it was the direct
+    // cause of nearby avatars being invisible: 6 is the only frame that makes another
+    // player exist on a client (`DoMsg_GAMEMSG_RESPONSE_LOGINMANY` ->
+    // `PushChar` -> `SetCharReservedChar` -> `SetChar`, `Client-Login.cpp:53-85` and
+    // `Client-SetChar.cpp:112-138`), and without it every per-character frame about
+    // that player was discarded at `Client-Person-BigInfo.cpp:1166-1169`.
+    // It is now sent deliberately by `announce_nearby_characters`, and its empty
+    // case is handled there by sending nothing at all — the legacy's own `if(index)`
+    // guard at `ServerMap.cpp:140`.
     None
 }
 
@@ -2095,6 +2124,140 @@ const LIVE_CHARACTER_STATE: &[u16] = &[
     GameMsg::ResponseAllcharinfoone as u16,
     GameMsg::ResponseAllcharinfotwo as u16,
 ];
+
+/// The `cltMakeCharInfo` for one character, from its database row.
+///
+/// One function for both callers — the session's own `RESPONSE_LOGIN` and the
+/// record another player receives in a 6 — so the two can never disagree about a
+/// character's class, life, or cell.
+fn make_char_info_for(
+    character: &CharacterFull,
+    char_unique: i32,
+) -> Result<MakeCharInfo, AnyError> {
+    Ok(MakeCharInfo {
+        make_char_unique: u16::try_from(char_unique).map_err(|_| {
+            format!("session char_unique {char_unique} does not fit uiMakeCharUnique's u16")
+        })?,
+        make_char_kind: u16::try_from(character.class_kind.max(0)).unwrap_or(0),
+        level: u8::try_from(character.level.clamp(0, 255)).unwrap_or(1),
+        life: u32::try_from(character.max_life.max(0)).unwrap_or(0),
+        x: u16::try_from(character.pos_x.max(0)).unwrap_or(0) & 0x3FF,
+        y: u16::try_from(character.pos_y.max(0)).unwrap_or(0) & 0x3FF,
+        map_index: client_map_index(character.map_id),
+        total_move_speed: u8::try_from(character.move_speed.clamp(0, 63)).unwrap_or(0),
+        home_village_unique: u8::try_from(character.school_id.clamp(0, 255)).unwrap_or(0),
+        game_master_level: 0,
+        map_unique: 0,
+        make_ani_type: 0,
+    })
+}
+
+/// Makes a newly-entered character exist for everyone nearby, and tells it about
+/// everyone already there.
+///
+/// This is `cltServerMap::SendNewOthersInfoToPerson` (`ServerMap.cpp:73-150`), and
+/// it is the frame the whole observer story rests on. The legacy runs it in **both**
+/// directions when a character enters a cell:
+///
+/// * the newcomer receives one `GAMEMSG_RESPONSE_LOGINMANY` (6) listing everyone
+///   already in its block;
+/// * every already-present character in that block receives a 6 listing the
+///   newcomer.
+///
+/// The client turns each record into a real avatar: `DoMsg_GAMEMSG_RESPONSE_LOGINMANY`
+/// walks the body and `PushChar`es each `cltMakeCharInfo` (`Client-Login.cpp:53-85`),
+/// and `SetCharReservedChar` pops that queue into `SetChar`
+/// (`Client-SetChar.cpp:112-138`) — the only creator of an avatar object and the
+/// only filler of `cltCharCommon::CharUniqueInfo`.
+///
+/// **This was the missing piece behind "nearby avatars are invisible".** Without a
+/// 6 the observer has no `CR[id]` for the other player, so every per-character
+/// frame about them — including the 200 fan — is discarded on arrival at
+/// `Client-Person-BigInfo.cpp:1166-1169` (`if(charid <= 0) return;`). The fan was
+/// arriving correctly and being thrown away, which is why a socket-level probe
+/// passed while the screen showed nothing.
+///
+/// The server's own record is never included in its own 6: the legacy never lists
+/// the receiver among "others", and a client re-`SetChar`ing itself would reset the
+/// character it is already standing on.
+///
+/// # Errors
+///
+/// A `char_unique` that does not fit `uiMakeCharUnique`'s 16 bits, or a tile that
+/// does not fit the 10-bit `uiX`/`uiY`. Both are bounded by the allocation and the
+/// map data respectively, so in practice neither fires.
+fn announce_nearby_characters(
+    registry: &Registry,
+    session_key: SessionKey,
+    self_row: &CharacterFull,
+    self_char_unique: i32,
+) -> Result<(), AnyError> {
+    let origin = registry
+        .info(session_key)
+        .ok_or("nearby announcement before the session is in the registry")?;
+    let self_record = make_char_info_for(self_row, self_char_unique)?;
+
+    // To the newcomer: everyone already in its near block.
+    let existing = registry.near_others(&origin, session_key);
+    let to_self: Vec<MakeCharInfo> = existing
+        .iter()
+        .filter_map(|(_, info)| make_char_info_from_session(info).ok())
+        .collect();
+    // An empty near block yields no body at all, which is the legacy's own
+    // `if(index)` guard (`ServerMap.cpp:140`) and the reason this frame used to be
+    // withheld wholesale.
+    for body in encode_login_many_batches(&to_self) {
+        registry.send_to(session_key, GameMsg::ResponseLoginmany as u16, body);
+    }
+    let existing_count = existing.len();
+
+    let existing_keys: Vec<SessionKey> = existing.iter().map(|(key, _)| *key).collect();
+    // To each of them: the newcomer. One frame each, as the legacy does — the
+    // record is identical, only the recipient differs.
+    // One record always fits in one frame, so `encode_login_many_batches` yields
+    // exactly one body here; the loop stays so a future wider record keeps working.
+    for body in encode_login_many_batches(std::slice::from_ref(&self_record)) {
+        for key in &existing_keys {
+            registry.send_to(*key, GameMsg::ResponseLoginmany as u16, body.clone());
+        }
+    }
+
+    logln!(
+        "game: char {self_char_unique} announced to {} existing character(s); \
+         learned about {} in its near block",
+        existing_count,
+        to_self.len()
+    );
+    Ok(())
+}
+
+/// The `cltMakeCharInfo` a client needs to draw one avatar, from a registry entry.
+///
+/// Field-for-field the same source as the session's own login frame
+/// ([`make_char_info_for`]), because the two must agree: a client that draws its
+/// own avatar from one record and another player's from a slightly different one
+/// ends up with two characters that disagree about their own class or life.
+fn make_char_info_from_session(info: &SessionInfo) -> Result<MakeCharInfo, AnyError> {
+    Ok(MakeCharInfo {
+        make_char_unique: u16::try_from(info.char_unique).map_err(|_| {
+            format!(
+                "session char_unique {} does not fit uiMakeCharUnique's u16",
+                info.char_unique
+            )
+        })?,
+        make_char_kind: info.class_kind,
+        level: u8::try_from(info.level.clamp(0, 255)).unwrap_or(1),
+        life: info.life,
+        x: u16::try_from(info.x).unwrap_or(0) & 0x3FF,
+        y: u16::try_from(info.y).unwrap_or(0) & 0x3FF,
+        map_index: client_map_index(info.map_id),
+        total_move_speed: info.move_speed.min(63),
+        home_village_unique: u8::try_from(info.school_id.clamp(0, 255)).unwrap_or(0),
+        game_master_level: info.gm_level,
+        map_unique: 0,
+        make_ani_type: 0,
+    })
+}
 
 /// The per-character state block, generated from the database.
 ///
@@ -3792,6 +3955,11 @@ mod tests {
                 x,
                 y,
                 school_id: 0,
+                class_kind: 1,
+                life: 161,
+                move_speed: 12,
+                sex: 1,
+                gm_level: 0,
             },
         );
         (key, rx)
@@ -3891,6 +4059,235 @@ mod tests {
             "live allocates per session, so an observer's 200 names somebody else"
         );
         assert_ne!(live.char_unique(1), pinned);
+    }
+
+    /// LOGINMANY is the frame that makes another player exist, and it must be built
+    /// from the **registry** (other players) rather than from this session's row.
+    ///
+    /// Regression test for "nearby avatars are invisible", reported live 2026-10-09.
+    /// The 200 fan was verified byte-correct on a real socket and still rendered
+    /// nothing, because the observer had no `CR[id]` for the mover: 6 is the only
+    /// frame that creates one (`Client-Login.cpp:53-85` -> `PushChar` ->
+    /// `SetCharReservedChar` -> `SetChar`, `Client-SetChar.cpp:112-138`), and every
+    /// per-character frame is discarded at `Client-Person-BigInfo.cpp:1166-1169`
+    /// when `CharUniqueInfo[charunique]` is 0.
+    #[test]
+    fn login_many_carries_the_other_players_own_identity() {
+        let registry = Registry::new();
+        // The observer, already in the world.
+        let (observer_key, mut robeserver) = registry_join(&registry, 1472, "Tester2", 27, 87);
+        // A newcomer joins the same cell.
+        let (newcomer_key, mut rnewcomer) = registry_join(&registry, 1473, "Tester", 27, 87);
+
+        announce_nearby_characters(&registry, newcomer_key, &seeded_tester(), 1473).unwrap();
+
+        // The newcomer is told about the observer. Read it off the wire the server
+        // actually queued — not off a locally rebuilt body, which would only prove
+        // the encoder agrees with itself.
+        let frame = rnewcomer
+            .try_recv()
+            .expect("the newcomer learns who is here");
+        assert_eq!(frame.cmd, GameMsg::ResponseLoginmany as u16);
+        assert_eq!(
+            frame.payload.len(),
+            gz_proto::game::MAKE_CHAR_INFO_PAYLOAD_LEN,
+            "one packed record, no length prefix"
+        );
+        let announced = MakeCharInfo::decode(&frame.payload).expect("the record decodes");
+        assert_eq!(
+            announced.make_char_unique, 1472,
+            "the newcomer must be told about the observer's id, not itself"
+        );
+
+        // ...and the observer is told about the newcomer. This second direction is
+        // what the legacy also does (`ServerMap.cpp:73-150`), and without it the
+        // observer would never see the newcomer appear.
+        let frame = robeserver
+            .try_recv()
+            .expect("the observer learns of the newcomer");
+        assert_eq!(frame.cmd, GameMsg::ResponseLoginmany as u16);
+        let announced = MakeCharInfo::decode(&frame.payload).expect("the record decodes");
+        assert_eq!(
+            announced.make_char_unique, 1473,
+            "the observer must be told about the newcomer's id"
+        );
+        assert_eq!(
+            announced.make_char_kind, 1,
+            "uiMakeCharKind is what the client draws the avatar from, not the name"
+        );
+        assert_eq!((announced.x, announced.y), (27, 87));
+        assert_eq!(
+            announced.map_index, 158,
+            "the map the client must already hold"
+        );
+        // Never a record of itself: a client re-SetChar-ing its own avatar would
+        // reset the character it is already standing on.
+        let _ = observer_key;
+    }
+
+    /// A character that leaves the newcomer set gets no record — the near block is
+    /// the whole point of the frame, and an over-wide fan would put avatars on screen
+    /// that are not there.
+    #[test]
+    fn login_many_excludes_characters_outside_the_near_block() {
+        let registry = Registry::new();
+        let (newcomer_key, mut rnewcomer) = registry_join(&registry, 1473, "Tester", 27, 87);
+        let (_near, mut rnear) = registry_join(&registry, 1472, "Near", 28, 88);
+        let (_far, mut rfar) = registry_join(&registry, 1474, "Far", 400, 400);
+
+        announce_nearby_characters(&registry, newcomer_key, &seeded_tester(), 1473).unwrap();
+
+        let body = rnewcomer.try_recv().expect("one frame for the near cell");
+        let announced = MakeCharInfo::decode(&body.payload).expect("the record decodes");
+        assert_eq!(
+            announced.make_char_unique, 1472,
+            "only the character sharing the near cell"
+        );
+        assert!(
+            rfar.try_recv().is_err(),
+            "cell (40, 26) is not in the 3x3 block around (2, 5)"
+        );
+        // The bystander is told about the newcomer; the distant one is not told at all.
+        let frame = rnear.try_recv().expect("the near bystander is told too");
+        assert_eq!(frame.cmd, GameMsg::ResponseLoginmany as u16);
+    }
+
+    /// An empty near block sends **nothing**, never a zero-length frame.
+    ///
+    /// `DoMsg_GAMEMSG_RESPONSE_LOGINMANY` casts the payload and reads `uiType`
+    /// before it knows it got any bytes (`Client-Login.cpp:61-63`), so an empty body
+    /// is walked as garbage. This is the legacy's own `if(index)` guard
+    /// (`ServerMap.cpp:140`), and the reason 6 used to be withheld wholesale.
+    #[test]
+    fn an_empty_near_block_sends_no_frame_at_all() {
+        assert!(
+            encode_login_many_batches(&[]).is_empty(),
+            "no records must mean no frame, not a zero-length one"
+        );
+        let registry = Registry::new();
+        let (lonely_key, mut rlonely) = registry_join(&registry, 1471, "Tester", 27, 87);
+        announce_nearby_characters(&registry, lonely_key, &seeded_tester(), 1471).unwrap();
+        assert!(
+            rlonely.try_recv().is_err(),
+            "alone in the world, nothing is announced"
+        );
+    }
+
+    /// A generated record round-trips through the client's own stride rules.
+    ///
+    /// This is the assertion that would have caught the bug in `MakeCharInfo::decode`
+    /// that the first version of the test above walked into: reading the header with
+    /// a sequential `Reader` skips the 0x07 and 0x11 **pad bytes** and shifts every
+    /// field after them, so a record decoded as `(768, 769)` instead of `(27, 87)`.
+    /// A fan built from mis-decoded coordinates would put avatars in the sea.
+    #[test]
+    fn a_generated_login_many_record_round_trips_through_its_own_layout() {
+        for (unique, kind, level, life, x, y, map, speed) in [
+            (1471u16, 1u16, 13u8, 161u32, 27u16, 87u16, 158u16, 12u8),
+            (1, 0, 1, 40, 0, 0, 1, 10),
+            // 10-bit fields at their maxima, which is where a masking bug shows.
+            (19_999, 65_535, 255, 0xF_FFFF, 0x3FF, 0x3FF, 0x3FF, 63),
+        ] {
+            let record = MakeCharInfo {
+                make_char_unique: unique,
+                make_char_kind: kind,
+                level,
+                life,
+                x,
+                y,
+                map_index: map,
+                total_move_speed: speed,
+                home_village_unique: 0,
+                game_master_level: 0,
+                map_unique: 0,
+                make_ani_type: 0,
+            };
+            let decoded = MakeCharInfo::decode(&record.encode()).expect("decodes");
+            assert_eq!(
+                decoded, record,
+                "record {unique} did not survive the round trip"
+            );
+        }
+    }
+
+    /// A record that did not round-trip would be worse than no record at all, so the
+    /// encode/decode pair is pinned against the *client's* bit layout rather than
+    /// against itself. The pack sites are the two dwords at 0x08 and 0x0C; a swapped
+    /// bit order there is silent and would scatter every avatar.
+    #[test]
+    fn the_login_many_header_uses_the_clients_bit_order() {
+        use gz_proto::game::MAKECHARTYPE_PC;
+        // A record with every header field distinct, so a bit-order mix-up in either
+        // packed dword shows up as the wrong field rather than a coincidence. The
+        // speed is 17, not `seeded_tester`'s 8, precisely to keep the two dwords
+        // from agreeing on anything.
+        let record = MakeCharInfo {
+            make_char_unique: 1471,
+            make_char_kind: 9,
+            level: 42,
+            life: 123_456,
+            x: 333,
+            y: 777,
+            map_index: 158,
+            total_move_speed: 17,
+            home_village_unique: 3,
+            game_master_level: 0,
+            map_unique: 0,
+            make_ani_type: 0,
+        };
+        let bytes = record.encode();
+        // 0x00 uiType:1 | uiMakeCharKind:16 (low bits first).
+        assert_eq!(
+            u32::from_le_bytes([bytes[0x00], bytes[0x01], bytes[0x02], bytes[0x03]]),
+            (MAKECHARTYPE_PC & 1) | (9 << 1),
+            "uiType must be MAKECHARTYPE_PC or the client strides as a Common record"
+        );
+        // uiMakeCharUnique:16 @ 0x04, uiLevel:8 @ 0x06, pad @ 0x07.
+        assert_eq!(u16::from_le_bytes([bytes[0x04], bytes[0x05]]), 1471);
+        assert_eq!(bytes[0x06], 42);
+        assert_eq!(bytes[0x07], 0, "the pad byte must be zero");
+        // 0x08 uiLife:20 | uiX:10.
+        let life_x = u32::from_le_bytes([bytes[0x08], bytes[0x09], bytes[0x0A], bytes[0x0B]]);
+        assert_eq!(life_x & 0xF_FFFF, 123_456);
+        assert_eq!((life_x >> 20) & 0x3FF, 333);
+        // 0x0C uiY:10 | uiMapIndex:10 | uiTotalMoveSpeed:6.
+        let y_map_speed = u32::from_le_bytes([bytes[0x0C], bytes[0x0D], bytes[0x0E], bytes[0x0F]]);
+        assert_eq!(y_map_speed & 0x3FF, 777);
+        assert_eq!((y_map_speed >> 10) & 0x3FF, 158);
+        assert_eq!((y_map_speed >> 20) & 0x3F, 17);
+        // 0x10 siHomeVillageUnique.
+        assert_eq!(bytes[0x10], 3);
+    }
+
+    /// A busy cell arrives as a *series* of frames, never one oversized one, and no
+    /// record is dropped when the batch splits.
+    #[test]
+    fn a_login_many_batch_never_exceeds_the_frame_ceiling() {
+        let record = seeded_tester();
+        let many: Vec<MakeCharInfo> = (0..40)
+            .map(|i| {
+                let mut m = make_char_info_for(&record, 1473).unwrap();
+                m.make_char_unique = u16::try_from(100 + i).unwrap();
+                m
+            })
+            .collect();
+
+        let batches = encode_login_many_batches(&many);
+        assert!(batches.len() > 1, "40 records must not fit in one frame");
+        let mut total = 0usize;
+        for body in batches {
+            assert!(
+                body.len() <= gz_proto::game::MAX_CLTMSG_DATA_SIZE,
+                "batch of {} bytes exceeds MAX_CLTMSG_DATA_SIZE",
+                body.len()
+            );
+            assert!(!body.is_empty(), "a batch is never empty");
+            // Records are packed, not length-prefixed: the body is a whole number of
+            // them, which is how the client computes its stride.
+            assert_eq!(body.len() % gz_proto::game::MAKE_CHAR_INFO_PAYLOAD_LEN, 0);
+            total += body.len() / gz_proto::game::MAKE_CHAR_INFO_PAYLOAD_LEN;
+        }
+        assert_eq!(total, 40, "no record may be dropped when splitting");
     }
 
     /// The recalc formulas are the ones the dev seed's stored maxima must match:
@@ -4726,12 +5123,16 @@ mod tests {
             .copied()
             .filter(|&cmd| withhold_always(cmd).is_some() || withhold_on_resync(cmd))
             .collect();
+        // `ResponseLoginmany` (6) is deliberately **absent** from this list: it used
+        // to be withheld as "no other characters on the map", which is what made
+        // nearby avatars invisible. It is now sent by `announce_nearby_characters`,
+        // and its captured copy — the reference character's own record — is still
+        // not replayed, which is what this list asserts.
         assert_eq!(
             withheld,
             vec![
                 GameMsg::ResponseAllcharinfoone as u16,
                 GameMsg::ResponseMonsterAttackStart as u16,
-                GameMsg::ResponseLoginmany as u16,
                 GameMsg::ResponseVillagestruct as u16,
                 GameMsg::ResponseLetter as u16,
             ]
@@ -4745,9 +5146,12 @@ mod tests {
             .collect();
         assert!(kept.contains(&(GameMsg::ResponseAllcharinfotwo as u16)));
         assert_eq!(sent.len(), 25, "the captured state-sync burst is 25 frames");
-        assert_eq!(kept.len(), sent.len() - 5);
-        // Only the two event-specific frames and the letter had to move; the
-        // rest are now generated, so being sent is unchanged.
+        // Four withheld frames, not five: 248 on a resync, plus the monster-attack
+        // event, the village struct, and the letter. LOGINMANY used to be the fifth
+        // and is now sent by `announce_nearby_characters` — its captured copy (the
+        // reference character's own record) is still not replayed, which is the
+        // property worth keeping here.
+        assert_eq!(kept.len(), sent.len() - 4);
     }
 
     /// The memo dialog is somebody else's letter, and it is withheld on *entry*.
@@ -4993,11 +5397,17 @@ mod tests {
         // `cltDate` is frozen but harmless (the client renders it in the
         // upper bar; the server's game clock is not wired to a real timebase).
         let static_blobs: &[u16] = &[8451, GameMsg::ResponseDate as u16];
+        // 6 is generated outside `regenerate` — by `announce_nearby_characters`,
+        // which builds it from the registry rather than from this session's row,
+        // because it describes *other* players. Its captured copy is never replayed.
+        let generated_elsewhere: &[u16] = &[GameMsg::ResponseLoginmany as u16];
         for (cmd, _, _) in crate::generated_frames::CAP_FRAMES[66..=90].iter() {
             if withhold_always(*cmd).is_some() {
                 continue;
             }
-            let ok = regenerated.contains(cmd) || static_blobs.contains(cmd);
+            let ok = regenerated.contains(cmd)
+                || static_blobs.contains(cmd)
+                || generated_elsewhere.contains(cmd);
             assert!(
                 ok,
                 "opcode {cmd} in the state-sync burst is neither generated, withheld, nor a documented static blob"
@@ -5136,6 +5546,11 @@ mod tests {
             x,
             y,
             school_id: 3,
+            class_kind: 1,
+            life: 161,
+            move_speed: 12,
+            sex: 1,
+            gm_level: 0,
         }
     }
 
