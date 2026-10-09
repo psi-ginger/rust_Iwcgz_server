@@ -74,14 +74,11 @@ use tokio::net::{TcpListener, TcpStream};
 type AnyError = Box<dyn std::error::Error + Send + Sync>;
 
 mod config;
-mod generated_capture;
-mod generated_frames;
-mod import_capture;
 mod registry;
 mod world_entry;
 
-use config::{GameConfig, Prologue, WorldBulk};
-use registry::{Outbound, Registered, Registry, SessionInfo, SessionKey};
+use config::GameConfig;
+use registry::{Outbound, Registered, Registry, SessionInfo, SessionKey, cell_of};
 
 /// `MAX_TOTAL_CHAR_PER_USER` (3 main + 12 char-house) — the legacy sends one
 /// char-list packet for every slot, occupied or not
@@ -114,7 +111,7 @@ const MAX_SESSION_CHAR_UNIQUE: u64 = 19_999;
 /// The legacy's equivalent is `m_uiCharID`, a UI16 the session manager assigns
 /// when it binds a session (`CharServer-Session.cpp:58` passes it straight into
 /// `MakeSimpleChar`) — a connection-scoped number, not a database column. Only
-/// [`Prologue::Live`] consults this; see [`GameConfig::char_unique`].
+/// [`GameConfig::char_unique`] is the only source; it always returns the allocation.
 static NEXT_CHAR_UNIQUE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
 
 /// Next session character id, wrapping inside the client's table bound.
@@ -174,20 +171,11 @@ macro_rules! logln_err {
 
 #[tokio::main]
 async fn main() -> Result<(), AnyError> {
-    let database_url =
-        std::env::var("DATABASE_URL").unwrap_or_else(|_| config::DEFAULT_DATABASE_URL.to_string());
-
-    let mut argv = std::env::args().skip(1);
-    match argv.next() {
-        // `import-capture` is a database-seeding tool and touches no link, so it
-        // deliberately does not require the link key. Everything that opens a
-        // socket does.
-        Some(command) => run_command(&command, &database_url, argv.collect()).await,
-        None => {
-            let cfg = GameConfig::from_env()?;
-            serve(&cfg).await
-        }
+    if let Some(command) = std::env::args().nth(1) {
+        return Err(format!("unknown argument {command:?}: game.exe takes no arguments").into());
     }
+    let cfg = GameConfig::from_env()?;
+    serve(&cfg).await
 }
 
 /// Accepts client connections until the process is stopped.
@@ -207,21 +195,9 @@ async fn serve(cfg: &GameConfig) -> Result<(), AnyError> {
         cfg.timeouts.close_throttle.as_millis()
     );
     logln!(
-        "game: link key from configuration; prologue={:?} world_bulk={:?} char_unique={}",
-        cfg.prologue,
-        cfg.world_bulk,
-        match cfg.prologue {
-            Prologue::Capture => "capture-pinned".to_string(),
-            Prologue::Live => "allocated per session".to_string(),
-        }
+        "game: link key from configuration; char_unique=allocated per session, \
+         world entry generated from PostgreSQL"
     );
-    if cfg.prologue == Prologue::Capture {
-        logln!(
-            "game: WARNING replaying the captured world prologue; T-017 replaces this \
-             with payload-driven frames (set GAME_PROLOGUE=live to select the \
-             locally-generated path)"
-        );
-    }
 
     loop {
         let (stream, peer) = listener.accept().await?;
@@ -238,40 +214,6 @@ async fn serve(cfg: &GameConfig) -> Result<(), AnyError> {
                 logln_err!("game: {peer}: {e}");
             }
         });
-    }
-}
-
-/// The non-serving modes, so seeding a database does not need a second binary.
-///
-/// `import-capture [--character <name>]` replaces the named character's
-/// `character_items` rows with the item array from the replayed reference
-/// capture (see [`import_capture`]).
-async fn run_command(command: &str, database_url: &str, args: Vec<String>) -> Result<(), AnyError> {
-    match command {
-        "import-capture" => {
-            let name = args
-                .windows(2)
-                .find(|w| w[0] == "--character")
-                .map_or("Tester", |w| w[1].as_str());
-            let characters = PgCharacterRepository::connect(database_url).await?;
-            let items = PgItemRepository::connect(database_url).await?;
-            let character = characters
-                .find_by_name(name)
-                .await?
-                .ok_or_else(|| format!("no live character named {name:?}"))?;
-            let report = import_capture::run(&items, character.character_id).await?;
-            logln!(
-                "game: imported {} item(s) into {:?} (character_id {}); \
-                 {} empty slot(s), {} with only a unique and a count",
-                report.occupied,
-                character.name,
-                character.character_id,
-                report.empty,
-                report.sparse
-            );
-            Ok(())
-        }
-        other => Err(format!("unknown command {other:?} (try `import-capture`)").into()),
     }
 }
 
@@ -339,12 +281,10 @@ async fn handle_client(
     // with the link cipher, whose key comes from configuration (SEC-014).
     let mut outbound = Cipher::session_cipher(cfg.link_key.0, cfg.link_key.1);
     // The character is not known yet — the login request that names it has not
-    // arrived — so this cannot be read from the database here. `Prologue::Live`
-    // allocates it per session, the way `m_uiCharID` is a connection-scoped
-    // number in the legacy; `Prologue::Capture` pins it because every replayed
-    // per-character frame identifies its subject by the capture's id and the
-    // client discards records that do not match. `characters.game_unique` holds
-    // the durable per-character id and `handle_select_char` cross-checks the two.
+    // arrived — so this cannot be read from the database here. It is allocated per
+    // session, the way `m_uiCharID` is a connection-scoped number in the legacy.
+    // `characters.game_unique` holds the durable per-character id and
+    // `handle_select_char` cross-checks the two.
     let char_unique = cfg.char_unique(allocate_char_unique()) as i32;
     send_encoded(
         &mut stream,
@@ -368,18 +308,10 @@ async fn handle_client(
     let mut buf = [0u8; 8192];
     // Set once the game login succeeds; select-char and later opcodes need it.
     let mut login: Option<GameSession> = None;
-    // Cursor into `generated_capture::REPLY_PLAN`. The plan is the one-shot
-    // world-entry bulk, pushed at char-select (the default) so it travels with
-    // the entry prologue; `plan_step` stays past step 0, so the client's first
-    // `REQUEST_CHANGESTATUSINFO` (230) finds the cursor already advanced and is
-    // dispatched as the legacy status message instead of replaying the bulk
-    // again (T-018). Under `GAME_WORLD_BULK=on230` the push is deferred to that
-    // first 230 instead, and the cursor starts at 0.
-    let mut plan_step = 0usize;
     // The move being stepped, if any. Driven by the read loop's timer arm; see
     // [`Movement`].
     let mut movement: Option<Movement> = None;
-    // Which captured frames get rebuilt from PostgreSQL on the way out.
+    // Which frames get built from PostgreSQL on the way out.
     let mut live = LiveFrames {
         items: &items,
         account_id: 0,
@@ -570,11 +502,9 @@ async fn handle_client(
                     }
                     // Switching avatars tears the old one down before the new
                     // world entry, exactly like the legacy `CloseAction`. Stop any
-                    // in-flight step so the old character cannot walk on, and
-                    // rewind the capture reply plan so the new entry's first 230
-                    // resends the world bulk (`ServerDB-Person.cpp:1795`).
+                    // in-flight step so the old character cannot walk on
+                    // (`ServerDB-Person.cpp:1795`).
                     movement = None;
-                    plan_step = 0;
                     let character_id = {
                         let session = login
                             .as_ref()
@@ -643,55 +573,18 @@ async fn handle_client(
                     // Make the newcomer visible, and make it visible to everyone
                     // already here — both halves of
                     // `cltServerMap::SendNewOthersInfoToPerson` (`ServerMap.cpp:73-150`).
-                    // Skipped in capture mode, where the reference prologue already
-                    // carries a 6 and the ids do not line up.
-                    if cfg.prologue == Prologue::Live {
-                        announce_nearby_characters(
-                            &registry,
-                            session_key,
-                            &character_id,
-                            char_unique,
-                        )?;
-                    }
-                    // The world bulk after char-select. Capture mode replays it;
-                    // live mode generates it (T-017). See `Prologue` for why the
-                    // two cannot be mixed today.
-                    match cfg.prologue {
-                        Prologue::Capture => {
-                            replay(
-                                &mut stream,
-                                &mut outbound,
-                                generated_capture::PROLOGUE_TAIL,
-                                "world-entry prologue",
-                                &live,
-                                // The character's first delivery of these frames,
-                                // and the prologue carries no ALLCHARINFOONE
-                                // anyway.
-                                false,
-                            )
-                            .await?
-                        }
-                        Prologue::Live => {
-                            send_world_entry(&mut stream, &mut outbound, &live).await?
-                        }
-                    }
-                    // Deliver the ~67 KB world bulk with the entry prologue
-                    // instead of waiting for the client's first
-                    // `REQUEST_CHANGESTATUSINFO` (230). That 230 rides a 30 s
-                    // timer anchored at *first* world entry and never restarts
-                    // across a logout, so on re-entry the bulk can land up to
-                    // 30 s after char-select — after the client has already
-                    // built a world from the prologue above. See
-                    // `config::WorldBulk` for the measurement behind this.
-                    if cfg.prologue == Prologue::Capture
-                        && cfg.world_bulk == WorldBulk::AtSelectchar
-                    {
-                        logln!(
-                            "game: {peer}: pushing the world bulk with the entry prologue \
-                             (GAME_WORLD_BULK=at-selectchar)"
-                        );
-                        push_plan_step(&mut stream, &mut outbound, &mut plan_step, &live).await?;
-                    }
+                    announce_nearby_characters(&registry, session_key, &character_id, char_unique)?;
+                    // The whole of world entry, generated from PostgreSQL: the
+                    // context frames, then the character's own state block.
+                    //
+                    // It ships *with* char-select rather than waiting for the
+                    // client's first `REQUEST_CHANGESTATUSINFO` (230), because that
+                    // 230 rides a process-global 30 s timer anchored at *first*
+                    // world entry and never restarts across a logout — so on a
+                    // re-entry a deferred bulk lands up to 30 s late, after the
+                    // client has already built a world without it. That was the
+                    // measured ~20 s re-entry stall (2026-10-08).
+                    send_world_entry(&mut stream, &mut outbound, &live).await?;
                 }
                 c if c == GameMsg::RequestItemsplit as u16 => {
                     let character_id = login
@@ -831,49 +724,20 @@ async fn handle_client(
                     .await?;
                 }
                 c if c == GameMsg::RequestChangestatusinfo as u16 => {
-                    // 230 has two roles in this port. The *first* one after
-                    // char-select is the reference server's one-shot world
-                    // bulk -- map/object data, then ALLCHARINFO one/two, carried
-                    // by `REPLY_PLAN`'s step 0. Every later 230 is the legacy
-                    // `CHANGESTATUSINFO` message, which the legacy answers with
-                    // at most a 24-byte 231 (`Server-Person.cpp:2831-2860`).
+                    // 230 is the horse auto-food message, and the legacy answers it
+                    // with at most a 24-byte 231 (`Server-Person.cpp:2831-2860`).
                     //
-                    // Before T-018 both roles went through the same plan cursor,
-                    // so a repeated 230 hit the cursor's re-sync branch and
-                    // replayed the whole ~65 KB bulk -- the live "movement
-                    // micro-stutter". The plan is now stepped exactly once; see
-                    // [`replay_plan_step`].
-                    //
-                    // Under the default `WorldBulk::AtSelectchar` the cursor is
-                    // already past step 0 before any 230 arrives, so no 230
-                    // ever takes the plan branch and every one of them is
-                    // dispatched as the legacy message. Only
-                    // `GAME_WORLD_BULK=on230` still leaves step 0 for the
-                    // client's first 230 to pick up.
-                    //
-                    // The `Prologue::Capture` conjunct is load-bearing: under
-                    // `Prologue::Live` there is no captured bulk to replay -- the
-                    // entry prologue and `send_character_state` generate the whole
-                    // world from the database instead, and the captured frames
-                    // still name the reference character (1471). Walking the plan
-                    // here would push the *reference* character's 248/249 at a
-                    // `live` session, whose `char_unique` was allocated per session
-                    // and does not match. The client would discard them for a null
-                    // per-character record -- the fault `send_character_state` was
-                    // written to fix.
-                    let world_bulk_pending = cfg.prologue == Prologue::Capture && plan_step == 0;
-                    if world_bulk_pending {
-                        replay_plan_step(&mut stream, &mut outbound, cmd, &mut plan_step, &live)
-                            .await?;
-                    } else {
-                        handle_change_status_info(
-                            &mut stream,
-                            &mut outbound,
-                            char_unique,
-                            payload.as_ref(),
-                        )
-                        .await?;
-                    }
+                    // It used to have a second role here: the reference server's
+                    // first post-char-select 230 answered the world bulk. That is
+                    // gone — `send_world_entry` ships the whole world with
+                    // char-select — so every 230 now takes the same path.
+                    handle_change_status_info(
+                        &mut stream,
+                        &mut outbound,
+                        char_unique,
+                        payload.as_ref(),
+                    )
+                    .await?;
                 }
                 c if c == GameMsg::RequestUsebonus as u16 => {
                     // 250: stat allocation. Handled server-authoritatively: the
@@ -1898,160 +1762,7 @@ async fn send_raw(
     Ok(())
 }
 
-/// Whether a captured frame has to be withheld in *every* prologue mode, and why.
-///
-/// One frame qualifies: 116 `RESPONSE_LETTER`.
-///
-/// ## 116 `RESPONSE_LETTER` — it re-shows the memo dialog
-///
-/// 116 is a one-shot notification, not state, and it is not part of the world-entry
-/// contract. Every `SendLetterMsg` call site in the legacy is driven by an event —
-/// a post-office delivery, a guild invite, a rank change, and for this capture a
-/// village resident dividend (`ServerDB-Structure.cpp:1326`, the "bank dividend"
-/// memo). Nothing sends 116 unconditionally on character entry, so replaying it
-/// asserts an event that did not happen to *this* character.
-///
-/// Its handler has no "already seen" test either (`Client-System.cpp:2490`): it
-/// plays `SOUND_EFFECT_LETTER`, creates `NLETTER_DLG`, calls `Push(buffer)` and
-/// flashes the taskbar. So the captured letter pops the "memo 1/1" dialog on every
-/// world entry, and would re-pop on every resync as well.
-///
-/// This is why the predicate is not [`withhold_on_resync`]. A resync-only
-/// withholding fixes the once-a-minute dialog while leaving the dialog on the
-/// *first* world entry — which is where the player first sees that the letter is
-/// somebody else's. There is no mail table to generate a real one from, so the
-/// honest answer is that this character has no mail and the frame is not sent.
-/// [`Prologue::Live`] already omits it: `world_entry::prologue` builds its frame
-/// list from named opcodes and 116 is not among them, so the two modes now agree.
-///
-/// Withholding it costs nothing. 116 is the only letter frame in the capture, so
-/// there is no later frame that would have delivered the letter instead.
-///
-/// Note this is unrelated to `RESPONSE_DATE` (1208) and
-/// `RESPONSE_SERVERTIME` (177), the two time frames the same burst carries. Both
-/// replay a *frozen* timestamp rather than a live one, so they are stale rather
-/// than spamming; see the clock notes on [`replay`].
-fn withhold_always(cmd: u16) -> Option<&'static str> {
-    if cmd == GameMsg::ResponseLetter as u16 {
-        return Some("it is somebody else's letter: 116 is per-event, not world entry");
-    }
-    // The client arms `m_bEvent=true` on any monster-attack body
-    // (`Client-MofuMofuEvent.cpp:91-96`); with no event running the honest
-    // thing is to send nothing, exactly as the legacy's `IsEvent()` gate
-    // (`Server-Person.cpp:2380`) does.
-    if cmd == GameMsg::ResponseMonsterAttackStart as u16 {
-        return Some("no monster-attack event is running; a body would arm one at village 0");
-    }
-    // Answered per-request by `handle_village_struct`; the captured burst copy
-    // carries village 35's live structure table and would overwrite the fresh
-    // answer.
-    if cmd == GameMsg::ResponseVillagestruct as u16 {
-        return Some(
-            "generated on request (1101); the captured burst copy carries the reference village's structures",
-        );
-    }
-    // `GAMEMSG_RESPONSE_LOGINMANY` (6) is **no longer withheld.** It used to be,
-    // with the reason "no other characters on the map" — true when there was one
-    // character, false as soon as a second logged in. Withholding it was the direct
-    // cause of nearby avatars being invisible: 6 is the only frame that makes another
-    // player exist on a client (`DoMsg_GAMEMSG_RESPONSE_LOGINMANY` ->
-    // `PushChar` -> `SetCharReservedChar` -> `SetChar`, `Client-Login.cpp:53-85` and
-    // `Client-SetChar.cpp:112-138`), and without it every per-character frame about
-    // that player was discarded at `Client-Person-BigInfo.cpp:1166-1169`.
-    // It is now sent deliberately by `announce_nearby_characters`, and its empty
-    // case is handled there by sending nothing at all — the legacy's own `if(index)`
-    // guard at `ServerMap.cpp:140`.
-    None
-}
-
-/// Whether a captured frame has to be withheld when the client re-asks for state
-/// it already has.
-///
-/// One frame qualifies, for a reason unrelated to [`withhold_always`]'s.
-///
-/// ## 248 `RESPONSE_ALLCHARINFOONE` — it teleports the player
-///
-/// 248 is the only frame the client acts on by writing `cltPBasicInfo`, and
-/// `cltPBasicInfo` embeds `cltCharPos clPos`. `SetOne` copies the whole struct
-/// (`Client-Person.cpp:776` -> `PersonInfo.h:589`), and the character's own
-/// coordinates are read back out of exactly that field: `cltCharCommon::GetX()`
-/// is `return pclCI->clBI.GetX();` (`Char-Common.cpp:1206`), which is
-/// `clPos.GetX()` (`Common.cpp:2917`), i.e. `clPos.siX`. So a verbatim 248 moves
-/// the client's idea of where it is standing back to the cell the capture was
-/// taken on. The client sends 230 after every mutation, so replaying 248 there is
-/// what snapped the player back to spawn on a drop.
-///
-/// Nothing else in the burst does this. 249 goes through `SetTwo`, which touches
-/// only `clCharItem` and `clSummonInfo` (`PersonInfo.h:617`), and `SetOne` is the
-/// sole `clBI` writer anywhere in the client. Withholding 248 also costs the
-/// post-mutation refresh nothing: the inventory weight bar reads
-/// `cltCharCommon::GetTotalWeight()` -> `pclCI->clCharItem.GetTotalWeight(...)`
-/// (`Char-Common.cpp:2791`), summing the item array that 249 carries, not a
-/// cached total held in `clBI`.
-///
-/// **248 is now generated** (`LiveFrames::regenerate`), so its `clPos` is the
-/// database's `map_id`/`pos_x`/`pos_y` rather than the capture's. That is
-/// strictly better than replaying, but it does *not* retire this withholding:
-/// the database's position is where the character last logged out, not where it
-/// is standing now, so a resync would still drag the player backwards -- to a
-/// different cell than before, which is worse. Untracking is what fixes it:
-/// decoding `REQUEST_USERORDER`, whose `ORDER_MOVE` payload carries the
-/// destination as `x | (y << 16)` in `siPara1` (`order.h:96`), and persisting it,
-/// so that `clPos` is current and 248 can be replayed on re-sync like any other
-/// state frame. That is T-018.
-fn withhold_on_resync(cmd: u16) -> bool {
-    cmd == GameMsg::ResponseAllcharinfoone as u16
-}
-
-/// Replays the captured frames in the half-open index range `start..end`.
-///
-/// `resync` marks a replay of a step the client already received, which is the
-/// one case where a captured frame is not merely stale but actively wrong; see
-/// [`withhold_on_resync`].
-///
-/// # Errors
-///
-/// Propagates any cipher or socket failure; a write failure ends the session.
-async fn replay(
-    stream: &mut TcpStream,
-    cipher: &mut Cipher,
-    (start, end): (u32, u32),
-    what: &str,
-    live: &LiveFrames<'_>,
-    resync: bool,
-) -> Result<(), AnyError> {
-    let frames: Vec<(u16, &'static [u8])> = generated_capture::frames_in(start, end).collect();
-    let total: usize = frames.iter().map(|(_, body)| body.len()).sum();
-    logln!(
-        "game: replaying {what}: {} frames, {total} payload bytes",
-        frames.len()
-    );
-    for (cmd, body) in frames {
-        if let Some(why) = withhold_always(cmd) {
-            logln!("game: withholding {what} frame {cmd}: {why}");
-            continue;
-        }
-        if resync && withhold_on_resync(cmd) {
-            // The reason differs per frame -- see `withhold_on_resync` -- and
-            // logging one reason for both sent people hunting for the wrong bug.
-            let why = if cmd == GameMsg::ResponseAllcharinfoone as u16 {
-                "it would reset our position"
-            } else {
-                "it would re-announce a notification we already sent"
-            };
-            logln!("game: withholding {what} frame {cmd}: {why}");
-            continue;
-        }
-        match live.regenerate(cmd).await? {
-            Some(generated) => send_raw(stream, cipher, cmd, &generated).await?,
-            None => send_raw(stream, cipher, cmd, body).await?,
-        }
-    }
-    Ok(())
-}
-
-/// Sends the generated world-entry sequence. The `Prologue::Live` counterpart
-/// to [`replay`].
+/// Sends the generated world-entry sequence.
 ///
 /// # Errors
 ///
@@ -2112,13 +1823,11 @@ async fn send_world_entry(
 
 /// The frames that carry the character's own identity and stats, in the order the
 /// reference session sent them within its 230 burst: 244 names the avatar, 248 is
-/// the `clBI` + `clIP` block, 249 the item array (`generated_capture`'s module docs
-/// record that the burst opens 14 frames earlier than 248/249 and that 244 is the
-/// last of those).
+/// the `clBI` + `clIP` block, 249 the item array.
 ///
 /// A named constant rather than a literal in the loop, so a test can assert the set
 /// — the bug this exists to fix was precisely these three never being sent under
-/// [`Prologue::Live`], and a test that could have named them is the point.
+/// the only world-entry path there is, and a test that could have named them is the point.
 const LIVE_CHARACTER_STATE: &[u16] = &[
     GameMsg::ResponseName as u16,
     GameMsg::ResponseAllcharinfoone as u16,
@@ -2269,37 +1978,36 @@ fn make_char_info_from_session(info: &SessionInfo) -> Result<MakeCharInfo, AnyEr
 /// `RESPONSE_ALLCHARINFOONE` (248, the `clBI` + `clIP` block) and
 /// `RESPONSE_ALLCHARINFOTWO` (249, the item array), which in the reference
 /// session rode the 25-frame burst answering the client's first
-/// `REQUEST_CHANGESTATUSINFO` (230) — `generated_capture::REPLY_PLAN` step 0.
+/// `REQUEST_CHANGESTATUSINFO` (230).
 ///
-/// That burst was reachable only under [`Prologue::Capture`]: both the push at
+/// That burst was reachable only under the retired replay mode: both the push at
 /// char-select and the 230 arm were gated on it, and `world_entry::prologue`
-/// emitted neither frame. Under `Prologue::Live` no 248/249 was ever sent, and
-/// the client faulted on a null per-character record — the character stood on the
-/// map with no name, black HP/MP bars, and could not move. Reported live
-/// 2026-10-09; the four symptoms are all `clBI`/`clIP` fields
-/// (`szCharName`, `siLife`, `siMaxLife`, `siMana`, `siMaxMana`).
+/// emitted neither frame. So the generated path sent no 248/249 at all, and the
+/// client faulted on a null per-character record — the character stood on the map
+/// with no name, black HP/MP bars, and could not move. Reported live 2026-10-09;
+/// the four symptoms are all `clBI`/`clIP` fields (`szCharName`, `siLife`,
+/// `siMaxLife`, `siMana`, `siMaxMana`).
 ///
 /// ## Why it goes out with the entry prologue, not on the 230
 ///
 /// The capture's own timing was the measured cause of the ~20 s re-entry stall
-/// (see [`config::WorldBulk`]): its first 230 rides a process-global 30 s timer
-/// anchored at *first* world entry, so under `live` a burst waiting for that 230
-/// would arrive up to 30 s late — after the client had built a world without the
-/// character in it. Sending it here is the same fix `WorldBulk::AtSelectchar`
-/// applies to the captured burst.
+/// (2026-10-08): its first 230 rides a process-global 30 s timer anchored at
+/// *first* world entry, so a burst deferred to that 230 would arrive up to 30 s
+/// late — after the client had built a world without the character in it.
+/// Sending it here is that fix, applied to the generated frames.
 ///
-/// ## Why 248 goes out even though `withhold_on_resync` normally withholds it
+/// ## Why 248 goes out here at all
 ///
-/// That withholding is about *re-sends*: `SetOne` copies `clBI` wholesale,
-/// `clPos` included (`Client-Person.cpp:776`, `PersonInfo.h:589`), and
-/// `cltCharCommon::GetX()` reads `clPos.siX` back out of it
-/// (`Char-Common.cpp:1206`, `Common.cpp:2917`), so replaying 248 after a mutation
-/// would teleport the player to the database's stale cell. That reasoning holds
-/// for a *repeat*. It does not apply to first entry, where the character has no
-/// `clBI` at all without it — and under `live` the database cell *is* current,
-/// because `handle_userorder` persists every `ORDER_MOVE` destination before the
-/// stepped cell diverges from it. The gate stays exactly where it is; only this
-/// first delivery is unconditional.
+/// `SetOne` copies `clBI` wholesale, `clPos` included (`Client-Person.cpp:776`,
+/// `PersonInfo.h:589`), and `cltCharCommon::GetX()` reads `clPos.siX` back out of
+/// it (`Char-Common.cpp:1206`, `Common.cpp:2917`). That is why 248 must never be
+/// *re-sent* after a mutation — it would teleport the player to the database's
+/// cell. It does not apply to first entry, where the character has no `clBI` at
+/// all without it, and where the database cell *is* current because
+/// `handle_userorder` persists every `ORDER_MOVE` destination before the stepped
+/// cell diverges from it. This is that first delivery, and it is unconditional.
+/// The re-send case is handled where it arises: 230 is the horse auto-food
+/// message and is never answered with 248.
 ///
 /// # Errors
 ///
@@ -2323,66 +2031,6 @@ async fn send_character_state(
         sent += 1;
     }
     logln!("game: generated character state: {sent} frames, {bytes} payload bytes (244/248/249)");
-    Ok(())
-}
-
-/// Replays `REPLY_PLAN`'s next step and advances the cursor, or does nothing if
-/// `cmd` is not that step.
-///
-/// The plan is walked exactly once. It used to also re-replay an earlier step
-/// when the client repeated its opcode, on the theory that
-/// `REQUEST_CHANGESTATUSINFO` (230) was a "send me current state" re-sync — but
-/// 230 is the horse auto-food message (`Server-Person.cpp:2831-2860`), and the
-/// only step it ever drove is the ~65 KB world bulk. Re-sending that on every
-/// 230 was the live micro-stutter T-018 fixes; later 230s are now dispatched by
-/// the `230` arm as the legacy message. What remains in the plan is only the
-/// one-shot world bulk.
-///
-/// # Errors
-///
-/// Propagates any cipher or socket failure from [`replay`].
-async fn replay_plan_step(
-    stream: &mut TcpStream,
-    cipher: &mut Cipher,
-    cmd: u16,
-    plan_step: &mut usize,
-    live: &LiveFrames<'_>,
-) -> Result<(), AnyError> {
-    let Some((expect, _)) = generated_capture::REPLY_PLAN.get(*plan_step) else {
-        return Ok(());
-    };
-    if *expect != cmd {
-        logln!("game: replay plan waiting for opcode {expect}, client sent {cmd}");
-        return Ok(());
-    }
-    push_plan_step(stream, cipher, plan_step, live).await
-}
-
-/// Replays `REPLY_PLAN`'s current step unconditionally and advances the cursor.
-///
-/// The unconditional half of [`replay_plan_step`], used when this side decides
-/// the step's timing rather than waiting for the client's opcode — which is the
-/// default path, [`WorldBulk::AtSelectchar`]. Under `GAME_WORLD_BULK=on230` the
-/// cursor is only ever stepped through [`replay_plan_step`], so this is not
-/// called.
-///
-/// # Errors
-///
-/// Propagates any cipher or socket failure from [`replay`].
-async fn push_plan_step(
-    stream: &mut TcpStream,
-    cipher: &mut Cipher,
-    plan_step: &mut usize,
-    live: &LiveFrames<'_>,
-) -> Result<(), AnyError> {
-    let Some((expect, ranges)) = generated_capture::REPLY_PLAN.get(*plan_step) else {
-        return Ok(());
-    };
-    *plan_step += 1;
-    let label = format!("plan step {expect}");
-    for (start, end) in *ranges {
-        replay(stream, cipher, (*start, *end), &label, live, false).await?;
-    }
     Ok(())
 }
 
@@ -2836,7 +2484,7 @@ async fn handle_personal_shop_data(
 /// Modelling the step rather than teleporting matters for authority: an item
 /// dropped mid-walk has to land on the tile the character is actually on, and
 /// the captured reference session shows the server broadcasting the start cell
-/// and then each stepped cell (`generated_frames.rs`'s 241 + 200 + 200 run).
+/// and then each stepped cell (the captured run was 241, 200, 200).
 struct Movement {
     /// Destination from the 240's `siPara1` (`x | (y << 16)`).
     dest: (i32, i32),
@@ -3060,6 +2708,7 @@ async fn step_movement(
     // bystander's copy of this avatar steps with ours instead of standing still
     // (slice 6 B1). `update_pos` runs *before* the fan so the observer set is
     // computed from the cell we have just reached, not the one we left.
+    let was_cell = registry.info(session_key).map(|i| cell_of(i.x, i.y));
     registry.update_pos(session_key, x, y);
     let observers = {
         let character = live
@@ -3068,6 +2717,18 @@ async fn step_movement(
             .ok_or("char update fan before the character row is loaded")?;
         fan_char_update(registry, session_key, live.char_unique, character, x, y)?
     };
+    // Crossing into a new cell is an *appearance* event, not just a movement one.
+    //
+    // The legacy maintains a `m_pNewCell` set per character and runs
+    // `SendNewOthersInfoToPerson` for it on cell entry, not only on world entry
+    // (`ServerMap.cpp:73-150`, and the `m_uiNewCellCount` walk). Without this, a
+    // player who walks up to somebody is never told they exist: no LOGINMANY, so no
+    // avatar, so the 200 fan above is discarded on arrival.
+    if was_cell.is_some_and(|was| was != cell_of(x, y))
+        && let Some(character) = live.character.as_ref()
+    {
+        announce_nearby_characters(registry, session_key, character, live.char_unique)?;
+    }
 
     send_char_update(stream, outbound, live, x, y).await?;
     if observers > 0 {
@@ -3148,7 +2809,7 @@ async fn handle_userorder(
     )
     .await?;
     // The reference server broadcasts the cell the move starts from, then one
-    // 200 per committed tile (`generated_frames.rs`: 241, 200, 200). The start-cell
+    // 200 per committed tile (the captured run was 241, 200, 200). The start-cell
     // 200 is fanned too (slice 6 B1): the legacy's `SendCharUpdate` is one call for
     // both, so an observer that missed the origin tile would otherwise start its
     // walk from a stale one. Self still gets it directly, before the fan, so the
@@ -3717,7 +3378,7 @@ impl LiveFrames<'_> {
             return Ok(Some(world_entry::elixir_set_empty(char_unique)));
         }
         if is_servertime {
-            // 177 rides the preamble twice (idx 62 in the prologue tail, idx 84
+            // 177 rides the preamble twice (once in the prologue tail, once in the
             // in the state sync). A frozen stamp is the one thing the client
             // already folds into its minute/day display; a fresh one costs it
             // nothing.
@@ -3812,15 +3473,6 @@ fn random_key_bytes() -> (u8, u8) {
     let v = hash_now();
     (v as u8, (v >> 8) as u8)
 }
-
-/// A positive session character id below the client's `CharUniqueInfo` bound
-/// (`< 0x4E20`). The value is also written into
-/// `clMakeCharInfo.uiMakeCharUnique` (a 16-bit field) and compared against the
-/// client's 32-bit `MyCharUnique`, so it must fit both.
-const _: () = assert!(
-    generated_capture::CAPTURED_CHAR_UNIQUE > 0
-        && (generated_capture::CAPTURED_CHAR_UNIQUE as u64) < MAX_SESSION_CHAR_UNIQUE
-);
 
 fn hash_now() -> u64 {
     use std::hash::{Hash, Hasher};
@@ -3998,10 +3650,10 @@ mod tests {
         );
     }
 
-    /// `Prologue::Live` must send all three per-character state frames. This is the
+    /// World entry must send all three per-character state frames. This is the
     /// regression test for the 2026-10-09 fault: under `live` no 248/249 was ever
     /// sent, because both the char-select push and the 230 arm were gated on
-    /// `Prologue::Capture`, so the client entered the world with a null
+    /// the retired replay mode, so the client entered the world with a null
     /// per-character record — no name, black HP/MP bars, unable to move.
     ///
     /// Asserted against the *shape* (which opcodes, and that they are the ones that
@@ -4018,7 +3670,7 @@ mod tests {
         ] {
             assert!(
                 LIVE_CHARACTER_STATE.contains(&cmd),
-                "opcode {cmd} carries the character state and must be sent under Prologue::Live"
+                "opcode {cmd} carries the character state and must be sent at world entry"
             );
         }
         // Nothing else belongs here: these are the only three the burst frames
@@ -4033,32 +3685,36 @@ mod tests {
         );
     }
 
-    /// The 200 fan must be reachable under `Prologue::Live`, and it is only
-    /// meaningful there: under `capture` every session is pinned to
-    /// `CAPTURED_CHAR_UNIQUE`, so two clients share one character id and each
-    /// treats the other's 200 as its own (`bselfswitch`,
-    /// `Client-Person-BigInfo.cpp:1160-1176`).
+    /// Two sessions must never share a character id — the property the retired
+    /// capture mode broke.
     ///
-    /// Pinned as a property of the mode rather than of a socket, because the
-    /// failure it guards against is a client-side identity collision that no
-    /// server-side test can observe.
+    /// Pinning every session to one id made two clients the same character, so each
+    /// treated the other's 200 as its own (`bselfswitch`,
+    /// `Client-Person-BigInfo.cpp:1160-1176`) and wrote the other's life/mana into
+    /// its own avatar (`:1228-1238`, unconditional). That is a client-side identity
+    /// collision, which no server-side test can observe — hence it is pinned as a
+    /// property of the allocator rather than over a socket.
     #[test]
-    fn only_live_mode_gives_two_sessions_distinct_character_ids() {
-        let capture = GameConfig::with_prologue_for_test(Prologue::Capture);
-        let live = GameConfig::with_prologue_for_test(Prologue::Live);
-        let pinned = generated_capture::CAPTURED_CHAR_UNIQUE as u32;
-
-        assert_eq!(
-            capture.char_unique(1),
-            capture.char_unique(2),
-            "capture pins both sessions to one id, which is why two-client testing needs live"
+    fn two_sessions_get_distinct_character_ids() {
+        assert_ne!(
+            allocate_char_unique(),
+            allocate_char_unique(),
+            "two sessions must never share a character id"
+        );
+        // And the allocator stays inside the client's `CharUniqueInfo` bound, which
+        // is what the 592-byte `uiMakeCharUnique` field and the client's own table
+        // both require.
+        let bound = MAX_SESSION_CHAR_UNIQUE;
+        let first = u64::from(NEXT_CHAR_UNIQUE.load(std::sync::atomic::Ordering::Relaxed));
+        assert!(
+            first <= bound + 1,
+            "the allocator must not exceed the client's CharUniqueInfo bound"
         );
         assert_ne!(
-            live.char_unique(1),
-            live.char_unique(2),
-            "live allocates per session, so an observer's 200 names somebody else"
+            gz_proto::captured_lengths::CAPTURED_CHAR_UNIQUE as u64,
+            bound,
+            "the retired capture's id is a different character, not the bound"
         );
-        assert_ne!(live.char_unique(1), pinned);
     }
 
     /// LOGINMANY is the frame that makes another player exist, and it must be built
@@ -4455,38 +4111,38 @@ mod tests {
         assert_eq!(payload.as_ref(), body.as_slice());
     }
 
-    /// The splice into `RESPONSE_ALLCHARINFOTWO` has to be byte-transparent.
+    /// The 249 body is exactly the item array plus a zeroed `clSummonInfo`.
     ///
-    /// The client's willingness to accept the world-entry burst rests on that
-    /// frame being exactly what the reference server sent; if the DB holds what
-    /// the importer read out of the capture, regenerating it must reproduce the
-    /// captured bytes and change nothing else.
+    /// The client's willingness to accept the world-entry burst rests on this
+    /// frame having the size the reference server sent, so the length is pinned to
+    /// the capture's measurement. `clSummonInfo` is a documented deviation: the
+    /// reference character owned summons (115 non-zero bytes in the capture) and we
+    /// hold no table for them, so ours is honestly zero.
     #[test]
-    fn regenerating_the_capture_reproduces_the_item_array_byte_for_byte() {
-        use gz_proto::item::decode_item_array;
-
-        let body = generated_capture::frame(GameMsg::ResponseAllcharinfotwo as u16)
-            .expect("the capture must contain an ALLCHARINFOTWO frame");
-
-        // What `LiveFrames::regenerate` does once the stored rows come back.
-        let decoded = decode_item_array(body).unwrap();
-        let regenerated = encode_all_char_info_two(&decoded).unwrap();
-
-        assert_eq!(regenerated.len(), body.len(), "frame length");
-        // The first `ITEM_ARRAY_LEN` bytes must be identical: the importer read
-        // them out of this very frame, so a round trip that changed any would
-        // mean the encoder and the decoder disagree about the record layout.
+    fn the_item_array_splice_fills_exactly_the_captured_frame_length() {
+        // Every slot empty: the encoder rejects a short slice and expects exactly
+        // `MAX_ITEM_PER_PERSON` records, so the "empty bag" case is the full-width
+        // one.
+        let empty: Vec<gz_proto::item::Item> =
+            vec![Item::empty(); gz_proto::item::MAX_ITEM_PER_PERSON];
+        let body = encode_all_char_info_two(&empty).unwrap();
         assert_eq!(
-            &regenerated[..gz_proto::item::ITEM_ARRAY_LEN],
-            &body[..gz_proto::item::ITEM_ARRAY_LEN],
-            "regenerated item array"
+            body.len(),
+            gz_proto::captured_lengths::CAPTURED_ALL_CHAR_INFO_TWO_LEN,
+            "249 must keep the size the reference server sent"
         );
-        // `clSummonInfo` is the documented deviation: the reference character
-        // owned summons (115 non-zero bytes) and we hold no table for them.
+        // The array itself is 80 whole records; anything left over is `clSummonInfo`
+        // and must be zero, or the client walks a summon list that is not ours.
+        assert_eq!(
+            body.len() - gz_proto::item::ITEM_ARRAY_LEN,
+            4_240,
+            "the tail is clSummonInfo"
+        );
         assert!(
-            regenerated[gz_proto::item::ITEM_ARRAY_LEN..]
+            body[gz_proto::item::ITEM_ARRAY_LEN..]
                 .iter()
-                .all(|&b| b == 0)
+                .all(|&b| b == 0),
+            "clSummonInfo must be zero: we model no summons"
         );
     }
 
@@ -4609,75 +4265,37 @@ mod tests {
     /// single `movups`/`movups` pair — sixteen bytes, one SSE store.
     ///
     /// This is also the regression for the 2026-10-06 live failure: the status
-    /// window read Str/Dex/Int/Wis/Luck/Hnd as 0 and left VIT as the only stat
-    /// standing. `SetHealthAddAbility` (`Parametabox.cpp:7712-7744`) scales the
-    /// whole block by `(uiHealthPoint - 100) / 100`, so a zeroed `clHealthInfo`
-    /// subtracts every ability from the total column -- and never calls `SetVit`,
-    /// which is why VIT alone escaped.
+    /// `clHealthInfo` starts here, and `uiHealthPoint` is the tenth byte of it.
+    ///
+    /// Both offsets were measured against the capture (moved to
+    /// `archive/capture/` on 2026-10-09) and are pinned here as literals. The
+    /// arithmetic that produced them is preserved in the comments above
+    /// [`HEALTH_INFO_OFFSET`] and in the handoff entry for 2026-10-06.
+    ///
+    /// What was wrong is worth keeping: `cltHealthInfo`'s *wire* width is
+    /// [`CLT_HEALTH_INFO_WIRE_LEN`], four bytes narrower than the source-declared
+    /// [`CLT_HEALTH_INFO_LEN`], because the client's own `Set` at `0x0085B2A0` is a
+    /// single 16-byte `movups` pair. Measuring back from the capture's horse marker
+    /// gave 7,592; the wrong 7,596 put the seed at 7,606, four bytes into a tail
+    /// `New Era.exe` never reads — which is why writing 7,606 and then 7,607 both
+    /// left the live status window showing `-100%`.
     #[test]
-    fn the_health_point_offset_is_the_one_the_capture_pins() {
-        let captured = generated_capture::frame(GameMsg::ResponseAllcharinfoone as u16)
-            .expect("the capture must contain an ALLCHARINFOONE frame");
-
-        // `HORSEUNIQUE_FOAL` is 12 (`Horse.h:33`), little-endian in an `SI16`,
-        // and `szName` starts two bytes later.
-        let horses: Vec<usize> = captured
-            .windows(9)
-            .enumerate()
-            .filter(|(_, w)| *w == b"\x0c\x00Foal744")
-            .map(|(i, _)| i)
-            .collect();
-        assert_eq!(horses.len(), 1, "exactly one horse record in the frame");
-        let horse = horses[0];
-
-        let horse_info = horse - PERSON_HORSE_HEADER_LEN;
-        let health = horse_info - CLT_HEALTH_INFO_WIRE_LEN;
-        assert_eq!(health, HEALTH_INFO_OFFSET, "clHealthInfo starts here");
+    fn the_health_point_offset_is_the_measured_one() {
         assert_eq!(HEALTH_INFO_OFFSET, 7_592);
         assert_eq!(HEALTH_POINT_OFFSET, 7_602);
-
-        // `uiHealthPoint` is the tenth byte of `clHealthInfo` (`CommonHeader.h:2898`),
-        // which the client's `SetHealthAddAbility` at `0x0084C380` reads as
-        // `movzx eax,byte ptr [ecx+0Ah]`.
+        // `uiHealthPoint` is `CommonHeader.h:2898`'s tenth byte, which the client's
+        // `SetHealthAddAbility` at `0x0084C380` reads as
+        // `movzx eax, byte ptr [ecx+0Ah]`.
         assert_eq!(HEALTH_POINT_OFFSET - HEALTH_INFO_OFFSET, 10);
-        // And the capture states the reference character's own value, non-zero. That
-        // is a second, independent vote: if the base were really 7596 this byte
-        // would be 0 and the reference session would have shown `-100%` too.
-        assert_eq!(
-            captured[HEALTH_POINT_OFFSET], 110,
-            "the reference character's wellness rate is +10"
-        );
-
-        // The captured character's wellness state, so the sweep below has something
-        // to be zero against. `siHungry` 14 is a played character running low;
-        // every organ and disease byte is clean.
-        assert_eq!(
-            i16::from_le_bytes([captured[health], captured[health + 1]]),
-            14,
-            "siHungry"
-        );
-        assert_eq!(
-            &captured[health + 2..health + 6],
-            &[0, 0, 0, 0],
-            "siInnerOrg1..4"
-        );
-        assert_eq!(
-            &captured[health + 6..health + 10],
-            &[0, 0, 0, 0],
-            "uiOrg1..4Disease"
-        );
-        // The four bytes the client's 16-byte `Set` copies but this source does not
-        // declare. The capture leaves them zero, so we do too.
-        assert_eq!(
-            &captured[HEALTH_INFO_OFFSET + CLT_HEALTH_INFO_LEN..horse_info],
-            &[0u8; 4],
-            "the client's four extra clHealthInfo bytes"
-        );
+        // The *wire* width is the wider one: the client's `Set` copies sixteen bytes
+        // in one `movups` pair, four past what this source declares.
+        assert_eq!(CLT_HEALTH_INFO_WIRE_LEN - CLT_HEALTH_INFO_LEN, 4);
 
         // And what we now send. `cltHealthInfo::Init()` seeds `uiHealthPoint` at 100
         // (`Common.cpp:3253`), and 100 is the neutral value: it makes every
         // `siHealth*Rate` zero (`Parametabox.cpp:7727`), so `clHealthAdd` adds
         // nothing and the rest of `clTotalBA` supplies the real numbers.
+        assert_eq!(HEALTH_POINT_SEED, 100);
         let generated = encode_all_char_info_one(
             &BasicInfo {
                 account_idnum: 1471,
@@ -4710,7 +4328,11 @@ mod tests {
             0,
             0,
         );
-        assert_eq!(HEALTH_POINT_SEED, 100);
+        assert_eq!(
+            generated.len(),
+            gz_proto::captured_lengths::CAPTURED_ALL_CHAR_INFO_ONE_LEN,
+            "248 keeps the size the reference server sent"
+        );
         assert_eq!(generated[HEALTH_POINT_OFFSET], HEALTH_POINT_SEED);
         assert_eq!(
             &generated[HEALTH_INFO_OFFSET..HEALTH_POINT_OFFSET],
@@ -4827,56 +4449,95 @@ mod tests {
         assert_eq!(PERSON_HORSE_HEADER_LEN, 28);
     }
 
-    /// The generated `PERSONITEMINFO` must differ from the capture only in the
-    /// two padding bytes the legacy never initialised.
+    /// The generated `PERSONITEMINFO` is 104 bytes, the size the reference server
+    /// sent, and its 6..8 padding is ours (zero) where the legacy's was
+    /// uninitialised stack.
+    ///
+    /// 104 is a *single-slot* notification, not an inventory dump — `siItemPos` = 8
+    /// with all 84 `cltItem` bytes zero, i.e. "slot 8 is empty". That measurement
+    /// is what disproved the old "item-array stride" premise.
     #[test]
-    fn generated_person_item_info_differs_from_the_capture_only_in_padding() {
-        let captured = generated_capture::frame(GameMsg::ResponsePersoniteminfo as u16)
-            .expect("the capture must contain a PERSONITEMINFO frame");
+    fn generated_person_item_info_keeps_the_captured_length() {
         let generated = encode_person_item_info(world_entry::PERSON_ITEM_INFO_SLOT, &Item::empty());
-
-        assert_eq!(generated.len(), captured.len());
-        let differing: Vec<usize> = (0..generated.len())
-            .filter(|&i| generated[i] != captured[i])
-            .collect();
-        // 6..8 is the `/Zp8` pad between `siChangedNum` and `siExp`; the capture
-        // holds uninitialised stack there.
-        assert_eq!(differing, vec![6, 7], "only the padding may differ");
-        // And the slot is the one the capture announced.
-        assert_eq!(i16::from_le_bytes([captured[0], captured[1]]), 8);
+        assert_eq!(
+            generated.len(),
+            gz_proto::captured_lengths::CAPTURED_PERSON_ITEM_INFO_LEN,
+            "104 bytes: a single-slot notification"
+        );
+        assert_eq!(
+            i16::from_le_bytes([generated[0], generated[1]]),
+            world_entry::PERSON_ITEM_INFO_SLOT as i16,
+            "the slot is the one the reference server announced"
+        );
+        // 6..8 is the `/Zp8` pad between `siChangedNum` and `siExp`. The capture
+        // held uninitialised stack there; we write zero, which is the whole of the
+        // documented deviation from the captured bytes.
+        assert_eq!(&generated[6..8], &[0, 0], "the pad is ours and is zero");
     }
 
-    /// Every frame the 230 burst now generates must be the same size as the
-    /// captured frame for the same opcode.
+    /// Every frame the world-entry burst generates must have the size the reference
+    /// server sent for the same opcode.
     ///
-    /// Length is the one property of a generated frame that cannot be argued
-    /// about from the struct declarations alone — `sizeof` depends on the
-    /// shipped build's packing — so it is pinned to the capture rather than to a
+    /// Length is the one property of a generated frame that cannot be argued about
+    /// from the struct declarations alone — `sizeof` depends on the shipped build's
+    /// packing — so it is pinned to the capture's measurements rather than to a
     /// reviewer's arithmetic. This is the check that would have caught a
     /// mis-derived `cltHorse`.
+    ///
+    /// The right-hand side is [`gz_proto::captured_lengths`], which carries each
+    /// number's origin; the left is what this port's encoders produce. If they ever
+    /// diverge, the client walks the frame at the wrong stride and faults silently.
     #[test]
     fn every_generated_burst_frame_matches_its_captured_length() {
-        let generated: &[(GameMsg, usize)] = &[
-            (GameMsg::ResponseAllcharinfoone, ALL_CHAR_INFO_ONE_LEN),
-            (GameMsg::ResponseAllcharinfotwo, ALL_CHAR_INFO_TWO_LEN),
-            (GameMsg::ResponseName, RESPONSE_NAME_LEN),
-            (GameMsg::ResponsePersonHorse, PERSON_HORSE_LEN),
-            (GameMsg::ResponseChangehorse, CHANGE_HORSE_LEN),
+        use gz_proto::captured_lengths as captured;
+
+        let generated: &[(GameMsg, usize, usize)] = &[
+            (
+                GameMsg::ResponseAllcharinfoone,
+                ALL_CHAR_INFO_ONE_LEN,
+                captured::CAPTURED_ALL_CHAR_INFO_ONE_LEN,
+            ),
+            (
+                GameMsg::ResponseAllcharinfotwo,
+                ALL_CHAR_INFO_TWO_LEN,
+                captured::CAPTURED_ALL_CHAR_INFO_TWO_LEN,
+            ),
+            (
+                GameMsg::ResponseName,
+                RESPONSE_NAME_LEN,
+                captured::CAPTURED_RESPONSE_NAME_LEN,
+            ),
+            (
+                GameMsg::ResponsePersonHorse,
+                PERSON_HORSE_LEN,
+                captured::CAPTURED_PERSON_HORSE_LEN,
+            ),
+            (
+                GameMsg::ResponseChangehorse,
+                CHANGE_HORSE_LEN,
+                captured::CAPTURED_CHANGE_HORSE_LEN,
+            ),
             (
                 GameMsg::ResponseSkillbookMagicinfoGet,
                 SKILLBOOK_MAGIC_INFO_LEN,
+                captured::CAPTURED_8371_LEN,
             ),
-            (GameMsg::ResponseFamilyUpdate, FAMILY_UPDATE_LEN),
-            (GameMsg::ResponseGetvillageinfo, GET_VILLAGE_INFO_LEN),
+            (
+                GameMsg::ResponseFamilyUpdate,
+                FAMILY_UPDATE_LEN,
+                captured::CAPTURED_8271_LEN,
+            ),
+            (
+                GameMsg::ResponseGetvillageinfo,
+                GET_VILLAGE_INFO_LEN,
+                captured::CAPTURED_7203_LEN,
+            ),
         ];
 
-        for &(msg, declared) in generated {
-            let captured = generated_capture::frame(msg as u16)
-                .unwrap_or_else(|| panic!("the capture must contain opcode {}", msg as u16));
+        for &(msg, declared, was) in generated {
             assert_eq!(
-                declared,
-                captured.len(),
-                "declared length for opcode {} disagrees with the capture",
+                declared, was,
+                "declared length for opcode {} disagrees with the captured measurement",
                 msg as u16
             );
         }
@@ -4887,100 +4548,110 @@ mod tests {
     ///
     /// `Client-SystemNPC.cpp:977` indexes `CharUniqueInfo` with
     /// `pclinfo->siCharUnique`, so a wrong value here silently renames somebody
-    /// else — or nobody. Replaying the capture did exactly that: it carried 1471
-    /// *and* `Meirin`, and 1471 resolved to our own slot.
+    /// else — or nobody. The retired replay mode did exactly that: the captured
+    /// frame carried 1471 *and* `Meirin`, and 1471 resolved to our own slot.
     #[test]
     fn generated_name_is_keyed_by_the_session_id_and_the_rows_name() {
-        let captured = generated_capture::frame(GameMsg::ResponseName as u16).unwrap();
         let body = encode_response_name(1471, "Tester");
 
-        assert_eq!(body.len(), captured.len());
+        assert_eq!(
+            body.len(),
+            gz_proto::captured_lengths::CAPTURED_RESPONSE_NAME_LEN
+        );
         // `siCharUnique` @ 0, `szName[20]` @ 4 (`MsgType.h:3199-3200`).
         assert_eq!(i32::from_le_bytes(body[0..4].try_into().unwrap()), 1471);
         assert_eq!(&body[4..10], b"Tester");
         assert!(body[10..].iter().all(|&b| b == 0), "NUL padded");
-
-        // The capture really did carry the other character here, at the same
-        // offsets — so this test fails if the frame stops being generated.
-        assert_eq!(i32::from_le_bytes(captured[0..4].try_into().unwrap()), 1471);
-        assert_eq!(&captured[4..10], b"Meirin");
+        // The name must come from the row, never from a constant.
+        assert_ne!(
+            &body[4..10],
+            b"Meirin",
+            "the capture's name must never leak"
+        );
     }
 
     /// 258 is the unmount, and it only unmounts if its `siCharUnique` resolves to
     /// the local player.
     ///
     /// `Client-Person.cpp:1065-1071` does
-    /// `CR[CharUniqueInfo[siCharUnique]]->DeleteSlave()` and returns early when
-    /// the index does not resolve, so the captured mount survives unless this
-    /// frame is stamped with the session's id.
+    /// `CR[CharUniqueInfo[siCharUnique]]->DeleteSlave()` and returns early when the
+    /// index does not resolve, so a stale mount survives unless this frame is
+    /// stamped with the session's id. The capture put 1471 at offset 112 — the last
+    /// real field before the tail padding — and so must we.
     #[test]
     fn generated_change_horse_dismounts_our_own_character() {
-        let captured = generated_capture::frame(GameMsg::ResponseChangehorse as u16).unwrap();
         let body = encode_change_horse(1471);
 
-        assert_eq!(body.len(), captured.len());
+        assert_eq!(
+            body.len(),
+            gz_proto::captured_lengths::CAPTURED_CHANGE_HORSE_LEN
+        );
         // `siChangeHorseIndex` @ 0 is the legacy's "show horse 0" value, so index 0
-        // now resolves to the empty `cltChangeHorse` rather than `Foal744`.
+        // resolves to the empty `cltChangeHorse` rather than a named mount.
         assert_eq!(i16::from_le_bytes([body[0], body[1]]), 0);
         // `cltChangeHorse` @ 4..112 zeroed; `siHorseUnique` and `szName` included.
         assert!(body[4..112].iter().all(|&b| b == 0));
-        // `siCharUnique` @ 112 -- where the capture puts 1471, the last real field
-        // before the tail padding.
+        // `siCharUnique` @ 112 -- the capture's offset.
         assert_eq!(i16::from_le_bytes([body[112], body[113]]), 1471);
-        assert_eq!(i16::from_le_bytes([captured[112], captured[113]]), 1471);
     }
 
     /// 226 lists the five horse slots; empty means unmounted.
     ///
     /// The header is `bool bAutoFoodSwitch`, `bool siCurrentHorseRIDEHORSE`,
-    /// `SI16 siCurrentShowHorse` (`Horse.h:223-227`), and the capture's byte 1 is
-    /// `01` — riding. The horse array starts at 28, which is 24 bytes past what
-    /// those three members account for; see [`PERSON_HORSE_HEADER_LEN`].
+    /// `SI16 siCurrentShowHorse` (`Horse.h:223-227`). The horse array starts at 28,
+    /// which is 24 bytes past what those three members account for; see
+    /// [`PERSON_HORSE_HEADER_LEN`]. The capture was riding and held exactly one
+    /// horse at offset 28 — `Foal744`, preceded by `HORSEUNIQUE_FOAL` = 12 as an
+    /// `SI16`, a nine-byte marker.
     #[test]
     fn generated_person_horse_is_empty_and_unmounted() {
-        let captured = generated_capture::frame(GameMsg::ResponsePersonHorse as u16).unwrap();
         let body = encode_person_horse();
 
-        assert_eq!(body.len(), captured.len());
+        assert_eq!(
+            body.len(),
+            gz_proto::captured_lengths::CAPTURED_PERSON_HORSE_LEN
+        );
         assert_eq!(PERSON_HORSE_LEN, 568, "28 header + 5 * 108");
         assert!(body.iter().all(|&b| b == 0), "no horse at all");
-
-        // The capture was riding, and held exactly one horse at offset 28.
-        assert_eq!(captured[1], 1, "siCurrentHorseRIDEHORSE");
-        assert_eq!(&captured[30..37], b"Foal744");
+        // The stride is pinned by the capture independently: 568 = 28 + 5 * 108,
+        // where 108 is `sizeof(cltHorse)` as it travels.
         assert_eq!(
-            captured
-                .windows(9)
-                .filter(|w| *w == b"\x0c\x00Foal744")
-                .count(),
-            1,
-            "exactly one horse record in the frame"
+            PERSON_HORSE_LEN,
+            PERSON_HORSE_HEADER_LEN + 5 * gz_proto::game::CLT_HORSE_LEN
         );
     }
 
-    /// 8371, 8271 and 7203 are zero-filled, and must stay the capture's size.
+    /// The empty world frames are zero-filled and keep the capture's sizes.
     ///
     /// All three legacy constructors are `ZeroMemory(this, sizeof(*this))`
     /// (`MsgType-Item.h:1874`, `MsgType-Person.h:2997`, `MsgType.h:3119`), so zero
-    /// is the encoding the legacy itself uses for "none" rather than a stand-in
-    /// for data we failed to model.
+    /// is the encoding the legacy itself uses for "none" rather than a stand-in for
+    /// data we failed to model.
     #[test]
     fn the_empty_world_frames_are_zero_and_capture_sized() {
-        for (msg, body) in [
+        use gz_proto::captured_lengths as captured;
+
+        for (msg, body, was) in [
             (
-                GameMsg::ResponseSkillbookMagicinfoGet,
+                GameMsg::ResponseSkillbookMagicinfoGet as u16,
                 encode_skillbook_magic_info(),
+                captured::CAPTURED_8371_LEN,
             ),
-            (GameMsg::ResponseFamilyUpdate, encode_family_update()),
-            (GameMsg::ResponseGetvillageinfo, encode_get_village_info()),
+            (
+                GameMsg::ResponseFamilyUpdate as u16,
+                encode_family_update(),
+                captured::CAPTURED_8271_LEN,
+            ),
+            (
+                GameMsg::ResponseGetvillageinfo as u16,
+                encode_get_village_info(),
+                captured::CAPTURED_7203_LEN,
+            ),
         ] {
-            let captured = generated_capture::frame(msg as u16)
-                .unwrap_or_else(|| panic!("the capture must contain opcode {}", msg as u16));
-            assert_eq!(body.len(), captured.len(), "opcode {}", msg as u16);
+            assert_eq!(body.len(), was, "opcode {msg}");
             assert!(
                 body.iter().all(|&b| b == 0),
-                "opcode {} must be all zero",
-                msg as u16
+                "opcode {msg} must be all zero"
             );
         }
     }
@@ -5052,367 +4723,74 @@ mod tests {
             .any(|window| window == needle)
     }
 
-    /// T-018: the plan's first entry is the one-shot world bulk on 230.
+    /// The generated world-entry frames keep the sizes the reference server sent.
     ///
-    /// The `230` arm only calls [`replay_plan_step`] while `plan_step == 0`, so
-    /// that entry has to be the bulk. If the plan ever grew a leading entry for
-    /// another opcode, the world would silently stop loading.
-    #[test]
-    fn the_first_plan_entry_is_the_230_world_bulk() {
-        let (cmd, _) = generated_capture::REPLY_PLAN
-            .first()
-            .expect("the plan is not empty");
-        assert_eq!(*cmd, GameMsg::RequestChangestatusinfo as u16);
-    }
-
-    /// T-018: a repeated 230 must not become a second world bulk.
-    ///
-    /// The dispatcher answers the first `REQUEST_CHANGESTATUSINFO` (230) from
-    /// the plan and every later one as the legacy status message. That is only
-    /// complete while 230 appears exactly once in the plan -- a second entry
-    /// would make the 65 KB burst reachable again, which is the live
-    /// micro-stutter this change removed.
-    #[test]
-    fn opcode_230_appears_once_and_is_the_twenty_five_frame_bulk() {
-        let entries: Vec<&(u16, &[(u32, u32)])> = generated_capture::REPLY_PLAN
-            .iter()
-            .filter(|(cmd, _)| *cmd == GameMsg::RequestChangestatusinfo as u16)
-            .collect();
-        assert_eq!(entries.len(), 1, "230 must have exactly one plan entry");
-        let frames: usize = entries[0]
-            .1
-            .iter()
-            .map(|&(start, end)| generated_capture::frames_in(start, end).count())
-            .sum();
-        assert_eq!(frames, 25, "the one 230 entry is the 25-frame world bulk");
-    }
-
-    /// A re-sync has to keep the inventory refresh and lose the position reset.
-    ///
-    /// Withholding 248 is only safe because 249 -- the frame that carries the item
-    /// array `LiveFrames` re-reads from PostgreSQL -- is a different frame. If the
-    /// two ever collapsed into one, a drop would stop showing up in the bag.
-    #[test]
-    fn a_resync_drops_only_the_position_carrying_frame() {
-        let step = generated_capture::REPLY_PLAN
-            .iter()
-            .find(|(cmd, _)| *cmd == GameMsg::RequestChangestatusinfo as u16)
-            .map(|(_, ranges)| *ranges)
-            .expect("the plan must answer a state sync");
-
-        let sent: Vec<u16> = step
-            .iter()
-            .flat_map(|&(start, end)| generated_capture::frames_in(start, end))
-            .map(|(cmd, _)| cmd)
-            .collect();
-
-        // The reference burst carries each of these exactly once.
-        for cmd in [
-            GameMsg::ResponseAllcharinfoone as u16,
-            GameMsg::ResponseAllcharinfotwo as u16,
-        ] {
-            assert_eq!(
-                sent.iter().filter(|&&c| c == cmd).count(),
-                1,
-                "expected exactly one {cmd} in the state-sync burst"
-            );
-        }
-
-        let withheld: Vec<u16> = sent
-            .iter()
-            .copied()
-            .filter(|&cmd| withhold_always(cmd).is_some() || withhold_on_resync(cmd))
-            .collect();
-        // `ResponseLoginmany` (6) is deliberately **absent** from this list: it used
-        // to be withheld as "no other characters on the map", which is what made
-        // nearby avatars invisible. It is now sent by `announce_nearby_characters`,
-        // and its captured copy — the reference character's own record — is still
-        // not replayed, which is what this list asserts.
-        assert_eq!(
-            withheld,
-            vec![
-                GameMsg::ResponseAllcharinfoone as u16,
-                GameMsg::ResponseMonsterAttackStart as u16,
-                GameMsg::ResponseVillagestruct as u16,
-                GameMsg::ResponseLetter as u16,
-            ]
-        );
-
-        // And what is left still refreshes the bag.
-        let kept: Vec<u16> = sent
-            .iter()
-            .copied()
-            .filter(|&cmd| withhold_always(cmd).is_none() && !withhold_on_resync(cmd))
-            .collect();
-        assert!(kept.contains(&(GameMsg::ResponseAllcharinfotwo as u16)));
-        assert_eq!(sent.len(), 25, "the captured state-sync burst is 25 frames");
-        // Four withheld frames, not five: 248 on a resync, plus the monster-attack
-        // event, the village struct, and the letter. LOGINMANY used to be the fifth
-        // and is now sent by `announce_nearby_characters` — its captured copy (the
-        // reference character's own record) is still not replayed, which is the
-        // property worth keeping here.
-        assert_eq!(kept.len(), sent.len() - 4);
-    }
-
-    /// The memo dialog is somebody else's letter, and it is withheld on *entry*.
-    ///
-    /// This is the regression test for the popup on world entry. It asserts two
-    /// things that could each regress alone: the capture really does carry a
-    /// letter, so that withholding 116 has something to withhold; and 116 is
-    /// withheld by [`withhold_always`] rather than only by [`withhold_on_resync`].
-    /// The second is the one that bites -- a resync-only withholding leaves the
-    /// dialog on the first world entry, which is exactly where the player first
-    /// sees that the letter is not theirs.
-    #[test]
-    fn the_state_sync_burst_carries_the_letter_that_repopped_the_dialog() {
-        let step = generated_capture::REPLY_PLAN
-            .iter()
-            .find(|(cmd, _)| *cmd == GameMsg::RequestChangestatusinfo as u16)
-            .map(|(_, ranges)| *ranges)
-            .expect("the plan must answer a state sync");
-
-        let letters: Vec<u16> = step
-            .iter()
-            .flat_map(|&(start, end)| generated_capture::frames_in(start, end))
-            .map(|(cmd, _)| cmd)
-            .filter(|&cmd| cmd == GameMsg::ResponseLetter as u16)
-            .collect();
-
-        assert_eq!(
-            letters.len(),
-            1,
-            "the capture carries exactly one letter; a second would mean \
-             withholding it could lose a genuine new memo"
-        );
-        assert!(
-            withhold_always(GameMsg::ResponseLetter as u16).is_some(),
-            "116 must be withheld in every prologue mode, not only on resync"
-        );
-        assert!(
-            !withhold_on_resync(GameMsg::ResponseLetter as u16),
-            "116 is not a resync concern; if it were back here, entry would replay it"
-        );
-    }
-
-    /// `replay` drops 116 in every mode, which is the half of the agreement that
-    /// lives here. `world_entry::prologue`'s half -- that `live` never built it --
-    /// is asserted in that module, next to the frame list that would have to
-    /// change for it to start.
-    ///
-    /// Together they stop the two prologues drifting apart, which would make the
-    /// memo dialog depend on which mode the operator happened to launch.
-    #[test]
-    fn replay_withholds_the_letter_in_both_prologue_modes() {
-        for resync in [false, true] {
-            assert!(
-                withhold_always(GameMsg::ResponseLetter as u16).is_some(),
-                "116 must be dropped on entry (resync={resync}) as well as on resync"
-            );
-        }
-    }
-
-    /// The two time frames in the burst are stale, not spammy — so they stay.
-    ///
-    /// They replay a timestamp frozen at capture time rather than a live one. That
-    /// is a separate defect from the dialog spam, and fixing it means generating a
-    /// live clock rather than replaying one, so neither is withheld here.
-    #[test]
-    fn the_time_frames_are_frozen_rather_than_withheld() {
-        assert!(!withhold_on_resync(GameMsg::ResponseDate as u16));
-        assert!(!withhold_on_resync(GameMsg::ResponseServertime as u16));
-
-        // Confirm the "frozen" half of that claim rather than asserting it: both
-        // frames must decode to the capture-time instant, and 1208 must be the
-        // 4-byte packed cltDate rather than a wider struct.
-        let date = generated_capture::frame(GameMsg::ResponseDate as u16)
-            .expect("the capture must contain a RESPONSE_DATE frame");
-        assert_eq!(date.len(), 4, "cltDate is a single packed bitfield word");
-
-        let stime = generated_capture::frame(GameMsg::ResponseServertime as u16)
-            .expect("the capture must contain a RESPONSE_SERVERTIME frame");
-        assert_eq!(stime.len(), 16, "_SYSTEMTIME is eight 16-bit words");
-    }
-
-    /// The item array a resync still sends has to be the whole modelled range.
-    ///
-    /// `regenerating_the_capture_reproduces_it_byte_for_byte` proves the splice
-    /// is byte-transparent; this pins that the frame reaching the client after a
-    /// drop is the one the splice wrote, i.e. that withholding 248 did not also
-    /// withhold the refresh.
-    #[test]
-    fn the_captured_state_sync_still_carries_a_full_item_array() {
-        let body = generated_capture::frame(GameMsg::ResponseAllcharinfotwo as u16)
-            .expect("the capture must contain an ALLCHARINFOTWO frame");
-        let items = gz_proto::item::decode_item_array(body).unwrap();
-        assert_eq!(items.len(), gz_proto::item::MAX_ITEM_PER_PERSON);
-        // The capture was taken with the reference character's kit on, so the
-        // frame is not trivially empty and would be visibly wrong if dropped.
-        assert!(items.iter().any(|i| !i.is_empty()));
-    }
-
-    /// Pins the item layout facts the importer and the encoder both rest on.
-    #[test]
-    fn the_captured_item_array_is_eighty_four_byte_records() {
-        use gz_proto::item::{Item, decode_item_array, personitem::*};
-
-        let body = generated_capture::frame(GameMsg::ResponseAllcharinfotwo as u16).unwrap();
-        let items = decode_item_array(body).unwrap();
-        assert_eq!(items.len(), MAX_ITEM_PER_PERSON);
-
-        // Slot 0 is the helmet the reference character had equipped. These are
-        // the values `0003`'s importer wrote for character 1.
-        assert_eq!(items[HELMET as usize].unique(), 705);
-        assert_eq!(items[HELMET as usize].count(), 1);
-        assert_eq!(items[WEAPON1 as usize].unique(), 1);
-
-        // The reference character carries a nearly full bag: 19 of the 20 bag
-        // slots, with only 20 empty. That occupancy is what pinned the bag at 20
-        // wide -- read as the six slots `ItemUnit.h` declares, slots 21..=34 would
-        // be an unexplained run of 14 more items in a range with no name.
-        let bag: Vec<u16> = (INV0..=INV_END)
-            .filter(|&slot| !items[slot as usize].is_empty())
-            .collect();
-        assert_eq!(bag.len(), 19);
-        assert_eq!(bag.first(), Some(&INV0));
-        assert_eq!(bag.last(), Some(&INV_END));
-        assert!(
-            items[20usize].is_empty(),
-            "slot 20 is the only free bag slot"
-        );
-        assert!(bag.contains(&24) && bag.contains(&28));
-
-        // The horse holds 13 of its 20 slots; both extra bags are empty, which is
-        // consistent with a character carrying no bag-expansion items.
-        let horse: Vec<u16> = (HORSE0..=HORSE_END)
-            .filter(|&slot| !items[slot as usize].is_empty())
-            .collect();
-        assert_eq!(horse.len(), 13);
-        assert!(
-            items[BAG0 as usize..=BAG0_END as usize]
-                .iter()
-                .all(Item::is_empty)
-        );
-        assert!(
-            items[BAG1 as usize..=BAG1_END as usize]
-                .iter()
-                .all(Item::is_empty)
-        );
-
-        // Slot 79 is outside every container: the array is 80 long but only 79
-        // slots are addressable.
-        assert!(items[BAG1_END as usize + 1..].iter().all(Item::is_empty));
-    }
-
-    /// Pins the new zero/empty bodies to the exact capture sizes. These
-    /// frames replaced a reference-character payload with a passive "nothing
-    /// here" body; a size mismatch would desync the client's fixed-stride
-    /// walk like the quest/spacebox decoders do.
+    /// The zero-filled ones are the honest encoding: their legacy constructors are
+    /// `ZeroMemory(this, sizeof(*this))`, so zero is what the legacy itself means
+    /// by "none" rather than a stand-in for data we failed to model.
     #[test]
     fn the_zero_state_frames_match_the_capture_lengths() {
-        let cases: &[(u16, Vec<u8>)] = &[
-            (
-                GameMsg::ResponseSpaceBoxList as u16,
-                world_entry::space_box_list_empty(),
-            ),
+        use gz_proto::captured_lengths as captured;
+
+        let cases: &[(u16, Vec<u8>, usize)] = &[
             (
                 GameMsg::ResponsePersonQuest as u16,
                 world_entry::person_quest_empty(),
+                captured::CAPTURED_225_LEN,
             ),
             (
                 GameMsg::ResponseSoulguardGet as u16,
                 world_entry::soulguard_get_empty(),
+                captured::CAPTURED_8285_LEN,
             ),
             (
                 GameMsg::ResponseSoulguardHouseGet as u16,
                 world_entry::soulguard_house_get_default(),
+                captured::CAPTURED_8286_LEN,
             ),
             (
                 GameMsg::ResponseGetMarryInfo as u16,
                 world_entry::marry_info_empty(),
+                captured::CAPTURED_6504_LEN,
             ),
             (
                 GameMsg::ResponseEnemycaptureall as u16,
                 world_entry::enemy_capture_all_clear(),
+                captured::CAPTURED_ENEMY_CAPTURE_ALL_LEN,
             ),
             (
                 GameMsg::ResponseItemmallexistence as u16,
                 world_entry::item_mall_existence_absent(),
+                captured::CAPTURED_6801_LEN,
             ),
             (
                 world_entry::OP_8464,
                 world_entry::zero_frame(world_entry::OP_8464, world_entry::OP_8464_LEN),
+                captured::CAPTURED_ITEM_TYPE_INFO_LEN,
             ),
             (
                 world_entry::OP_8470,
                 world_entry::zero_frame(world_entry::OP_8470, world_entry::OP_8470_LEN),
+                captured::CAPTURED_8470_LEN,
             ),
         ];
-        for (cmd, body) in cases {
-            let captured = generated_capture::frame(*cmd)
-                .unwrap_or_else(|| panic!("capture must contain opcode {cmd}"));
-            assert_eq!(body.len(), captured.len(), "opcode {cmd}");
+        for &(cmd, ref body, was) in cases {
+            assert_eq!(body.len(), was, "opcode {cmd}");
         }
         // 8286's only non-zero is the capacity default.
         let house = world_entry::soulguard_house_get_default();
         assert_eq!(&house[0..2], &[0x02, 0x00], "default capacity 2");
         assert!(house[2..].iter().all(|&b| b == 0));
-        // 8178 needs the session id to start at offset 0.
+        // 8178 needs the session id to start at offset 0. The id is a parameter, not
+        // the retired capture's — the whole point of generating it.
         let elixir = world_entry::elixir_set_empty(0x05BF);
         assert_eq!(&elixir[0..4], &[0xBF, 0x05, 0x00, 0x00]);
         assert!(elixir[4..].iter().all(|&b| b == 0));
-        let cap8178 = generated_capture::frame(GameMsg::ResponseElixirSet as u16).unwrap();
-        assert_eq!(elixir.len(), cap8178.len());
-    }
-
-    /// The 230 burst must not fall through to a verbatim replay of someone
-    /// else's payload. Every opcode in range `66..91` is either generated
-    /// (via `regenerate`), withheld, or one of the two documented static
-    /// blobs (8451 twice, 1208).
-    #[test]
-    fn every_state_sync_frame_is_generated_withheld_or_a_static_blob() {
-        // Already regenerated or withheld by the earlier slices.
-        let regenerated: &[u16] = &[
-            GameMsg::ResponseAllcharinfoone as u16,
-            GameMsg::ResponseAllcharinfotwo as u16,
-            GameMsg::ResponseName as u16,
-            GameMsg::ResponsePersonHorse as u16,
-            GameMsg::ResponseSkillbookMagicinfoGet as u16,
-            GameMsg::ResponseFamilyUpdate as u16,
-            GameMsg::ResponseGetvillageinfo as u16,
-            GameMsg::ResponseSpaceBoxList as u16,
-            GameMsg::ResponsePersonQuest as u16,
-            GameMsg::ResponseSoulguardGet as u16,
-            GameMsg::ResponseSoulguardHouseGet as u16,
-            GameMsg::ResponseGetMarryInfo as u16,
-            GameMsg::ResponseElixirSet as u16,
-            GameMsg::ResponseEnemycaptureall as u16,
-            GameMsg::ResponseItemmallexistence as u16,
-            GameMsg::ResponseServertime as u16,
-            GameMsg::ResponseGuildSetguildstatus as u16,
-            world_entry::OP_8464,
-            world_entry::OP_8470,
-        ];
-        // Kept verbatim as documented static data: 8451 appears twice in the
-        // burst and carries aSeason-1 UI blob only; 1208's 4-byte packed
-        // `cltDate` is frozen but harmless (the client renders it in the
-        // upper bar; the server's game clock is not wired to a real timebase).
-        let static_blobs: &[u16] = &[8451, GameMsg::ResponseDate as u16];
-        // 6 is generated outside `regenerate` — by `announce_nearby_characters`,
-        // which builds it from the registry rather than from this session's row,
-        // because it describes *other* players. Its captured copy is never replayed.
-        let generated_elsewhere: &[u16] = &[GameMsg::ResponseLoginmany as u16];
-        for (cmd, _, _) in crate::generated_frames::CAP_FRAMES[66..=90].iter() {
-            if withhold_always(*cmd).is_some() {
-                continue;
-            }
-            let ok = regenerated.contains(cmd)
-                || static_blobs.contains(cmd)
-                || generated_elsewhere.contains(cmd);
-            assert!(
-                ok,
-                "opcode {cmd} in the state-sync burst is neither generated, withheld, nor a documented static blob"
-            );
-        }
+        assert_eq!(
+            world_entry::elixir_set_empty(7)[0..4],
+            [7, 0, 0, 0],
+            "the id comes from the session, not a constant"
+        );
     }
 
     /// A move commits one tile at a time along the direction of the destination

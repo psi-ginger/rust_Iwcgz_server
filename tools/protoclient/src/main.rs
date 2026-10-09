@@ -393,6 +393,14 @@ async fn main() -> Result<(), AnyError> {
     Ok(())
 }
 
+/// How much of `deadline` is left, floored at a millisecond so a per-read timeout
+/// is never zero (`tokio::time::timeout` with a zero duration always expires).
+fn remaining(deadline: std::time::Instant) -> std::time::Duration {
+    deadline
+        .saturating_duration_since(std::time::Instant::now())
+        .max(std::time::Duration::from_millis(1))
+}
+
 /// Walks a second account all the way into the world, then asserts the 200 fan
 /// (slice 6 B1) reaches it.
 ///
@@ -439,17 +447,34 @@ async fn probe_observer_fan(
     );
     if observer.char_unique == mover_id {
         return Err(format!(
-            "observer and mover share char_unique {mover_id}: that is the capture-mode pin \
-             (CAPTURED_CHAR_UNIQUE), under which the client discards the other's \
-             position updates. Run the server with GAME_PROLOGUE=live"
+            "observer and mover share char_unique {mover_id}: the client treats the other's \
+             position updates as its own (bselfswitch) and would ignore them. The server \
+             allocates one id per session, so this means two sessions were bound to one \
+             character"
         )
         .into());
     }
 
-    // (1) The observer must already know the mover exists. `Session::enter` sends
-    // REQUEST_SELECTCHAR for *this* connection, and the server answers that by
-    // telling everyone already in the near block about the newcomer — so the mover
-    // is the one being announced here, and the record is already waiting.
+    // Close the gap first. The two characters' positions persist between probe runs,
+    // so after a few of them the mover has walked out of the observer's 3x3 block and
+    // no announcement reaches it. Walking the observer onto the mover's cell makes
+    // the run self-contained instead of dependent on leftover state — and it also
+    // exercises the cell-crossing announcement, which is how the legacy makes a
+    // character appear to somebody who walks up to them (`m_pNewCell`,
+    // `ServerMap.cpp:73-150`).
+    if !observer.is_near(mover.spawn_x, mover.spawn_y) {
+        println!(
+            "probe: observer at ({}, {}) is not in the mover's near block; walking it to ({}, {})",
+            observer.spawn_x, observer.spawn_y, mover.spawn_x, mover.spawn_y
+        );
+        observer.send_move((mover.spawn_x, mover.spawn_y)).await?;
+        // One tile per `5000 / move_speed` ms; a cell is 10x15 tiles.
+        tokio::time::sleep(std::time::Duration::from_millis(9_000)).await;
+    }
+
+    // (1) The observer must know the mover exists. Either the announcement arrived at
+    //     entry (they spawned together) or it arrived because the observer just
+    //     crossed into the mover's cell.
     let announced = observer
         .await_login_many_naming(mover_id, std::time::Duration::from_secs(10))
         .await?
@@ -494,8 +519,10 @@ async fn probe_observer_fan(
     let mut bystander_frames = 0usize;
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
     while std::time::Instant::now() < deadline && seen.len() < 3 {
-        let Some((cmd, plain)) = observer.read_frame().await? else {
-            return Err("observer socket closed while waiting for the fan".into());
+        // A per-read timeout, not just a loop deadline: without one the loop blocks
+        // forever on a silent socket instead of reporting that the fan went quiet.
+        let Some((cmd, plain)) = observer.read_frame_within(remaining(deadline)).await? else {
+            break;
         };
         if cmd != GameMsg::ResponseCharupdate as u16 {
             continue;
@@ -567,6 +594,14 @@ struct Session {
     /// The map from the same frame's `uiMapIndex`, needed to check that a record
     /// naming this character is on a map the client already holds.
     spawn_map: u32,
+    /// LOGINMANY records seen while entering, which must not be thrown away.
+    ///
+    /// The announcement about the other characters is sent *with* the entry
+    /// sequence, so it can arrive before the village-struct reply that `enter`
+    /// waits for. An earlier version dropped every frame that was not the awaited
+    /// one, which made the observer probe wait for a 6 that had already gone past —
+    /// a race that showed up as an intermittent hang, which is worse than a failure.
+    seen_login_many: Vec<MakeCharInfo>,
 }
 
 /// The socket half of a [`Session`]: how its bytes are framed and deciphered.
@@ -606,7 +641,44 @@ impl Session {
             spawn_x: who.spawn_x,
             spawn_y: who.spawn_y,
             spawn_map: who.spawn_map,
+            seen_login_many: Vec::new(),
         }
+    }
+
+    /// Whether `spawn` is inside this character's 3×3 near cell, using the same
+    /// 10×15-tile cells the server's fan uses.
+    ///
+    /// The observer cannot *receive* a 6 about somebody it is not near — the
+    /// server's announcement is itself a near-block query — so the probe has to know
+    /// whether it is in range before it asserts anything about the fan.
+    fn is_near(&self, x: i32, y: i32) -> bool {
+        let cell = |(x, y): (i32, i32)| (x.div_euclid(10), y.div_euclid(15));
+        let (ox, oy) = cell((self.spawn_x, self.spawn_y));
+        let (ax, ay) = cell((x, y));
+        (ox - ax).abs() <= 1 && (oy - ay).abs() <= 1
+    }
+
+    /// Records every LOGINMANY in `payload`, returning whether one named
+    /// `char_unique` — which is also appended to [`Self::seen_login_many`].
+    ///
+    /// Records are packed with no length prefix, so the body is a whole number of
+    /// 592-byte records and the whole body is walked.
+    fn take_login_many(&mut self, cmd: u16, payload: &[u8], char_unique: i32) -> bool {
+        if cmd != GameMsg::ResponseLoginmany as u16 {
+            return false;
+        }
+        let body = &payload[HEADER_SIZE..];
+        let mut found = false;
+        for record in body.chunks(MAKE_CHAR_INFO_PAYLOAD_LEN) {
+            let Ok(info) = MakeCharInfo::decode(record) else {
+                continue;
+            };
+            if i32::from(info.make_char_unique) == char_unique {
+                found = true;
+            }
+            self.seen_login_many.push(info);
+        }
+        found
     }
 
     /// Logs a fresh account in and puts its character in the world.
@@ -747,7 +819,10 @@ impl Session {
             "probe: {user:?} in the world at ({x}, {y}) map {spawn_map} as char_unique {char_unique}"
         );
 
-        // S13: the village-struct round trip the client blocks movement on.
+        // S13: the village-struct round trip the client blocks movement on. Any
+        // LOGINMANY that arrives while waiting is kept, not dropped — it is the
+        // announcement about who else is in the world, and it usually arrives here.
+        let mut seen_login_many: Vec<MakeCharInfo> = Vec::new();
         let mut w = Writer::with_capacity(4);
         w.i32(1);
         send_game_encoded(
@@ -757,14 +832,21 @@ impl Session {
             &w.finish(),
         )
         .await?;
-        let _ = read_until_game_cmd(
-            &mut stream,
-            &mut parser,
-            &mut buf,
-            &mut link_rx,
-            GameMsg::ResponseVillagestruct,
-        )
-        .await?;
+        loop {
+            let (cmd, plain) =
+                read_game_frame(&mut stream, &mut parser, &mut buf, &mut link_rx).await?;
+            if cmd == GameMsg::ResponseVillagestruct as u16 {
+                break;
+            }
+            if cmd != GameMsg::ResponseLoginmany as u16 {
+                continue;
+            }
+            for record in plain[HEADER_SIZE..].chunks(MAKE_CHAR_INFO_PAYLOAD_LEN) {
+                if let Ok(info) = MakeCharInfo::decode(record) {
+                    seen_login_many.push(info);
+                }
+            }
+        }
 
         Ok(Self::adopt(
             Wire {
@@ -781,6 +863,26 @@ impl Session {
                 spawn_map,
             },
         ))
+        .map(|mut s| {
+            s.seen_login_many = seen_login_many;
+            s
+        })
+    }
+
+    /// The next game frame, or `None` at end of stream **or if `within` elapses**.
+    ///
+    /// The timeout is not optional. A probe that reads until a deadline checked
+    /// only *between* frames blocks forever on a silent socket, because there is no
+    /// frame to return to and re-check it — which is how an earlier version of the
+    /// observer probe hung instead of failing.
+    async fn read_frame_within(
+        &mut self,
+        within: std::time::Duration,
+    ) -> Result<Option<(u16, Vec<u8>)>, AnyError> {
+        match tokio::time::timeout(within, self.read_frame()).await {
+            Ok(result) => result,
+            Err(_) => Ok(None),
+        }
     }
 
     /// The next game frame, or `None` at end of stream.
@@ -815,20 +917,26 @@ impl Session {
         char_unique: i32,
         within: std::time::Duration,
     ) -> Result<Option<MakeCharInfo>, AnyError> {
+        // Already seen while entering? That is the common case: the announcement
+        // travels with the entry sequence and usually beats the village reply.
+        if let Some(hit) = self
+            .seen_login_many
+            .iter()
+            .find(|i| i32::from(i.make_char_unique) == char_unique)
+        {
+            return Ok(Some(hit.clone()));
+        }
         let deadline = std::time::Instant::now() + within;
         while std::time::Instant::now() < deadline {
-            let Some((cmd, plain)) = self.read_frame().await? else {
+            let Some((cmd, plain)) = self.read_frame_within(remaining(deadline)).await? else {
                 return Ok(None);
             };
-            if cmd != GameMsg::ResponseLoginmany as u16 {
-                continue;
-            }
-            let body = &plain[HEADER_SIZE..];
-            for record in body.chunks(MAKE_CHAR_INFO_PAYLOAD_LEN) {
-                let info = MakeCharInfo::decode(record)?;
-                if i32::from(info.make_char_unique) == char_unique {
-                    return Ok(Some(info));
-                }
+            if self.take_login_many(cmd, &plain, char_unique) {
+                return Ok(self
+                    .seen_login_many
+                    .iter()
+                    .find(|i| i32::from(i.make_char_unique) == char_unique)
+                    .cloned());
             }
         }
         Ok(None)

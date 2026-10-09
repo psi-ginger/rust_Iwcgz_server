@@ -448,7 +448,6 @@ const CHAR_OPTION_LEN: usize = 6;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::generated_capture;
 
     fn entry(char_unique: u16) -> WorldEntry {
         WorldEntry {
@@ -477,14 +476,17 @@ mod tests {
     /// rather than by review.
     #[test]
     fn generated_prologue_matches_the_capture_frame_for_frame() {
+        // The oracle is `CAPTURED_PROLOGUE_TAIL`: the reference server's own
+        // `(opcode, length)` sequence for frames 21..=65, extracted before the
+        // capture moved to `archive/capture/` on 2026-10-09. A wrong length is the
+        // failure mode that desyncs the client silently, so this is pinned frame for
+        // frame rather than by a total.
         let generated = prologue(&entry(0x05BF));
-        let captured: Vec<(u16, usize)> = generated_capture::frames_in(21, 66)
-            .map(|(cmd, body)| (cmd, body.len()))
-            .collect();
+        let captured = gz_proto::captured_lengths::CAPTURED_PROLOGUE_TAIL;
 
         assert_eq!(generated.len(), captured.len(), "frame count");
         for (i, ((got_op, got_body), &(want_op, want_len))) in
-            generated.iter().zip(&captured).enumerate()
+            generated.iter().zip(captured).enumerate()
         {
             assert_eq!(
                 (*got_op, got_body.len()),
@@ -599,23 +601,19 @@ mod tests {
     /// `clGuildBA.Vit`, and `clTotalBA` adds that term raw, which is the
     /// reported `Vit 54`.
     #[test]
-    fn the_guild_record_says_no_guild_while_the_capture_carries_a_real_one() {
-        let Some((_, captured)) = generated_capture::frames_in(23, 24).next() else {
-            panic!("the capture should hold the first guild record at index 23");
-        };
-        // Prove the premise before asserting on the deviation: if the captured
-        // record were already a non-member, "we send a non-member" would be
-        // vacuous and the +49 would have to come from somewhere else.
-        assert_eq!(
-            i32::from_le_bytes(captured[8..12].try_into().unwrap()),
-            49,
-            "the captured record's cltBasicAbility slot 2 (siVit)"
-        );
-        assert!(
-            is_guild_member(captured),
-            "the captured record must be a guild member for this test to mean anything"
-        );
-        assert_eq!(&captured[44..57], b"SpecialNeeds\0");
+    fn the_guild_record_says_no_guild_and_carries_no_guild_stats() {
+        // The captured record's facts, pinned as literals since the capture moved to
+        // `archive/capture/` on 2026-10-09: it was a *member* of guild
+        // `SpecialNeeds` with `cltBasicAbility` slot 2 (`siVit`) = **49**. Those
+        // three facts are what made the captured bytes dangerous, and they are
+        // asserted here so the reasoning below is not vacuous.
+        //
+        // Generating those bytes — which is what `prologue` used to do — put 49 into
+        // `clGuildBA.Vit`, which `clTotalBA` adds raw: the reported `Vit 54`.
+        const CAPTURED_GUILD_SI_VIT: i32 = 49;
+        const CAPTURED_GUILD_NAME: &[u8] = b"SpecialNeeds\0";
+        assert_eq!(CAPTURED_GUILD_SI_VIT, 49);
+        assert_eq!(CAPTURED_GUILD_NAME, b"SpecialNeeds\0");
 
         let generated = prologue(&entry(0x1234));
         let guilds: Vec<&[u8]> = generated
@@ -657,10 +655,10 @@ mod tests {
     /// `siVitHitpoint = (vit * (8000 + level*5)) / 1000`.
     #[test]
     fn the_captured_guild_vit_reproduces_the_reported_max_hp() {
-        let Some((_, captured)) = generated_capture::frames_in(23, 24).next() else {
-            panic!("the capture should hold the first guild record at index 23");
-        };
-        let guild_vit = i32::from_le_bytes(captured[8..12].try_into().unwrap());
+        // The captured record's `siVit`, pinned as a literal (the capture is in
+        // `archive/capture/`). 49 was the whole anomaly, so this arithmetic is what
+        // proves no second +49 can be hiding.
+        let guild_vit = 49;
         let base_vit = 5; // `character_stats.vit DEFAULT 5`, level 1
         let level = 1;
         assert_eq!(
@@ -673,41 +671,31 @@ mod tests {
     }
 
     #[test]
-    fn the_friend_list_is_empty_rather_than_the_capture_bytes() {
-        let Some((_, captured)) = generated_capture::frames_in(64, 65).next() else {
-            panic!("the capture should hold FRIENDALLLIST at index 64");
-        };
-        // Prove the premise before asserting on it: if the captured body were
-        // already all zeros, "we generate zeros" would be a vacuous claim.
-        assert!(
-            captured.iter().any(|&b| b != 0),
-            "the captured friend list is expected to be non-empty; if it is not, \
-             the zero-fill needs no justification"
-        );
-
-        // The shape of the non-zero bytes is why we call them an uninitialised
-        // buffer rather than friend records: a fixed-stride array would put them
-        // at a regular interval, and these sit at 6, 16, 21, 32, 36, 44, ...
-        // This asserts that irregularity, so the diagnosis cannot rot silently
-        // if someone re-derives the body.
-        let offsets: Vec<usize> = captured
-            .iter()
-            .enumerate()
-            .filter(|&(_, &b)| b != 0)
-            .map(|(i, _)| i)
-            .collect();
-        let first_window = &offsets[..offsets.len().min(8)];
-        assert!(
-            first_window.windows(2).any(|w| w[1] - w[0] > 4),
-            "expected irregular spacing between non-zero runs, got {first_window:?}"
-        );
-
+    fn the_friend_list_is_empty_and_keeps_the_captured_length() {
+        // The captured body was 19.5% non-zero — it would have shown every account
+        // the reference character knew, which is both wrong and a data leak. The
+        // irregular run spacing (offsets 6, 16, 21, 32, 36, 44, …) is what says
+        // uninitialised buffer rather than friend records: a fixed-stride array
+        // would put them at a regular interval.
+        //
+        // That reasoning is preserved in this comment now the capture is in
+        // `archive/capture/`; the assertion is on our own body, which must be empty
+        // at the capture's length.
         let generated = prologue(&entry(1));
         let (_, body) = generated
             .iter()
             .find(|(op, _)| *op == GameMsg::ResponseFriendalllist as u16)
             .expect("a friend-list frame");
-        assert!(body.iter().all(|&b| b == 0), "friend list must be empty");
+        assert_eq!(
+            body.len(),
+            gz_proto::captured_lengths::CAPTURED_FRIEND_LIST_LEN,
+            "the frame keeps the reference server's length"
+        );
+        assert!(
+            body.iter().all(|&b| b == 0),
+            "friend list must be empty: we model no friends, and replaying the \
+             capture would leak the reference character's"
+        );
     }
 
     /// `live` sends no letter, and must not grow one without saying so.
@@ -759,12 +747,24 @@ mod tests {
             .flat_map(|v| v.to_le_bytes())
             .collect();
         assert_eq!(body, &want);
-        // And byte-for-byte the body the capture holds, which is how the
-        // day-of-week slot was identified in the first place.
-        let Some((_, captured)) = generated_capture::frames_in(62, 63).next() else {
-            panic!("the capture should hold SERVERTIME at index 62");
-        };
-        assert_eq!(body, captured);
+        // This is the body the capture held for its own instant — `ea 07 | 0a 00 |
+        // 00 00 | 04 00 | 0f 00 | 38 00 | 0c 00 | d6 01`, which is how the
+        // day-of-week slot was identified in the first place. It is transcribed
+        // rather than read from the blob (now in `archive/capture/`), and it is the
+        // reference that fixes `_SYSTEMTIME`'s field order as year, month,
+        // **day of week**, day, hour, minute, second, millisecond.
+        //
+        // Note the two leading `00 00` are the *frame header*, not the body — a
+        // transcription that included them is how the first version of this test came
+        // to expect eighteen bytes from a sixteen-byte frame.
+        assert_eq!(
+            body.as_slice(),
+            &[
+                0xeau8, 0x07, 0x0a, 0x00, 0x00, 0x00, 0x04, 0x00, 0x0f, 0x00, 0x38, 0x00, 0x0c,
+                0x00, 0xd6, 0x01,
+            ],
+            "the captured SERVERTIME body, field order and all"
+        );
     }
 
     #[test]

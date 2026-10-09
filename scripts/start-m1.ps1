@@ -5,9 +5,13 @@
 # (or Ctrl+C in them) to stop. Both talk to PostgreSQL via DATABASE_URL, which
 # defaults to the development instance in the service sources.
 #
-# This script also supplies the game link-cipher key (GAME_LINK_KEY1/2) and the
-# prologue mode (GAME_PROLOGUE). game.exe has no built-in key and will refuse to
-# start without them, naming the variable it wanted - that is SEC-014, not a bug.
+# This script also supplies the game link-cipher key (GAME_LINK_KEY1/2).
+# game.exe has no built-in key and will refuse to start without them, naming the
+# variable it wanted - that is SEC-014, not a bug.
+#
+# There is no prologue/world-bulk knob any more. The replay mode was retired
+# 2026-10-09: world entry is generated from PostgreSQL and char_unique is
+# allocated per session. A stale GAME_PROLOGUE in the environment is ignored.
 #
 # Prerequisite: `cargo build -p front -p game` has produced target\debug\{front,game}.exe,
 # and the database has been initialized with scripts\db-init.ps1.
@@ -46,20 +50,6 @@ New-Item -ItemType Directory -Force -Path $logDir | Out-Null
 $env:GAME_LINK_KEY1 = if ($env:GAME_LINK_KEY1) { $env:GAME_LINK_KEY1 } else { "12" }
 $env:GAME_LINK_KEY2 = if ($env:GAME_LINK_KEY2) { $env:GAME_LINK_KEY2 } else { "34" }
 
-# Where the post-login world bulk comes from. "capture" replays the recorded
-# session; "live" allocates char_unique per session but sends no world data yet,
-# because generating that is T-017's card. The two cannot be mixed today - 45
-# offsets in cap_s2c.bin carry the capture's character id 0x05BF and the client
-# drops per-character records that do not match its handshake id. So capture is
-# the default, and T-017 flips it to live.
-$env:GAME_PROLOGUE = if ($env:GAME_PROLOGUE) { $env:GAME_PROLOGUE } else { "capture" }
-
-# When the ~67 KB world bulk goes out after char-select. "at-selectchar" (the
-# default) pushes it with the entry prologue; "on230" waits for the client's
-# first REQUEST_CHANGESTATUSINFO exactly as captured, which stalls re-entry for
-# ~25 s because that 230 rides a 30 s timer anchored at *first* world entry.
-$env:GAME_WORLD_BULK = if ($env:GAME_WORLD_BULK) { $env:GAME_WORLD_BULK } else { "at-selectchar" }
-
 $front = Start-Process -FilePath (Join-Path $bin "front.exe") -WorkingDirectory $root `
     -RedirectStandardOutput (Join-Path $logDir "front.log") `
     -RedirectStandardError (Join-Path $logDir "front.err.log") -PassThru
@@ -72,5 +62,5 @@ Write-Host "Logs: $logDir\front.log, $logDir\game.log (+ .err.log)."
 # Every log line is stamped +mm:ss.mmm since that service started, so gaps in
 # the trace are readable directly; this is the wall clock that +0:00.000 maps to.
 Write-Host "Log clock origin: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss.fff')."
-Write-Host "Link key $($env:GAME_LINK_KEY1)/$($env:GAME_LINK_KEY2), prologue $($env:GAME_PROLOGUE), world bulk $($env:GAME_WORLD_BULK)."
+Write-Host "Link key $($env:GAME_LINK_KEY1)/$($env:GAME_LINK_KEY2). World entry is generated from PostgreSQL; char_unique is allocated per session."
 Write-Host "Point the client at 127.0.0.1 and log in as test / test."

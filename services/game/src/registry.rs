@@ -14,24 +14,24 @@
 //!
 //! `char_unique` is the id the wire carries and the id the legacy resolves
 //! against (`GetIDFromCharUnique`, `CharManager.cpp:203`), and it would be the
-//! natural map key — except that in capture prologue mode the server pins every
-//! connection's `char_unique` to the captured character's id (`config.rs`,
-//! `CAPTURED_CHAR_UNIQUE`), because each replayed per-character frame names its
-//! subject and the client discards frames that do not match. Two clients
-//! therefore *share* one id, and a `char_unique`-keyed map would let the second
-//! connection overwrite the first: the first player's whisper would reach
-//! nobody and its head-chat store would vanish on every disconnect.
+//! natural map key — except that it is **session-scoped**, not a database column:
+//! the legacy's `m_uiCharID` is handed out by the session manager when it binds a
+//! connection (`CharServer-Session.cpp:58`). Nothing guarantees two connections
+//! cannot end up holding the same one, and the retired capture mode made that
+//! certain by pinning every session to a single id — two clients then *shared* one
+//! character, and a `char_unique`-keyed map would have let the second overwrite
+//! the first: the first player's whisper would reach nobody and its head-chat store
+//! would vanish on every disconnect.
 //!
 //! So the key is a serial handed out per connection ([`Registry::next_key`]),
 //! and `char_unique` travels in the frames and in [`SessionInfo`] — which is
 //! where the 119/121 lookups resolve it, exactly as the legacy does.
 //!
-//! The consequence worth naming: in capture mode two sessions really do share a
-//! `char_unique`, so [`Registry::find_by_charunique`] returns the lower key —
-//! deterministic but arbitrary. Live mode allocates one id per session
-//! (`allocate_char_unique`), so the ambiguity cannot arise there; until T-017,
-//! the capture prologue is the default, which is why `/t name` (the 117
-//! name-based whisper) is the path that is unambiguous with two clients.
+//! [`Registry::find_by_charunique`] therefore has a defined but arbitrary answer
+//! if two sessions ever report the same id: the **lowest** key. That cannot happen
+//! while `allocate_char_unique` hands out distinct ids, but the ordering is pinned
+//! by test rather than left to `HashMap` iteration, so the answer is deterministic
+//! either way.
 //!
 //! # What "near" means
 //!
@@ -477,8 +477,13 @@ impl Drop for Registered {
 
 /// The near-cell a tile falls in — see the module docs for how this differs
 /// from the legacy's `GetCellIndex` (`ITZMap.cpp:116-122`).
-fn cell_of(x: i32, y: i32) -> (i32, i32) {
-    (x / CELL_TILES_X, y / CELL_TILES_Y)
+///
+/// Public because crossing a cell boundary is an *appearance* event as well as a
+/// movement one: the legacy runs `SendNewOthersInfoToPerson` for a character's
+/// `m_pNewCell` set (`ServerMap.cpp:73-150`), so a player who walks into a cell is
+/// told who is already in it.
+pub fn cell_of(x: i32, y: i32) -> (i32, i32) {
+    (x.div_euclid(CELL_TILES_X), y.div_euclid(CELL_TILES_Y))
 }
 
 /// Whether `other` is inside `origin`'s 3×3 cell block on the same map — the
