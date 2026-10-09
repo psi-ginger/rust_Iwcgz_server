@@ -103,14 +103,17 @@ const MOVE_PERCENT_COST: i32 = 100;
 /// `CHAR_ACTION_INTERVAL_FRAME` is 6 at `Char-Common.h`).
 const MOVE_DELAY_CAP_MS: u32 = 350;
 
-/// Legacy frame tick: `CHAR_ACTION_INTERVAL_FRAME * 50` = 300ms? No, the frame
-/// tick is 50ms (`GetTickCount` delta per frame). The cap is `(6+1)*50=350ms`.
-/// We run the movement timer at this 50ms tick so `advance()` accumulates
-/// exactly like the legacy's per-frame `Move()` call (`char-move.cpp:145-171`).
-/// This ensures 200 frames are sent at the same micro-cadence the client's
-/// animation expects, eliminating the step-and-pause caused by our previous
-/// per-step timer (425ms) being slower than the client's animation frame rate.
-const MOVE_TICK_MS: u32 = 50;
+/// Movement timer interval: the legacy runs its per-frame `Move()` every
+/// `GetTickCount` delta (50ms), but checks movement and broadcasts 200
+/// immediately when a tile commits. Our 50ms tick introduced up to 50ms
+/// latency between step commitment and 200 broadcast, which exceeded the
+/// client's animation frame budget and caused step-and-pause.
+///
+/// Use a 10ms interval so the max latency is 10ms — well within the
+/// client's ~417ms step animation at speed 12. The step cadence itself
+/// is still governed by `advance()`'s accumulator (5000/speed ms per tile);
+/// this timer only controls how promptly we detect and broadcast a step.
+const MOVE_TICK_MS: u32 = 10;
 
 /// `< 0x4E20` (20000): the client indexes its `CharUniqueInfo` table by
 /// `uiMakeCharUnique` (`SetCharReservedChar`).
