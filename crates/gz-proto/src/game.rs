@@ -1204,6 +1204,33 @@ pub fn encode_login_many_batches(others: &[MakeCharInfo]) -> Vec<Vec<u8>> {
     out
 }
 
+/// The `GAMEMSG_RESPONSE_LOGOUT` (11) body: the `char_unique` of a character who
+/// has left the receiver's neighbourhood.
+///
+/// Built by the two-argument `cltMsg` constructor (`MsgType.h:2977-2982`), which is
+/// the only packet shape here that is not an explicit struct:
+///
+/// ```cpp
+/// cltMsg( UI16 type, SI32 sidata ) {
+///     clHead.usCmd  = type;
+///     clHead.usSize = sizeof(sPacketHeader) + sizeof(SI32);
+///     siData32[0]   = sidata;
+/// }
+/// ```
+///
+/// so the body is exactly one `SI32` — 4 bytes, little-endian, no padding — and the
+/// size is fixed rather than derived from a `sizeof(cltXxx)`.
+///
+/// The server sends it from `cltServerMap::SendPersonLeaveMsgToOthers`
+/// (`ServerMap.cpp:51-63`) to the cells the departing character is leaving, and the
+/// client reads the same field back as `quitcharunique` (`Client-Login.cpp:396-417`).
+#[must_use]
+pub fn encode_logout(char_unique: i32) -> Vec<u8> {
+    let mut w = Writer::with_capacity(4);
+    w.i32(char_unique);
+    w.finish()
+}
+
 /// `cltGameMsgResponse_VillageStruct` (opcode 1102). Sent in answer to
 /// `GAMEMSG_REQUEST_VILLAGESTRUCT` (1101) so the client stops waiting
 /// (`SetCharReservedChar` refuses to pop while `bWaitVillageStructureInfoSwitch`
@@ -1245,6 +1272,28 @@ pub fn decode_village_struct_request(payload: &[u8]) -> Result<i32, WireError> {
 mod tests {
     use super::*;
     use gz_net::HEADER_SIZE;
+
+    /// The logout body is the one packet on this path that is not a struct: the
+    /// two-argument `cltMsg` constructor (`MsgType.h:2977-2982`) writes a bare
+    /// `SI32` and hardcodes the size to `sizeof(sPacketHeader) + sizeof(SI32)`.
+    /// Four bytes, little-endian, and the client reads it straight back as
+    /// `quitcharunique` (`Client-Login.cpp:398`).
+    #[test]
+    fn logout_is_a_bare_four_byte_char_unique() {
+        let payload = encode_logout(1471);
+        assert_eq!(payload.len(), 4);
+        assert_eq!(payload, 1471i32.to_le_bytes());
+        // Read back the way the client does.
+        assert_eq!(i32::from_le_bytes(payload[..4].try_into().unwrap()), 1471);
+    }
+
+    /// A `char_unique` of 0 is the client's own "nobody" sentinel — it still has
+    /// to encode, and it must not be mistaken for a short body.
+    #[test]
+    fn logout_encodes_zero_as_four_bytes_not_none() {
+        assert_eq!(encode_logout(0), [0, 0, 0, 0]);
+        assert_eq!(encode_logout(0).len(), 4);
+    }
 
     #[test]
     fn char_unique_is_13_bytes_on_the_wire() {

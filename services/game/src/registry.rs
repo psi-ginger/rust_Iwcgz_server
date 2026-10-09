@@ -39,39 +39,28 @@
 //! every cell in the 3×3 block around the sender's cell (`ITZMap.cpp:71-87`),
 //! which is itself a screen-sized block — `CreateWorld(MAX_MAP_NUMBER,
 //! MAX_CHAR_NUMBER, 800, 600, MAP_TILE_XSIZE, MAP_TILE_YSIZE)`
-//! (`MapManager.cpp:82-87`) leaves `cellXtile`/`cellYtile` at their defaults,
-//! the screen in tiles: `(800 + 80 - 1) / 80 = 10` and `(600 + 40 - 1) / 40 =
-//! 15` (`ITZWorld.h:91-104`, `map.h:33-35`).
+//! (`MapManager.cpp:82-87`) passes a cell size of 0, and 0 selects the
+//! screen-in-tiles default (`ITZWorld.h:95-104`): `(800 + 80 - 1) / 80 = 10` and
+//! `(600 + 40 - 1) / 40 = 15` (`map.h:33-36`).
 //!
-//! The port approximates it: [`cell_of`] is plain tile division by
-//! [`CELL_TILES_X`]/[`CELL_TILES_Y`] with the same 3×3 rule, where the legacy's
-//! `GetCellIndex` (`ITZMap.cpp:116-122`) maps a tile into an isometric-skewed
-//! cell — `sx = (mapXtile - y - 1 + x) / (cellXtile << 1)`, `sy = (x + y) /
-//! (cellYtile << 1)`. Reproducing that needs `m_mapXtile`, the *per-map* tile
-//! width, which this port does not model (no map geometry is loaded yet), and
-//! the skewed cell boundary would be wrong anyway as soon as a map's size
-//! differs from the assumption. The two agree on "same map, roughly the same
-//! screen's worth of tiles", which is all a head-chat fan needs today;
-//! slice 6's observer/visibility work is where real map geometry has to land.
+//! The cells themselves are *skewed*, not rectangular. `ITZMap::GetCellIndex`
+//! (`ITZMap.cpp:116-122`) maps a tile into an isometric cell, and the skew is
+//! what the viewport is shaped like — so an avatar walking toward a screen
+//! corner stays fed exactly as long as it is on screen. That is
+//! [`map_geometry`]'s job; this module just asks [`is_near`].
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use gz_proto::chat::{MAX_PLAYER_NAME, cut};
+use gz_proto::map_geometry::{cell_of, cells_adjacent};
 use tokio::sync::mpsc::UnboundedSender;
 
 /// `MAX_CHAR_NUMBER` (`CommonHeader.h:556`) — `GetIDFromCharUnique` returns 0
 /// for `charunique <= 0` and for `charunique >=` this (`CharManager.cpp:205`),
 /// so neither can name a session.
 pub const MAX_CHAR_NUMBER: i16 = 20_000;
-
-/// Tiles per near-cell on the x axis. See the module docs for the derivation
-/// (`ITZWorld.h:91-92` with `map.h:33`).
-pub const CELL_TILES_X: i32 = 10;
-
-/// Tiles per near-cell on the y axis (`map.h:35`).
-pub const CELL_TILES_Y: i32 = 15;
 
 /// The registry's key: one per connection, from [`Registry::next_key`].
 ///
@@ -355,6 +344,40 @@ impl Registry {
         out
     }
 
+    /// The sessions that were watching `was` and are *not* watching `now` — the
+    /// symmetric counterpart of [`Self::near_others`], and the recipient set for
+    /// `GAMEMSG_RESPONSE_LOGOUT`.
+    ///
+    /// The legacy keeps two cell sets per character, `m_pNewCell` and
+    /// `m_pRemoveCell`, and the walk that fills them is the same 3×3 block
+    /// (`ITZMap.cpp:73-150`): `m_pRemoveCell` is what it entered minus what it is
+    /// still in. `SendPersonLeaveMsgToOthers` (`ServerMap.cpp:51-63`) sends the
+    /// logout to exactly that set. Recomputing it as `near(was) - near(now)`
+    /// rather than carrying a persistent set is the same answer, because the
+    /// neighbourhood is a pure function of the tile.
+    ///
+    /// `mover_key` is excluded: the mover is inside `now` and was inside `was`, so
+    /// it is not in the difference anyway, but naming it keeps that true by
+    /// construction rather than by arithmetic.
+    #[must_use]
+    pub fn no_longer_near(
+        &self,
+        was: &SessionInfo,
+        now: &SessionInfo,
+        mover_key: SessionKey,
+    ) -> Vec<(SessionKey, SessionInfo)> {
+        let sessions = self.lock();
+        let mut out: Vec<(SessionKey, SessionInfo)> = sessions
+            .iter()
+            .filter(|(key, session)| {
+                **key != mover_key && is_near(was, &session.info) && !is_near(now, &session.info)
+            })
+            .map(|(key, session)| (*key, session.info.clone()))
+            .collect();
+        out.sort_by_key(|(key, _)| *key);
+        out
+    }
+
     /// [`Self::broadcast_near`] minus the sender's own connection.
     ///
     /// The legacy has no equivalent because it has no split between "write to my
@@ -475,26 +498,16 @@ impl Drop for Registered {
     }
 }
 
-/// The near-cell a tile falls in — see the module docs for how this differs
-/// from the legacy's `GetCellIndex` (`ITZMap.cpp:116-122`).
-///
-/// Public because crossing a cell boundary is an *appearance* event as well as a
-/// movement one: the legacy runs `SendNewOthersInfoToPerson` for a character's
-/// `m_pNewCell` set (`ServerMap.cpp:73-150`), so a player who walks into a cell is
-/// told who is already in it.
-pub fn cell_of(x: i32, y: i32) -> (i32, i32) {
-    (x.div_euclid(CELL_TILES_X), y.div_euclid(CELL_TILES_Y))
-}
-
 /// Whether `other` is inside `origin`'s 3×3 cell block on the same map — the
 /// near set `ITZMap.cpp:71-87` walks.
 fn is_near(origin: &SessionInfo, other: &SessionInfo) -> bool {
     if origin.map_id != other.map_id {
         return false;
     }
-    let (ox, oy) = cell_of(origin.x, origin.y);
-    let (ax, ay) = cell_of(other.x, other.y);
-    (ox - ax).abs() <= 1 && (oy - ay).abs() <= 1
+    cells_adjacent(
+        cell_of(origin.x, origin.y, origin.map_id),
+        cell_of(other.x, other.y, other.map_id),
+    )
 }
 
 #[cfg(test)]
@@ -588,7 +601,9 @@ mod tests {
         registry.update_pos(key, 40, 45);
         let session = registry.info(key).unwrap();
         assert_eq!((session.x, session.y), (40, 45));
-        assert_eq!(cell_of(session.x, session.y), (4, 3));
+        // (40, 45) on map 7 — 68 tiles wide, so `sx = (68-45-1+40)/20 = 3`,
+        // `sy = 85/30 = 2`. The skewed cell, not the old `4, 3` rectangle.
+        assert_eq!(cell_of(session.x, session.y, session.map_id), (3, 2));
     }
 
     /// General chat is server-wide: the speaker hears their own message too,
@@ -611,19 +626,22 @@ mod tests {
     }
 
     /// The 3×3 cell block on the same map, and nothing else: the neighbour
-    /// walk of `ITZMap.cpp:71-87` clamped at the map's edge, with the cell size
-    /// `ITZWorld.h:91` derives.
+    /// walk of `ITZMap.cpp:71-87` clamped at the map's edge, over the skewed
+    /// cells `GetCellIndex` produces (`ITZMap.cpp:116-122`).
+    ///
+    /// Every coordinate below is chosen for the cell it lands in on map 7
+    /// (68 tiles wide), which is asserted rather than assumed — the whole point
+    /// of B2 is that these are no longer `x/10, y/15`.
     #[test]
     fn broadcast_near_is_the_three_by_three_cell_block_on_one_map() {
         let registry = Registry::new();
-        // Cell (1, 1) of map 7 — tiles 10..29 by 15..29.
+        // Origin cell (3, 1): sx = (68-20-1+15)/20 = 3, sy = 35/30 = 1.
         let (origin_key, _rself) = join(&registry, info(11, "Origin", 15, 20));
-        // Inside the block: the same cell, the far corner cell (2, 2), the near
-        // corner (0, 0).
+        // Inside the block: the same cell (3, 1) and the near neighbour (3, 0).
         let (_same, mut rsame) = join(&registry, info(12, "SameCell", 29, 29));
-        let (_corner, mut rcorner) = join(&registry, info(13, "Corner", 0, 0));
-        // Two cells away on x: cell (3, 1), outside the block.
-        let (_far, mut rfar) = join(&registry, info(14, "Far", 35, 20));
+        let (_neighbour, mut rneighbour) = join(&registry, info(13, "Neighbour", 0, 0));
+        // Two cells away on sx — (50, 5) gives sx = 112/20 = 5, sy = 55/30 = 1.
+        let (_far, mut rfar) = join(&registry, info(14, "Far", 50, 5));
         // Same coordinates, different map.
         let (_other, mut rother) = {
             let mut elsewhere = info(15, "Elsewhere", 15, 20);
@@ -633,16 +651,20 @@ mod tests {
 
         let origin = registry.info(origin_key).unwrap();
         assert_eq!(origin.map_id, 7);
+        assert_eq!(cell_of(origin.x, origin.y, origin.map_id), (3, 1));
+        assert_eq!(cell_of(29, 29, 7), (3, 1), "shares the origin's cell");
+        assert_eq!(cell_of(0, 0, 7), (3, 0), "one cell away on sy");
+        assert_eq!(cell_of(50, 5, 7), (5, 1), "two cells away on sx");
 
         let sent = registry.broadcast_near(&origin, 122, b"head".to_vec());
         assert_eq!(sent, 3, "the far cell and the other map are out");
 
-        for rx in [&mut rsame, &mut rcorner] {
+        for rx in [&mut rsame, &mut rneighbour] {
             let frame = rx.try_recv().unwrap();
             assert_eq!(frame.cmd, 122);
             assert_eq!(frame.payload, b"head");
         }
-        assert_silent(&mut rfar, "three cells away");
+        assert_silent(&mut rfar, "two cells away");
         assert_silent(&mut rother, "another map");
     }
 
@@ -656,8 +678,8 @@ mod tests {
         let registry = Registry::new();
         let (origin_key, mut rself) = join(&registry, info(11, "Mover", 15, 20));
         let (_same, mut rsame) = join(&registry, info(12, "Observer", 15, 20));
-        let (_corner, mut rcorner) = join(&registry, info(13, "Corner", 0, 0));
-        let (_far, mut rfar) = join(&registry, info(14, "Far", 35, 20));
+        let (_neighbour, mut rneighbour) = join(&registry, info(13, "Neighbour", 0, 0));
+        let (_far, mut rfar) = join(&registry, info(14, "Far", 50, 5));
 
         let origin = registry.info(origin_key).unwrap();
         assert_eq!(
@@ -666,13 +688,13 @@ mod tests {
             "the two near observers, not the sender"
         );
 
-        for rx in [&mut rsame, &mut rcorner] {
+        for rx in [&mut rsame, &mut rneighbour] {
             let frame = rx.try_recv().expect("a near observer gets the frame");
             assert_eq!(frame.cmd, 200);
             assert_eq!(frame.payload, b"cell");
         }
         assert_silent(&mut rself, "the sender writes its own copy directly");
-        assert_silent(&mut rfar, "three cells away");
+        assert_silent(&mut rfar, "two cells away");
 
         // The self-inclusive fan still reaches the sender, for the chat paths.
         assert_eq!(registry.broadcast_near(&origin, 122, b"head".to_vec()), 3);
@@ -687,18 +709,20 @@ mod tests {
     #[test]
     fn the_fan_follows_the_walker_into_its_new_cell() {
         let registry = Registry::new();
-        // (5, 5): cells (0, 0) — not near cell (2, 5).
+        // (5, 5) on map 7: sx = (68-5-1+5)/20 = 3, sy = 10/30 = 0 — cell (3, 0).
         let (walker_key, _rwalker) = join(&registry, info(11, "Walker", 5, 5));
+        // (27, 87): sx = (68-87-1+27)/20 = 0, sy = 114/30 = 3 — cell (0, 3).
         let (_ahead, mut rahead) = join(&registry, info(12, "Ahead", 27, 87));
         let (_behind, mut rbehind) = join(&registry, info(13, "Behind", 5, 5));
 
         let mut origin = registry.info(walker_key).unwrap();
+        assert_eq!(cell_of(origin.x, origin.y, origin.map_id), (3, 0));
         assert_eq!(
             registry.broadcast_near_others(&origin, walker_key, 200, b"a".to_vec()),
             1,
             "only the character sharing its cell"
         );
-        assert_silent(&mut rahead, "cell (2, 5) is three cells away on x");
+        assert_silent(&mut rahead, "cell (0, 3) is three cells away on sx");
         // Drain the first fan's copy so the assertions below read only the second.
         let first = rbehind.try_recv().expect("the sharing character");
         assert_eq!(first.payload, b"a");
@@ -715,9 +739,80 @@ mod tests {
             .try_recv()
             .expect("the cell it walked into is near now");
         assert_eq!(frame.payload, b"b");
-        // Cell (0, 0) to cell (2, 5) is two cells out on x, so the character left
-        // behind drops out of the fan — the observer set is not a fixed list.
-        assert_silent(&mut rbehind, "two cells away once the walker moved on");
+        // Cell (3, 0) to cell (0, 3) is three steps out on both axes, so the
+        // character left behind drops out of the fan — the observer set is not a
+        // fixed list.
+        assert_silent(&mut rbehind, "far away once the walker moved on");
+    }
+
+    /// The other half of a cell crossing: `near(was) - near(now)`, i.e. who the
+    /// mover just walked out of sight of. This is `m_pRemoveCell`
+    /// (`ITZMap.cpp:73-150`) feeding `GAMEMSG_RESPONSE_LOGOUT`
+    /// (`ServerMap.cpp:51-63`), and the frame the port never sent.
+    #[test]
+    fn no_longer_near_is_the_difference_between_the_two_neighbourhoods() {
+        let registry = Registry::new();
+        // All cells below are on map 7 (68 tiles wide) and are asserted, not
+        // assumed. Origin (15, 20) -> (3, 1); after the step (60, 40) -> (4, 3).
+        let (mover_key, _rmover) = join(&registry, info(11, "Mover", 15, 20));
+        // (32, 35) -> (3, 2): one cell from (3, 1) and one cell from (4, 3).
+        let (_stays, _rstays) = join(&registry, info(12, "Stays", 32, 35));
+        // (15, 10) -> (3, 0): one cell from (3, 1), three cells from (4, 3).
+        let (leaves_key, _rleaves) = join(&registry, info(13, "Leaves", 15, 10));
+        // (64, 28) -> (5, 3): one cell from (4, 3), two from (3, 1).
+        let (arrives_key, _rarrives) = join(&registry, info(15, "Arrives", 64, 28));
+        // (50, 5) -> (5, 1): two cells from both, never inside either block.
+        let (_far, _rfar) = join(&registry, info(14, "Far", 50, 5));
+
+        let was = registry.info(mover_key).unwrap();
+        let mut now = was.clone();
+        now.x = 60;
+        now.y = 40;
+        assert_eq!(cell_of(was.x, was.y, was.map_id), (3, 1));
+        assert_eq!(cell_of(now.x, now.y, now.map_id), (4, 3));
+        assert_eq!(cell_of(32, 35, 7), (3, 2), "stays in both blocks");
+        assert_eq!(cell_of(15, 10, 7), (3, 0), "in the old block only");
+        assert_eq!(cell_of(64, 28, 7), (5, 3), "in the new block only");
+        assert_eq!(cell_of(50, 5, 7), (5, 1), "in neither block");
+
+        let lost = registry.no_longer_near(&was, &now, mover_key);
+        assert_eq!(
+            lost.iter().map(|(key, _)| *key).collect::<Vec<_>>(),
+            vec![leaves_key],
+            "only the character that fell out of the 3x3 block"
+        );
+        assert!(
+            !lost.iter().any(|(key, _)| *key == mover_key),
+            "a client is never told to delete itself"
+        );
+
+        // Walking back is the mirror: the character that came into view is the
+        // one that now drops out. Same query, arguments swapped.
+        let back = registry.no_longer_near(&now, &was, mover_key);
+        assert_eq!(
+            back.iter().map(|(key, _)| *key).collect::<Vec<_>>(),
+            vec![arrives_key],
+            "the inverse direction picks the character that gained sight"
+        );
+    }
+
+    /// A character that never moved has an empty difference even though it may
+    /// have a large neighbourhood — `step_movement` must not log out an observer
+    /// on every tile step, only on a cell crossing.
+    #[test]
+    fn no_longer_near_is_empty_when_the_cell_did_not_change() {
+        let registry = Registry::new();
+        let (mover_key, _rmover) = join(&registry, info(11, "Mover", 15, 20));
+        let (_watcher, _rwatcher) = join(&registry, info(12, "Watcher", 0, 0));
+
+        let was = registry.info(mover_key).unwrap();
+        let mut now = was.clone();
+        now.x = 22; // Still cell (3, 1): sx = (68-20-1+22)/20 = 3.
+        assert_eq!(
+            cell_of(now.x, now.y, now.map_id),
+            cell_of(was.x, was.y, was.map_id)
+        );
+        assert!(registry.no_longer_near(&was, &now, mover_key).is_empty());
     }
 
     #[test]

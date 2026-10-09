@@ -57,13 +57,14 @@ use gz_proto::game::{
     MakeCharInfo, ServerInfo, UseBonus, VillageStruct, client_map_index, decode_make_new_char,
     decode_select_char, decode_use_bonus, decode_village_struct_request, encode_all_char_info_one,
     encode_all_char_info_two, encode_change_horse, encode_del_result, encode_family_update,
-    encode_get_village_info, encode_login_many_batches, encode_person_horse, encode_person_ip,
-    encode_response_name, encode_skillbook_magic_info,
+    encode_get_village_info, encode_login_many_batches, encode_logout, encode_person_horse,
+    encode_person_ip, encode_response_name, encode_skillbook_magic_info,
 };
 use gz_proto::item::{
     Item, MAX_ITEM_PER_PERSON, MAX_ITEM_UNIQUE, decode_inv_drop, decode_inv_pickup,
     decode_move_item, decode_split_item, encode_person_item_info,
 };
+use gz_proto::map_geometry::cell_of;
 use gz_proto::opcodes_game::GameMsg;
 use gz_proto::order::{BasicCharUpdate, ORDER_MOVE, OrderData};
 use gz_proto::personalshop::{ShopTradeData, decode_personal_shop_request, shop_mode_for_request};
@@ -78,7 +79,7 @@ mod registry;
 mod world_entry;
 
 use config::GameConfig;
-use registry::{Outbound, Registered, Registry, SessionInfo, SessionKey, cell_of};
+use registry::{Outbound, Registered, Registry, SessionInfo, SessionKey};
 
 /// `MAX_TOTAL_CHAR_PER_USER` (3 main + 12 char-house) — the legacy sends one
 /// char-list packet for every slot, occupied or not
@@ -2676,6 +2677,42 @@ fn fan_char_update(
     ))
 }
 
+/// Sends `GAMEMSG_RESPONSE_LOGOUT` (11) to every character that could see the
+/// mover at `was` and cannot see it at `now` — the counterpart of the 200 fan
+/// and of [`announce_nearby_characters`]. T-018 slice 6 B3a.
+///
+/// Both directions of a cell crossing have to exist, and they are the same event
+/// seen from two ends: someone arriving is an *appearance* (a 6 naming them) and
+/// someone leaving is a *disappearance* (an 11 removing them). Shipping only the
+/// first half is what left avatars frozen on screen when their owner walked off
+/// — the client kept the object it had created and simply stopped being told
+/// where it was, until its own screen culling deleted it.
+///
+/// `was` is the mover's registry entry **before** the tile step and `now` the one
+/// after, which is the whole input: the recipient set is `near(was) - near(now)`
+/// ([`Registry::no_longer_near`]). The legacy carries that difference in
+/// `m_pRemoveCell` (`ITZMap.cpp:73-150`) and hands it to `SendPacket`
+/// (`ServerMap.cpp:58-61`); recomputing it is the same answer, because the
+/// neighbourhood is a pure function of the tile.
+///
+/// Returns how many connections took the frame.
+fn logout_departed(
+    registry: &Registry,
+    was: &SessionInfo,
+    now: &SessionInfo,
+    mover_key: SessionKey,
+    char_unique: i32,
+) -> usize {
+    let payload = encode_logout(char_unique);
+    let mut sent = 0;
+    for (key, _) in registry.no_longer_near(was, now, mover_key) {
+        if registry.send_to(key, GameMsg::ResponseLogout as u16, payload.clone()) {
+            sent += 1;
+        }
+    }
+    sent
+}
+
 /// Advances an in-flight move by one tick. When the tick commits a tile it sends
 /// the 200 `CHARUPDATE` for the new cell, updates the session's drop cell and
 /// the registry's copy of the position (so the near fan sees where the avatar
@@ -2708,7 +2745,8 @@ async fn step_movement(
     // bystander's copy of this avatar steps with ours instead of standing still
     // (slice 6 B1). `update_pos` runs *before* the fan so the observer set is
     // computed from the cell we have just reached, not the one we left.
-    let was_cell = registry.info(session_key).map(|i| cell_of(i.x, i.y));
+    let was = registry.info(session_key);
+    let was_cell = was.as_ref().map(|i| cell_of(i.x, i.y, i.map_id));
     registry.update_pos(session_key, x, y);
     let observers = {
         let character = live
@@ -2717,17 +2755,34 @@ async fn step_movement(
             .ok_or("char update fan before the character row is loaded")?;
         fan_char_update(registry, session_key, live.char_unique, character, x, y)?
     };
-    // Crossing into a new cell is an *appearance* event, not just a movement one.
-    //
-    // The legacy maintains a `m_pNewCell` set per character and runs
-    // `SendNewOthersInfoToPerson` for it on cell entry, not only on world entry
-    // (`ServerMap.cpp:73-150`, and the `m_uiNewCellCount` walk). Without this, a
-    // player who walks up to somebody is never told they exist: no LOGINMANY, so no
-    // avatar, so the 200 fan above is discarded on arrival.
-    if was_cell.is_some_and(|was| was != cell_of(x, y))
-        && let Some(character) = live.character.as_ref()
+    let now = registry.info(session_key);
+    if let (Some(was), Some(now)) = (was.as_ref(), now.as_ref())
+        && was_cell.is_some_and(|was| was != cell_of(x, y, now.map_id))
     {
-        announce_nearby_characters(registry, session_key, character, live.char_unique)?;
+        // Crossing a cell boundary is an *appearance* event, not just a movement
+        // one.
+        //
+        // The legacy maintains a `m_pNewCell` set per character and runs
+        // `SendNewOthersInfoToPerson` for it on cell entry, not only on world entry
+        // (`ServerMap.cpp:73-150`, and the `m_uiNewCellCount` walk). Without this, a
+        // player who walks up to somebody is never told they exist: no LOGINMANY, so no
+        // avatar, so the 200 fan above is discarded on arrival.
+        if let Some(character) = live.character.as_ref() {
+            announce_nearby_characters(registry, session_key, character, live.char_unique)?;
+        }
+        // ...and the mirror image, which was missing entirely until now: the people
+        // who *had* us and no longer do have to be told the avatar is gone.
+        //
+        // `SendPersonLeaveMsgToOthers` (`ServerMap.cpp:51-63`) sends
+        // `GAMEMSG_RESPONSE_LOGOUT` to `m_pRemoveCell` — the cells the character is
+        // leaving — and the client answers it by deleting the object
+        // (`Client-Login.cpp:396-417`). Without the frame a departing avatar simply
+        // stops receiving 200s and lingers on screen until the client's own screen
+        // culling drops it, which is the abrupt pop at the screen edge.
+        let left = logout_departed(registry, was, now, session_key, live.char_unique);
+        if left > 0 {
+            logln!("game: char {session_key} sent 11 to {left} observer(s) that lost sight of it");
+        }
     }
 
     send_char_update(stream, outbound, live, x, y).await?;

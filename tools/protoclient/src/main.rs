@@ -28,6 +28,7 @@ use gz_cipher::Cipher;
 use gz_net::{Frame, FrameParser, HEADER_SIZE};
 use gz_proto::game::{MAKE_CHAR_INFO_PAYLOAD_LEN, MakeCharInfo};
 use gz_proto::item::{CLT_ITEM_SIZE, Item};
+use gz_proto::map_geometry::{cell_of, cells_adjacent};
 use gz_proto::opcodes_front::FrontMsg;
 use gz_proto::opcodes_game::GameMsg;
 use gz_proto::order::{BasicCharUpdate, OrderData};
@@ -410,7 +411,7 @@ fn remaining(deadline: std::time::Instant) -> std::time::Duration {
 ///
 /// # What is asserted
 ///
-/// Two things, and the **order matters** — one without the other proves nothing:
+/// Three things, and the **order matters** — one without the other proves nothing:
 ///
 /// 1. **A `RESPONSE_LOGINMANY` (6) naming the mover, delivered *before* the walk.**
 ///    This is the frame that makes another player exist: the client `PushChar`es
@@ -420,6 +421,10 @@ fn remaining(deadline: std::time::Instant) -> std::time::Duration {
 ///    `Client-Person-BigInfo.cpp:1166-1169`.
 /// 2. **`RESPONSE_CHARUPDATE` (200) frames naming the mover**, with `siX`/`siY`
 ///    changing as it walks.
+/// 3. **A `RESPONSE_LOGOUT` (11) naming the mover**, once it has walked out of the
+///    observer's near block. Appearance and disappearance are the two halves of one
+///    event; shipping only the first is what leaves a departed avatar stranded on
+///    screen.
 ///
 /// An earlier version of this probe asserted only the 200s. It **passed** while the
 /// GUI showed no avatar at all: the fan was arriving correctly and the client was
@@ -568,6 +573,89 @@ async fn probe_observer_fan(
         .into());
     }
     println!("probe: the 200 fan reached a second, distinct session over a real socket");
+
+    // (3) The other half of a cell crossing: walk the mover out of the observer's
+    //     near block and require a RESPONSE_LOGOUT (11) naming it.
+    //
+    //     Without this frame the departing avatar is never removed: the client keeps
+    //     the object it created and simply stops being told where it is
+    //     (`Client-Login.cpp:396-417` is the only thing that deletes it), so it
+    //     lingers on screen until the client's own culling drops it. That is the
+    //     abrupt pop at the screen edge, and it is a *missing frame*, not a
+    //     geometry problem — which is why it has its own assertion here rather than
+    //     being folded into the 200 check.
+    let observer_x = observer.spawn_x;
+    let observer_y = observer.spawn_y;
+    let dest_out = observer
+        .outside_near_block((mover.spawn_x, mover.spawn_y))
+        .ok_or_else(|| {
+            format!(
+                "no tile outside the observer's near block of ({}, {}) was found on map {}",
+                observer_x,
+                observer_y,
+                (mover.spawn_map & 0x3FF) as i32
+            )
+        })?;
+    let map = (mover.spawn_map & 0x3FF) as i32;
+    // Confirm the premise before walking, rather than trusting `outside_near_block`.
+    // The mover must start inside the observer's block (otherwise there is nothing
+    // to lose) and the destination must be outside it (otherwise no cell boundary
+    // is crossed and no LOGOUT can exist). Asserting both here turns a bad probe
+    // setup into a message that says so, instead of a 90-second timeout blaming
+    // the server.
+    let was_adjacent = cells_adjacent(
+        cell_of(observer_x, observer_y, map),
+        cell_of(mover.spawn_x, mover.spawn_y, map),
+    );
+    let ends_adjacent = cells_adjacent(
+        cell_of(observer_x, observer_y, map),
+        cell_of(dest_out.0, dest_out.1, map),
+    );
+    if !was_adjacent {
+        return Err(format!(
+            "the observer at ({observer_x}, {observer_y}) is already outside the mover's near \
+             block at ({}, {}): there is no departure to observe",
+            mover.spawn_x, mover.spawn_y
+        )
+        .into());
+    }
+    if ends_adjacent {
+        return Err(format!(
+            "{dest_out:?} is still inside the observer's near block, so walking there crosses \
+             no cell boundary and cannot produce a LOGOUT. The probe picked a bad \
+             destination — the observer's tracked position is probably stale"
+        )
+        .into());
+    }
+    println!(
+        "probe: walking the mover ({}, {}) -> {dest_out:?} to cross out of the observer's block",
+        mover.spawn_x, mover.spawn_y,
+    );
+    println!(
+        "probe:   observer stays at ({observer_x}, {observer_y}) cell {:?}; the mover goes \
+         {:?} -> {:?}, so the two stop being adjacent",
+        cell_of(observer_x, observer_y, map),
+        cell_of(mover.spawn_x, mover.spawn_y, map),
+        cell_of(dest_out.0, dest_out.1, map),
+    );
+    mover.send_move(dest_out).await?;
+
+    // Generous: a cell is 10x15 tiles and a tile costs `5000 / move_speed` ms, so
+    // even a short hop is tens of tiles of pacing.
+    if !observer
+        .await_logout_naming(mover_id, std::time::Duration::from_secs(90))
+        .await?
+    {
+        return Err(format!(
+            "observer {observer_user:?} never received a LOGOUT (11) naming the mover \
+             (char_unique {mover_id}) after it walked to {dest_out:?}: the server tells the \
+             observer who is nearby but never who has left, so the avatar is never deleted \
+             (Client-Login.cpp:396-417). The client shows it frozen until its own culling \
+             removes it"
+        )
+        .into());
+    }
+    println!("probe: observer was told the mover left — the avatar can now be removed");
     Ok(())
 }
 
@@ -645,17 +733,48 @@ impl Session {
         }
     }
 
-    /// Whether `spawn` is inside this character's 3×3 near cell, using the same
-    /// 10×15-tile cells the server's fan uses.
+    /// Whether tile `(x, y)` is inside this character's 3x3 near cell, using the
+    /// same
+    /// skewed isometric cells the server's fan uses
+    /// (`gz_proto::map_geometry`, a port of `ITZMap::GetCellIndex`).
     ///
     /// The observer cannot *receive* a 6 about somebody it is not near — the
     /// server's announcement is itself a near-block query — so the probe has to know
-    /// whether it is in range before it asserts anything about the fan.
+    /// whether it is in range before it asserts anything about the fan. Sharing
+    /// the geometry rather than re-deriving a rectangle here is what keeps the probe
+    /// from quietly testing the old approximation: this used to compute
+    /// `x/10, y/15` inline, which is exactly the shape B2 replaced.
     fn is_near(&self, x: i32, y: i32) -> bool {
-        let cell = |(x, y): (i32, i32)| (x.div_euclid(10), y.div_euclid(15));
-        let (ox, oy) = cell((self.spawn_x, self.spawn_y));
-        let (ax, ay) = cell((x, y));
-        (ox - ax).abs() <= 1 && (oy - ay).abs() <= 1
+        let map = (self.spawn_map & 0x3FF) as i32;
+        cells_adjacent(cell_of(self.spawn_x, self.spawn_y, map), cell_of(x, y, map))
+    }
+
+    /// The nearest tile to `origin` that is *outside* this character's near block,
+    /// searching outward in a fixed pattern so the walk stays short.
+    ///
+    /// Used to drive the logout half of the observer probe: the mover has to cross
+    /// a cell boundary away from the observer, and "one tile past the edge" is
+    /// cheaper than the ~23 tiles a hand-picked destination would cost at one tile
+    /// per `5000 / move_speed` ms.
+    fn outside_near_block(&self, origin: (i32, i32)) -> Option<(i32, i32)> {
+        // Spiral outward in tile steps; the first non-adjacent tile wins.
+        for radius in 1_i32..64 {
+            for dx in -radius..=radius {
+                for dy in -radius..=radius {
+                    if dx.abs() != radius && dy.abs() != radius {
+                        continue;
+                    }
+                    let candidate = (origin.0 + dx, origin.1 + dy);
+                    if candidate.0 < 0 || candidate.1 < 0 {
+                        continue;
+                    }
+                    if !self.is_near(candidate.0, candidate.1) {
+                        return Some(candidate);
+                    }
+                }
+            }
+        }
+        None
     }
 
     /// Records every LOGINMANY in `payload`, returning whether one named
@@ -942,6 +1061,38 @@ impl Session {
         Ok(None)
     }
 
+    /// Waits for a `RESPONSE_LOGOUT` (11) naming `char_unique`, or `None` if the
+    /// deadline passes first.
+    ///
+    /// The body is the four-byte `siData32[0]` the two-argument `cltMsg`
+    /// constructor writes (`MsgType.h:2977-2982`), which the client reads straight
+    /// back as `quitcharunique` (`Client-Login.cpp:398`). Same read-and-discard
+    /// contract as [`Self::await_login_many_naming`]: frames that are not this one
+    /// are dropped, which is fine because the walk to the block edge produces
+    /// nothing else this session cares about.
+    async fn await_logout_naming(
+        &mut self,
+        char_unique: i32,
+        within: std::time::Duration,
+    ) -> Result<bool, AnyError> {
+        let deadline = std::time::Instant::now() + within;
+        while std::time::Instant::now() < deadline {
+            let Some((cmd, plain)) = self.read_frame_within(remaining(deadline)).await? else {
+                return Ok(false);
+            };
+            if cmd != GameMsg::ResponseLogout as u16 {
+                continue;
+            }
+            let body = &plain[HEADER_SIZE..];
+            if body.len() == 4
+                && i32::from_le_bytes([body[0], body[1], body[2], body[3]]) == char_unique
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     /// Sends `REQUEST_USERORDER` (240) with an `ORDER_MOVE` to `dest`.
     ///
     /// Built through [`OrderData::move_order`] rather than by hand: the wire layout
@@ -960,7 +1111,19 @@ impl Session {
             GameMsg::RequestUserorder,
             &order.encode(),
         )
-        .await
+        .await?;
+        // Track the destination. The fields start out as the spawn tile, so
+        // leaving them there made every *later* geometry decision — which cell this
+        // session is in, whether the mover left its near block — run against a tile
+        // it had already walked away from. The observer is walked onto the mover's
+        // cell at the top of the probe, and the logout phase then computed a
+        // destination from the observer's entry tile instead of where it actually
+        // stood: the mover was sent to a tile in its *own current* cell, so no
+        // boundary was crossed and no LOGOUT could exist. The probe failed on a bug
+        // in its own setup, which is the correct outcome but the wrong reason.
+        self.spawn_x = dest.0;
+        self.spawn_y = dest.1;
+        Ok(())
     }
 }
 
