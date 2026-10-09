@@ -2626,7 +2626,11 @@ fn char_update_body(
         // The character's effective `GetTotalMoveSpeed()`; the client uses it for
         // the avatar's step animation rate.
         si_move_speed: i8::try_from(character.move_speed.clamp(0, i16::from(i8::MAX))).unwrap_or(0),
-        b_urgent_mode: false,
+        // `bUrgentMode = true` tells the client to animate this step via `MoveTo` + `MoveInit`.
+        // Without it, the client only animates when the position jump exceeds 3 tiles
+        // (`Client-Person-BigInfo.cpp:1176-1195`). For single-tile steps, `false` causes
+        // the observer to update position without animating — the step-and-pause bug.
+        b_urgent_mode: true,
         si_life: character.max_life,
         si_reserved_life: 0,
         si_mana: character.max_mana,
