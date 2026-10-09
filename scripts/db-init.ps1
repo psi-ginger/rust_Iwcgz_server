@@ -30,7 +30,8 @@ $files = @(
     "0005_world_item_handle.sql",
     "0006_character_money.sql",
     "0007_new_character_spawn.sql",
-    "0008_character_move_speed.sql"
+    "0008_character_move_speed.sql",
+    "0009_seed_second_account.sql"
 )
 
 foreach ($f in $files) {

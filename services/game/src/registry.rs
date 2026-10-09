@@ -315,10 +315,53 @@ impl Registry {
     ///
     /// Returns how many connections took the frame.
     pub fn broadcast_near(&self, origin: &SessionInfo, cmd: u16, payload: Vec<u8>) -> usize {
+        self.fan(origin, None, cmd, payload)
+    }
+
+    /// [`Self::broadcast_near`] minus the sender's own connection.
+    ///
+    /// The legacy has no equivalent because it has no split between "write to my
+    /// own socket now" and "hand a copy to the session manager": one
+    /// `SendNeighbourMsg` covers the whole 3×3 block including self, and that is
+    /// correct there. A port that owns the sender's cipher has to choose, and for
+    /// a frame the sender also writes **directly** the right choice is to exclude
+    /// self here rather than have two paths deliver the same bytes.
+    ///
+    /// The reason is ordering, not bandwidth. A frame queued here is drained by the
+    /// recipient's read loop on a later tick, while the sender's own copy is written
+    /// synchronously inside the dispatch. So a self-copy of step *N* can be written
+    /// to the socket *after* the direct copy of step *N+1*, and the client would
+    /// then `MoveTo` the older tile — an avatar that walks backwards. Excluding self
+    /// keeps exactly one writer per connection and per frame type, in order.
+    ///
+    /// Use this when the caller also sends the frame to itself; use
+    /// [`Self::broadcast_near`] when the fan is the only delivery (the chat paths,
+    /// where the legacy likewise sends one message to the whole block and nothing
+    /// goes out separately).
+    ///
+    /// Returns how many connections took the frame.
+    pub fn broadcast_near_others(
+        &self,
+        origin: &SessionInfo,
+        origin_key: SessionKey,
+        cmd: u16,
+        payload: Vec<u8>,
+    ) -> usize {
+        self.fan(origin, Some(origin_key), cmd, payload)
+    }
+
+    /// The shared fan. `skip` is the one key to leave out.
+    fn fan(
+        &self,
+        origin: &SessionInfo,
+        skip: Option<SessionKey>,
+        cmd: u16,
+        payload: Vec<u8>,
+    ) -> usize {
         let sessions = self.lock();
         let mut sent = 0;
-        for session in sessions.values() {
-            if !is_near(origin, &session.info) {
+        for (key, session) in sessions.iter() {
+            if skip == Some(*key) || !is_near(origin, &session.info) {
                 continue;
             }
             if session
@@ -554,6 +597,80 @@ mod tests {
         }
         assert_silent(&mut rfar, "three cells away");
         assert_silent(&mut rother, "another map");
+    }
+
+    /// The 200 fan (slice 6 B1) is `broadcast_near` minus the sender: the sender
+    /// writes the frame to its own socket directly, and a second queued copy could
+    /// be drained *after* a later direct one, walking the avatar backwards.
+    ///
+    /// The observer set is otherwise the same 3×3 block the chat fan uses.
+    #[test]
+    fn broadcast_near_others_leaves_the_sender_to_its_own_socket() {
+        let registry = Registry::new();
+        let (origin_key, mut rself) = join(&registry, info(11, "Mover", 15, 20));
+        let (_same, mut rsame) = join(&registry, info(12, "Observer", 15, 20));
+        let (_corner, mut rcorner) = join(&registry, info(13, "Corner", 0, 0));
+        let (_far, mut rfar) = join(&registry, info(14, "Far", 35, 20));
+
+        let origin = registry.info(origin_key).unwrap();
+        assert_eq!(
+            registry.broadcast_near_others(&origin, origin_key, 200, b"cell".to_vec()),
+            2,
+            "the two near observers, not the sender"
+        );
+
+        for rx in [&mut rsame, &mut rcorner] {
+            let frame = rx.try_recv().expect("a near observer gets the frame");
+            assert_eq!(frame.cmd, 200);
+            assert_eq!(frame.payload, b"cell");
+        }
+        assert_silent(&mut rself, "the sender writes its own copy directly");
+        assert_silent(&mut rfar, "three cells away");
+
+        // The self-inclusive fan still reaches the sender, for the chat paths.
+        assert_eq!(registry.broadcast_near(&origin, 122, b"head".to_vec()), 3);
+        let frame = rself.try_recv().expect("the chat fan includes the speaker");
+        assert_eq!(frame.cmd, 122);
+    }
+
+    /// The fan follows the *current* tile, which is what makes a walking
+    /// character's observer set move with it: `step_movement` updates the registry
+    /// before fanning, so a character that has walked into a new cell reaches the
+    /// observers there and stops reaching the ones it left.
+    #[test]
+    fn the_fan_follows_the_walker_into_its_new_cell() {
+        let registry = Registry::new();
+        // (5, 5): cells (0, 0) — not near cell (2, 5).
+        let (walker_key, _rwalker) = join(&registry, info(11, "Walker", 5, 5));
+        let (_ahead, mut rahead) = join(&registry, info(12, "Ahead", 27, 87));
+        let (_behind, mut rbehind) = join(&registry, info(13, "Behind", 5, 5));
+
+        let mut origin = registry.info(walker_key).unwrap();
+        assert_eq!(
+            registry.broadcast_near_others(&origin, walker_key, 200, b"a".to_vec()),
+            1,
+            "only the character sharing its cell"
+        );
+        assert_silent(&mut rahead, "cell (2, 5) is three cells away on x");
+        // Drain the first fan's copy so the assertions below read only the second.
+        let first = rbehind.try_recv().expect("the sharing character");
+        assert_eq!(first.payload, b"a");
+
+        // Step onto the palace spawn, as `step_movement` does before fanning.
+        registry.update_pos(walker_key, 27, 87);
+        origin = registry.info(walker_key).unwrap();
+        assert_eq!(
+            registry.broadcast_near_others(&origin, walker_key, 200, b"b".to_vec()),
+            1,
+            "the observer set follows the walker: palace in, the old cell out"
+        );
+        let frame = rahead
+            .try_recv()
+            .expect("the cell it walked into is near now");
+        assert_eq!(frame.payload, b"b");
+        // Cell (0, 0) to cell (2, 5) is two cells out on x, so the character left
+        // behind drops out of the fan — the observer set is not a fixed list.
+        assert_silent(&mut rbehind, "two cells away once the walker moved on");
     }
 
     #[test]

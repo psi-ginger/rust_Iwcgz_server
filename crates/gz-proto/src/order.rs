@@ -217,6 +217,38 @@ impl BasicCharUpdate {
         out[22] = self.si_make_ani_type as u8;
         out
     }
+
+    /// Decodes a `cltBasicCharUpdateInfo` body — the mirror of [`Self::encode`],
+    /// and the test oracle for the observer fan (T-018 slice 6 B1), which asserts
+    /// on the fields a bystander's client actually reads.
+    ///
+    /// The pad byte at offset 23 is not read: the legacy leaves it uninitialised
+    /// and the client does not read it, so a decoded body has no value for it.
+    ///
+    /// # Errors
+    ///
+    /// A body shorter than [`BASIC_CHAR_UPDATE_LEN`].
+    pub fn decode(bytes: &[u8]) -> Result<Self, WireError> {
+        if bytes.len() < BASIC_CHAR_UPDATE_LEN {
+            return Err(WireError::Truncated {
+                needed: BASIC_CHAR_UPDATE_LEN,
+                have: bytes.len(),
+            });
+        }
+        Ok(Self {
+            si_char_unique: i16::from_le_bytes([bytes[0], bytes[1]]),
+            si_move_speed: bytes[2] as i8,
+            b_urgent_mode: bytes[3] != 0,
+            si_life: i32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]),
+            si_reserved_life: i32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]),
+            si_mana: i32::from_le_bytes([bytes[12], bytes[13], bytes[14], bytes[15]]),
+            si_x: i16::from_le_bytes([bytes[16], bytes[17]]),
+            si_y: i16::from_le_bytes([bytes[18], bytes[19]]),
+            ui_gm_mode: bytes[20],
+            b_pc_room: bytes[21] != 0,
+            si_make_ani_type: bytes[22] as i8,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -296,6 +328,44 @@ mod tests {
                 0xBF, 0x05, 0x0E, 0x00, 0xB1, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x14, 0x00,
                 0x00, 0x00, 0x17, 0x00, 0x0E, 0x00, 0x00, 0x00, 0x00, 0x00,
             ]
+        );
+        // The decoder is the observer fan's oracle (slice 6 B1), so it has to read
+        // back every field the encoder wrote — including the signed ones, where a
+        // `u8 as i8` cast matters.
+        assert_eq!(BasicCharUpdate::decode(&bytes).unwrap(), update);
+    }
+
+    /// A negative tile and a negative speed survive the round trip: `si_move_speed`
+    /// is `SI08` and `siX`/`siY` are signed, and an observer's client compares
+    /// tile deltas with `TABS` (`Client-Person-BigInfo.cpp:1187`), so a mis-decoded
+    /// sign would put an avatar on the wrong side of the map.
+    #[test]
+    fn char_update_round_trips_signed_fields() {
+        let update = BasicCharUpdate {
+            si_char_unique: -2,
+            si_move_speed: -3,
+            b_urgent_mode: true,
+            si_life: -1,
+            si_reserved_life: -2,
+            si_mana: -3,
+            si_x: -4,
+            si_y: -5,
+            ui_gm_mode: 0,
+            b_pc_room: true,
+            si_make_ani_type: -6,
+        };
+        assert_eq!(BasicCharUpdate::decode(&update.encode()).unwrap(), update);
+    }
+
+    #[test]
+    fn char_update_decode_reports_truncation() {
+        let short = [0u8; BASIC_CHAR_UPDATE_LEN - 1];
+        assert_eq!(
+            BasicCharUpdate::decode(&short),
+            Err(WireError::Truncated {
+                needed: BASIC_CHAR_UPDATE_LEN,
+                have: BASIC_CHAR_UPDATE_LEN - 1,
+            })
         );
     }
 }

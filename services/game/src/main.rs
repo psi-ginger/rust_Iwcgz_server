@@ -875,6 +875,8 @@ async fn handle_client(
                         &mut stream,
                         &mut outbound,
                         &characters,
+                        &registry,
+                        session_key,
                         &mut live,
                         order,
                     )
@@ -2667,12 +2669,30 @@ async fn send_char_update(
         .character
         .as_ref()
         .ok_or("char update before the character row is loaded")?;
+    let body = char_update_body(live.char_unique, character, x, y)?;
+    send_encoded(stream, outbound, GameMsg::ResponseCharupdate, &body).await
+}
+
+/// Builds the 200 `CHARUPDATE` body for one cell, as
+/// `cltServer::SendCharUpdate` builds `cltBasicCharUpdateInfo`
+/// (`Server.cpp:1654-1698`).
+///
+/// Factored out of [`send_char_update`] so the observer fan ([`fan_char_update`])
+/// can queue byte-identical bodies without a second encoder that could drift, and
+/// taken as a row rather than a `LiveFrames` so it is testable without a database.
+///
+/// # Errors
+///
+/// A `char_unique` or tile that does not fit the struct's narrower fields.
+fn char_update_body(
+    char_unique: i32,
+    character: &CharacterFull,
+    x: i32,
+    y: i32,
+) -> Result<Vec<u8>, AnyError> {
     let update = BasicCharUpdate {
-        si_char_unique: i16::try_from(live.char_unique).map_err(|_| {
-            format!(
-                "session char_unique {} does not fit the SI16 siCharUnique",
-                live.char_unique
-            )
+        si_char_unique: i16::try_from(char_unique).map_err(|_| {
+            format!("session char_unique {char_unique} does not fit the SI16 siCharUnique")
         })?,
         // The character's effective `GetTotalMoveSpeed()`; the client uses it for
         // the avatar's step animation rate.
@@ -2687,13 +2707,74 @@ async fn send_char_update(
         b_pc_room: false,
         si_make_ani_type: 0,
     };
-    send_encoded(
-        stream,
-        outbound,
-        GameMsg::ResponseCharupdate,
-        &update.encode(),
-    )
-    .await
+    Ok(update.encode().to_vec())
+}
+
+/// Queues the 200 `CHARUPDATE` for every character in the mover's 3×3 near cell,
+/// self included — T-018 slice 6 B1.
+///
+/// The legacy fans exactly this frame: `SendCharUpdate` builds one
+/// `cltBasicCharUpdateInfo` and hands it to
+/// `pclchar->SendNeighbourMsg(&clMsg, true)` (`Server.cpp:1689`), which lands on
+/// `pCell->SendPacketNearAll` over the `m_pNearCell[9]` block — the 3×3 cells
+/// around the sender's, self included (`Char-Neighbour.cpp:29-78`,
+/// `ITZMap.cpp:71-87`). The `true` is the self-inclusion flag.
+///
+/// # What this fan is for: position and walk animation
+///
+/// Not HP. The client never draws a bystander's health bar — the floating gauge
+/// is `cltNPersonStatus::DrawCharStatus`, which hardcodes `pclCM->CR[1]`
+/// (`NCharPerson.cpp:3920`) and `CR[1]` is the local player
+/// (`Client-Winsock.cpp:130`, and the client's own
+/// `charunique == MyCharUnique → charid = 1` at
+/// `Client-Person-BigInfo.cpp:1160-1163`). Life and mana do ride along in the
+/// struct and are written to the remote object
+/// (`SetLife`/`SetMana`, `:1228-1238`); they just stay unrendered for a bystander.
+///
+/// The fields an observer actually acts on are `siX`/`siY`/`siMoveSpeed`, in the
+/// branch the client runs *only* for other characters
+/// (`Client-Person-BigInfo.cpp:1187-1222`):
+///
+/// ```text
+/// SI32 length = max( TABS(x - CR[charid]->GetX()), TABS(y - CR[charid]->GetY()));
+/// if(length && bselfswitch == false) { ... OrderMove(charid, x, y, BY_COMPUTER); ... }
+/// CR[charid]->MoveTo(x, y);
+/// CR[charid]->MoveInit();
+/// ```
+///
+/// `bselfswitch == false` is why the mover's own client animates itself off the
+/// 241 and needs nothing from a 200 (slice 3), and its absence on the position
+/// branch is why observers need this fan. Without it a second client's copy of
+/// another avatar is stranded on whatever tile it was created at.
+///
+/// A send to a session that just disconnected is dropped, not an error — the same
+/// tolerance `Registry::send_to` documents for the chat paths.
+///
+/// Self is **excluded** ([`Registry::broadcast_near_others`]) because every caller
+/// also writes the frame to its own socket directly, and one writer per connection
+/// keeps a queued copy from overtaking a later direct one.
+///
+/// # Errors
+///
+/// No character row yet, or a tile/`char_unique` that does not fit the struct.
+fn fan_char_update(
+    registry: &Registry,
+    session_key: SessionKey,
+    char_unique: i32,
+    character: &CharacterFull,
+    x: i32,
+    y: i32,
+) -> Result<usize, AnyError> {
+    let body = char_update_body(char_unique, character, x, y)?;
+    let origin = registry
+        .info(session_key)
+        .ok_or("char update fan before the session is in the registry")?;
+    Ok(registry.broadcast_near_others(
+        &origin,
+        session_key,
+        GameMsg::ResponseCharupdate as u16,
+        body,
+    ))
 }
 
 /// Advances an in-flight move by one tick. When the tick commits a tile it sends
@@ -2724,7 +2805,23 @@ async fn step_movement(
     if mv.arrived() {
         *movement = None;
     }
+    // The legacy fans this frame to the 3×3 near block (`Server.cpp:1689`), so a
+    // bystander's copy of this avatar steps with ours instead of standing still
+    // (slice 6 B1). `update_pos` runs *before* the fan so the observer set is
+    // computed from the cell we have just reached, not the one we left.
+    registry.update_pos(session_key, x, y);
+    let observers = {
+        let character = live
+            .character
+            .as_ref()
+            .ok_or("char update fan before the character row is loaded")?;
+        fan_char_update(registry, session_key, live.char_unique, character, x, y)?
+    };
+
     send_char_update(stream, outbound, live, x, y).await?;
+    if observers > 0 {
+        logln!("game: char {session_key} fanned 200 to {observers} observer(s) at ({x}, {y})");
+    }
     // The stepped tile is now the authoritative cell: a 248 resync mid-walk and
     // a re-issued 240 both have to see it, not the destination the row holds.
     if let Some(character) = live.character.as_mut() {
@@ -2734,10 +2831,6 @@ async fn step_movement(
     if let Some(session) = login.as_mut() {
         session.entry_cell = Some(DropLocation { map_id, x, y });
     }
-    // The registry tracks the *stepped* tile, not the destination the cached
-    // row was set to when the order was answered: a head-chat fan has to reach
-    // the cells the avatar is standing in, not the cell it is walking to.
-    registry.update_pos(session_key, x, y);
     Ok(())
 }
 
@@ -2769,6 +2862,8 @@ async fn handle_userorder(
     stream: &mut TcpStream,
     outbound: &mut Cipher,
     characters: &PgCharacterRepository,
+    registry: &Registry,
+    session_key: SessionKey,
     live: &mut LiveFrames<'_>,
     order: OrderData,
 ) -> Result<Option<Movement>, AnyError> {
@@ -2802,8 +2897,22 @@ async fn handle_userorder(
     )
     .await?;
     // The reference server broadcasts the cell the move starts from, then one
-    // 200 per committed tile (`generated_frames.rs`: 241, 200, 200).
+    // 200 per committed tile (`generated_frames.rs`: 241, 200, 200). The start-cell
+    // 200 is fanned too (slice 6 B1): the legacy's `SendCharUpdate` is one call for
+    // both, so an observer that missed the origin tile would otherwise start its
+    // walk from a stale one. Self still gets it directly, before the fan, so the
+    // ordering the capture shows (241, 200, 200…) is preserved for this client.
     send_char_update(stream, outbound, live, start.0, start.1).await?;
+    fan_char_update(
+        registry,
+        session_key,
+        live.char_unique,
+        live.character
+            .as_ref()
+            .ok_or("userorder before the row is loaded")?,
+        start.0,
+        start.1,
+    )?;
 
     // Persist the destination, then mirror: a later 248 (resync) or a re-login
     // reads the row. The stepped cell is tracked in memory for drops.
@@ -3543,6 +3652,94 @@ mod tests {
             wis: 10,
             bonus_points: 5,
         }
+    }
+
+    /// B1: the fan carries the same bytes the mover's own socket gets, so the two
+    /// writers of one frame cannot drift. `fan_char_update` and `send_char_update`
+    /// both go through `char_update_body`, so this pins that they are one encoder.
+    ///
+    /// It also pins what the frame actually carries for an observer: the cell, and
+    /// the move speed. `si_life`/`si_mana` ride along (the struct has no smaller
+    /// variant) but the client renders no bystander bar from them — the floating
+    /// gauge is `CR[1]`-only (`NCharPerson.cpp:3920`). The observer's animation
+    /// comes from `si_x`/`si_y` via the `bselfswitch == false` branch
+    /// (`Client-Person-BigInfo.cpp:1187-1222`), so those are the fields under test.
+    #[test]
+    fn the_observer_fan_carries_the_same_cell_and_speed_as_the_movers_own_frame() {
+        let body = char_update_body(1471, &seeded_tester(), 28, 90).unwrap();
+        let update = BasicCharUpdate::decode(&body).expect("the fan body decodes as a 200");
+
+        assert_eq!(update.si_char_unique, 1471);
+        assert_eq!((update.si_x, update.si_y), (28, 90));
+        assert_eq!(
+            update.si_move_speed, 8,
+            "the character's own effective move speed, not a constant"
+        );
+        // The captured frame's length, so a field added to `BasicCharUpdate`
+        // cannot silently change the wire size of every observer's frame.
+        assert_eq!(body.len(), gz_proto::order::BASIC_CHAR_UPDATE_LEN);
+    }
+
+    /// The fan reaches observers in the 3×3 near block and never the sender, who
+    /// already wrote the frame directly (`registry.rs` tests the cell arithmetic;
+    /// this pins the wiring, including that a walker's own copy is not duplicated).
+    /// Registers one session in a registry for a fan test and hands back its inbox.
+    fn registry_join(
+        registry: &Registry,
+        char_unique: i16,
+        name: &str,
+        x: i32,
+        y: i32,
+    ) -> (SessionKey, tokio::sync::mpsc::UnboundedReceiver<Outbound>) {
+        let key = Registry::next_key();
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        registry.register(
+            key,
+            tx,
+            SessionInfo {
+                char_unique,
+                name: name.to_owned(),
+                level: 13,
+                map_id: 158,
+                x,
+                y,
+                school_id: 0,
+            },
+        );
+        (key, rx)
+    }
+
+    #[test]
+    fn the_fan_reaches_a_nearby_session_and_skips_the_mover() {
+        let registry = Registry::new();
+        // Both characters spawn on the palace tile (0009's deliberate choice), so
+        // they are in one another's near cell on login.
+        let (mover_key, mut rmover) = registry_join(&registry, 1471, "Tester", 27, 87);
+        let (_observer_key, mut robeserver) = registry_join(&registry, 1472, "Tester2", 27, 87);
+        let (_far_key, mut rfar) = registry_join(&registry, 1473, "Far", 400, 400);
+
+        // `step_movement` updates the registry before fanning, so the observer set
+        // is the cell just reached.
+        registry.update_pos(mover_key, 28, 90);
+        let observers =
+            fan_char_update(&registry, mover_key, 1471, &seeded_tester(), 28, 90).unwrap();
+        assert_eq!(
+            observers, 1,
+            "Tester2 shares the cell; the far one does not"
+        );
+
+        let frame = robeserver.try_recv().expect("the observer gets the 200");
+        assert_eq!(frame.cmd, GameMsg::ResponseCharupdate as u16);
+        let update = BasicCharUpdate::decode(&frame.payload).expect("observer body decodes");
+        assert_eq!((update.si_x, update.si_y), (28, 90));
+        assert!(
+            rmover.try_recv().is_err(),
+            "the mover writes its own copy directly; a queued one could land after a later direct one"
+        );
+        assert!(
+            rfar.try_recv().is_err(),
+            "cell (40, 26) is not in the 3x3 block around (2, 6)"
+        );
     }
 
     /// The recalc formulas are the ones the dev seed's stored maxima must match:
