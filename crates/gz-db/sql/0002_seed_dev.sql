@@ -47,8 +47,27 @@ ON CONFLICT (account_id, slot) DO UPDATE
       pos_y      = EXCLUDED.pos_y,
       game_unique = EXCLUDED.game_unique;
 
-INSERT INTO character_stats (character_id, level, exp, str, dex, vit, mag, hnd, luk, wis)
-SELECT c.character_id, 10, 0, 20, 15, 20, 10, 10, 10, 10
+-- Level 13, not 10. `GAMEMSG_REQUEST_USEBONUS` (250) enforces the level
+-- allowance `bonus + sum(abilities) <= 40 + (level-1)*5` (`Server-Person.cpp`
+-- `:2472-2493`). The abilities below sum to 95; with the `character_stats`
+-- `bonus_points` default of 5 that is a total of 100. At level 10 the allowance
+-- is only `40 + 9*5 = 85`, so the row is over by 15 and every allocation would
+-- be refused (the legacy *kicks* on the mismatch; our port rejects instead, see
+-- `handle_use_bonus`). Level 13 makes the allowance `40 + 12*5 = 100`, exactly
+-- the row, so the starting 5 points are spendable.
+--
+-- `max_life`/`max_mana` are stored columns no code path recomputes today, and the
+-- seed never set them, so they sat at the 0001 defaults (40/20) while the real
+-- formulas say otherwise. Both are the legacy's base terms at this level/ability:
+--   max_life = vit * (8000 + level*5) / 1000 = 20 * 8065 / 1000 = 161
+--   max_mana = mag * (4000 + level*5) / 1000 = 10 * 4065 / 1000 = 40
+-- (`Parametabox.cpp:3374`, `:3545`; both reproduce the DDL defaults exactly at
+-- level 1 — vit 5 -> 40, mag 5 -> 20 — which is what makes them the recalc source).
+-- `handle_use_bonus` recomputes both on every accepted spend.
+INSERT INTO character_stats
+  (character_id, level, exp, str, dex, vit, mag, hnd, luk, wis,
+   bonus_points, max_life, max_mana)
+SELECT c.character_id, 13, 0, 20, 15, 20, 10, 10, 10, 10, 5, 161, 40
 FROM characters c
 JOIN accounts a ON a.account_id = c.account_id
 WHERE a.username = 'test' AND c.slot = 0
@@ -56,4 +75,6 @@ ON CONFLICT (character_id) DO UPDATE
   SET level = EXCLUDED.level, exp = EXCLUDED.exp,
       str = EXCLUDED.str, dex = EXCLUDED.dex, vit = EXCLUDED.vit,
       mag = EXCLUDED.mag, hnd = EXCLUDED.hnd, luk = EXCLUDED.luk,
-      wis = EXCLUDED.wis;
+      wis = EXCLUDED.wis,
+      bonus_points = EXCLUDED.bonus_points,
+      max_life = EXCLUDED.max_life, max_mana = EXCLUDED.max_mana;

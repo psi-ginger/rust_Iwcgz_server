@@ -40,7 +40,7 @@ use gz_db::DropStatus;
 use gz_db::{
     AccountRepository, CharacterFull, CharacterRepository, DropLocation, GroundClaim,
     ItemRepository, MoveOutcome, PgAccountRepository, PgCharacterRepository, PgItemRepository,
-    PickupStatus, RepositoryError, SplitStatus,
+    PickupStatus, RepositoryError, SplitStatus, StatsUpdate,
 };
 use gz_net::session::{Rejection, Session};
 use gz_net::{COMPRESSION_FLAG, Frame, FrameParser, HEADER_SIZE, MAX_FRAME_SIZE, Tick};
@@ -54,10 +54,10 @@ use gz_proto::chat::{
 };
 use gz_proto::game::{
     BasicInfo, CharListEntry, CharUnique, GameLogin, MAX_CONSTRUCTION_NUM, MAX_VILLAGE_NUMBER,
-    MakeCharInfo, ServerInfo, VillageStruct, client_map_index, decode_make_new_char,
-    decode_select_char, decode_village_struct_request, encode_all_char_info_one,
+    MakeCharInfo, ServerInfo, UseBonus, VillageStruct, client_map_index, decode_make_new_char,
+    decode_select_char, decode_use_bonus, decode_village_struct_request, encode_all_char_info_one,
     encode_all_char_info_two, encode_change_horse, encode_del_result, encode_family_update,
-    encode_get_village_info, encode_person_horse, encode_response_name,
+    encode_get_village_info, encode_person_horse, encode_person_ip, encode_response_name,
     encode_skillbook_magic_info,
 };
 use gz_proto::item::{
@@ -845,6 +845,19 @@ async fn handle_client(
                         )
                         .await?;
                     }
+                }
+                c if c == GameMsg::RequestUsebonus as u16 => {
+                    // 250: stat allocation. Handled server-authoritatively: the
+                    // request is a wish, the server reads its own row, validates,
+                    // writes, recomputes the derived maxima and answers with 215.
+                    handle_use_bonus(
+                        &mut stream,
+                        &mut outbound,
+                        &characters,
+                        &mut live,
+                        payload.as_ref(),
+                    )
+                    .await?;
                 }
                 c if c == GameMsg::RequestUserorder as u16 => {
                     // If a move is already being stepped, the authoritative cell
@@ -2184,6 +2197,307 @@ async fn handle_change_status_info(
     Ok(())
 }
 
+/// The accepted post-state of a valid stat allocation.
+///
+/// Kept separate from [`CharacterFull`] so [`allocate_stat`] is a pure function
+/// over the row plus the request — the server's row on one side, the client's
+/// wish on the other — with no field it can forget to return.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Allocation {
+    str_: i32,
+    dex: i32,
+    vit: i32,
+    mag: i32,
+    hnd: i32,
+    luk: i32,
+    wis: i32,
+    /// Points still unspent, after the deduction.
+    bonus: i16,
+    max_life: i32,
+    max_mana: i32,
+}
+
+/// `max_life = vit * (8000 + level*5) / 1000` — the base term of `SetHitPoint`
+/// (`Parametabox.cpp:3374`), and the formula the DDL defaults reproduce exactly
+/// at level 1 (vit 5 -> 40), which is what makes it the recalc source.
+fn derived_max_life(vit: i32, level: i16) -> i32 {
+    (i64::from(vit) * (8000 + i64::from(level) * 5) / 1000) as i32
+}
+
+/// `max_mana = mag * (4000 + level*5) / 1000` — the base term of
+/// `SetManaPoint` (`Parametabox.cpp:3545`), reproducing the DDL default at
+/// level 1 (mag 5 -> 20).
+fn derived_max_mana(mag: i32, level: i16) -> i32 {
+    (i64::from(mag) * (4000 + i64::from(level) * 5) / 1000) as i32
+}
+
+/// Validates a `GAMEMSG_REQUEST_USEBONUS` (250) against the server's own row and
+/// computes the accepted allocation.
+///
+/// This is the owner anti-cheat policy in one place: the client's `siAmount` is
+/// only a wish, `character` is the server's authoritative row, and a request that
+/// would break the unspent-point vault, the Hnd per-level cap, or the level
+/// allowance is refused. The allowance is checked on the *post-state*
+/// (`Σabilities + bonus_points <= 40 + (level-1)*5`), which is what defeats CE:
+/// points cannot be conjured, and a row already over the ceiling (the unrepaired
+/// level-10 seed) cannot spend either.
+///
+/// # Errors
+///
+/// A human-readable reason; the caller logs it and soft-fails. The legacy's
+/// `CloseSocket()` for a mismatch (`Server-Person.cpp:2476-2493`) is deliberately
+/// not ported.
+fn allocate_stat(character: &CharacterFull, request: &UseBonus) -> Result<Allocation, String> {
+    let pos = request.pos;
+    let amount = request.amount;
+
+    // The reset path (`siAmount < 0`, `IDC_BUTTON_*2` = 1115..1120 with no WIS2
+    // button) consumes item 24035 and is deferred; a zero or negative amount is
+    // refused, never misinterpreted as an allocation. See the T-018 card.
+    if amount <= 0 {
+        return Err(format!(
+            "siAmount {amount} is not a positive allocation (the reset path is not wired)"
+        ));
+    }
+    if !(0..=6).contains(&pos) {
+        return Err(format!("siPos {pos} is outside the 0..=6 allocate space"));
+    }
+
+    if i64::from(amount) > i64::from(character.bonus_points) {
+        return Err(format!(
+            "requested {amount} exceeds the {} unspent point(s)",
+            character.bonus_points
+        ));
+    }
+
+    // Hnd is the one ability with a per-level cap (`Server-Person.cpp:2518-2529`);
+    // the others have none.
+    let level = i64::from(character.level);
+    if pos == 4 {
+        let hnd = i64::from(character.hnd);
+        if hnd + i64::from(amount) > level * 2 {
+            return Err(format!(
+                "Hnd {hnd} + {amount} would exceed the level-{level} cap {}",
+                level * 2
+            ));
+        }
+    }
+
+    // The ability being raised; `_` covers 6 (Wis) after the 0..=6 guard.
+    let current = match pos {
+        0 => character.str,
+        1 => character.dex,
+        2 => character.mag,
+        3 => character.vit,
+        4 => character.hnd,
+        5 => character.luk,
+        _ => character.wis,
+    };
+    let raised = current
+        .checked_add(i32::from(amount))
+        .ok_or_else(|| format!("{current} + {amount} overflows the stored SI32 ability"))?;
+
+    let mut out = Allocation {
+        str_: character.str,
+        dex: character.dex,
+        vit: character.vit,
+        mag: character.mag,
+        hnd: character.hnd,
+        luk: character.luk,
+        wis: character.wis,
+        bonus: character.bonus_points - amount,
+        max_life: 0,
+        max_mana: 0,
+    };
+    match pos {
+        0 => out.str_ = raised,
+        1 => out.dex = raised,
+        2 => out.mag = raised,
+        3 => out.vit = raised,
+        4 => out.hnd = raised,
+        5 => out.luk = raised,
+        _ => out.wis = raised,
+    }
+
+    // Level allowance on the post-state. An allocation moves points from bonus to
+    // a stat so the total is invariant, but the check is still on the result —
+    // that literal reading is what the owner asked for and what the tests lock.
+    let allowance = 40 + (level - 1) * 5;
+    let total = i64::from(out.bonus)
+        + i64::from(out.str_)
+        + i64::from(out.dex)
+        + i64::from(out.vit)
+        + i64::from(out.mag)
+        + i64::from(out.hnd)
+        + i64::from(out.luk)
+        + i64::from(out.wis);
+    if total > allowance {
+        return Err(format!(
+            "post-allocation total {total} exceeds the level-{level} allowance {allowance}"
+        ));
+    }
+
+    // Derived maxima, recomputed from the post-state — `SetParametaBoxAction`'s
+    // job on the legacy, done here per accepted spend.
+    out.max_life = derived_max_life(out.vit, character.level);
+    out.max_mana = derived_max_mana(out.mag, character.level);
+    Ok(out)
+}
+
+/// Applies `GAMEMSG_REQUEST_USEBONUS` (250): spend unspent points into one
+/// ability.
+///
+/// Server-authoritative end to end, per the owner policy: the request's numbers
+/// are a wish, the accepted state comes out of the server's own row
+/// ([`allocate_stat`]), is persisted, and is reflected back with a 215
+/// `RESPONSE_PERSON_IP` carrying the refreshed `cltPIPInfo` — the `UPDATE_IP`
+/// flush of `Char-UpdateChangedData.cpp:74-83`. A refused request is logged and
+/// otherwise ignored; the session stays up, the legacy `CloseSocket()` is not
+/// ported.
+///
+/// The row write happens before the 215 so the client can never apply a state
+/// the server has not stored, and a mid-flight crash leaves the DB (the durable
+/// truth) past the spend.
+///
+/// # Errors
+///
+/// A malformed body ([`gz_proto::wire::WireError`]), a database failure, or a
+/// socket/cipher failure. A *rejected* request is not an error.
+async fn handle_use_bonus(
+    stream: &mut TcpStream,
+    outbound: &mut Cipher,
+    characters: &PgCharacterRepository,
+    live: &mut LiveFrames<'_>,
+    payload: &[u8],
+) -> Result<(), AnyError> {
+    let request = decode_use_bonus(payload)?;
+    let (character_id, updated) = {
+        let character = live
+            .character
+            .as_ref()
+            .ok_or("usebonus before the character row is loaded")?;
+        match allocate_stat(character, &request) {
+            Ok(updated) => (character.character_id, updated),
+            Err(reason) => {
+                logln!(
+                    "game: usebonus pos {} amount {} refused: {reason}",
+                    request.pos,
+                    request.amount
+                );
+                return Ok(());
+            }
+        }
+    };
+
+    characters
+        .update_stats(
+            character_id,
+            &StatsUpdate {
+                str_: updated.str_,
+                dex: updated.dex,
+                vit: updated.vit,
+                mag: updated.mag,
+                hnd: updated.hnd,
+                luk: updated.luk,
+                wis: updated.wis,
+                bonus_points: updated.bonus,
+                max_life: updated.max_life,
+                max_mana: updated.max_mana,
+            },
+        )
+        .await?;
+
+    // Mirror into the cached row so a later 200 (movement) and a 248 resync send
+    // the new maxima, exactly like `handle_userorder` mirrors a new cell.
+    if let Some(row) = live.character.as_mut() {
+        row.str = updated.str_;
+        row.dex = updated.dex;
+        row.vit = updated.vit;
+        row.mag = updated.mag;
+        row.hnd = updated.hnd;
+        row.luk = updated.luk;
+        row.wis = updated.wis;
+        row.bonus_points = updated.bonus;
+        row.max_life = updated.max_life;
+        row.max_mana = updated.max_mana;
+    }
+
+    let body = {
+        let character = live
+            .character
+            .as_ref()
+            .ok_or("usebonus row disappeared after the write")?;
+        encode_person_ip(
+            i16::try_from(live.char_unique).map_err(|_| {
+                format!(
+                    "session char_unique {} does not fit the SI16 siCharUnique",
+                    live.char_unique
+                )
+            })?,
+            &basic_info_for(live.account_id, &live.account_name, character)?,
+        )
+    };
+    send_raw(stream, outbound, GameMsg::ResponsePersonIp as u16, &body).await?;
+    logln!(
+        "game: usebonus pos {} amount {} accepted: bonus {}, life {}, mana {} (215, {} bytes)",
+        request.pos,
+        request.amount,
+        updated.bonus,
+        updated.max_life,
+        updated.max_mana,
+        body.len()
+    );
+    Ok(())
+}
+
+/// Builds the `cltPBasicInfo` + `cltPIPInfo` pair from a character row.
+///
+/// One source of truth for the identity-and-stats block:
+/// [`LiveFrames::regenerate`] emits 248 from it and `handle_use_bonus` emits the
+/// 215 `clIP` from it, so the two frames can never disagree about a stat.
+///
+/// # Errors
+///
+/// A map id that does not fit the `SI16 clPos.siMapIndex`.
+fn basic_info_for(
+    account_id: i32,
+    account_name: &str,
+    character: &CharacterFull,
+) -> Result<BasicInfo, AnyError> {
+    let map_index = i16::try_from(client_map_index(character.map_id)).map_err(|_| {
+        format!(
+            "map {} does not fit the SI16 clPos.siMapIndex",
+            character.map_id
+        )
+    })?;
+    Ok(BasicInfo {
+        account_idnum: account_id,
+        account_id: account_name.to_owned(),
+        slot: character.slot as u8,
+        sex: character.gender as u8,
+        class_kind: character.class_kind as u16,
+        home_village: character.school_id as i8,
+        map_index,
+        x: character.pos_x as i16,
+        y: character.pos_y as i16,
+        character_id: character.character_id,
+        name: character.name.clone(),
+        str_: character.str,
+        dex: character.dex,
+        vit: character.vit,
+        mag: character.mag,
+        hnd: character.hnd,
+        luk: character.luk,
+        wis: character.wis,
+        level: character.level,
+        bonus: character.bonus_points,
+        life: character.max_life,
+        mana: character.max_mana,
+        exp: character.exp,
+        money: character.money,
+    })
+}
+
 /// Answers `GAMEMSG_REQUEST_PERSONALSHOPDATA` (7002) with
 /// `GAMEMSG_RESPONSE_PERSONALSHOPDATA` (7003), which is what makes the client
 /// create the personal-shop or manufacture dialog (`Client-PersonalShop.cpp:87-88`
@@ -3103,38 +3417,7 @@ impl LiveFrames<'_> {
         }
 
         // 248: the identity-and-stats block, from `characters` + `character_stats`.
-        let map_index = i16::try_from(client_map_index(character.map_id)).map_err(|_| {
-            format!(
-                "map {} does not fit the SI16 clPos.siMapIndex",
-                character.map_id
-            )
-        })?;
-        let basic = BasicInfo {
-            account_idnum: self.account_id,
-            account_id: self.account_name.clone(),
-            slot: character.slot as u8,
-            sex: character.gender as u8,
-            class_kind: character.class_kind as u16,
-            home_village: character.school_id as i8,
-            map_index,
-            x: character.pos_x as i16,
-            y: character.pos_y as i16,
-            character_id: character.character_id,
-            name: character.name.clone(),
-            str_: character.str,
-            dex: character.dex,
-            vit: character.vit,
-            mag: character.mag,
-            hnd: character.hnd,
-            luk: character.luk,
-            wis: character.wis,
-            level: character.level,
-            bonus: character.bonus_points,
-            life: character.max_life,
-            mana: character.max_mana,
-            exp: character.exp,
-            money: character.money,
-        };
+        let basic = basic_info_for(self.account_id, &self.account_name, character)?;
         // The trailing four `SI16` are the capture's set-item progress: type 20
         // step 3, both second slots zero. There is no set-item table yet.
         Ok(Some(encode_all_char_info_one(&basic, 20, 3, 0, 0)))
@@ -3226,6 +3509,133 @@ mod tests {
         assert!(admit_select_char(Some(1), 2));
         // Out-of-range slots never reach the predicate; `handle_select_char`
         // rejects them.
+    }
+
+    /// A fully-populated row for the allocation tests. Level 13 with abilities
+    /// 20/15/20/10/10/10/10 and bonus 5 is exactly the *repaired* dev seed: the
+    /// total is 100, which is `40 + 12*5`, so the starting 5 points are
+    /// spendable (at the old level 10 the same row totals 100 against an
+    /// allowance of 85 and every spend is refused).
+    fn seeded_tester() -> CharacterFull {
+        CharacterFull {
+            character_id: 1,
+            name: "Tester".into(),
+            class_kind: 1,
+            gender: 1,
+            level: 13,
+            max_life: 161,
+            max_mana: 40,
+            move_speed: 8,
+            exp: 0,
+            money: 1000,
+            map_id: 158,
+            pos_x: 27,
+            pos_y: 87,
+            slot: 0,
+            school_id: 0,
+            game_unique: Some(1471),
+            str: 20,
+            dex: 15,
+            vit: 20,
+            mag: 10,
+            hnd: 10,
+            luk: 10,
+            wis: 10,
+            bonus_points: 5,
+        }
+    }
+
+    /// The recalc formulas are the ones the dev seed's stored maxima must match:
+    /// both reproduce the `0001` DDL defaults exactly at level 1 (vit 5 -> 40,
+    /// mag 5 -> 20) and the repaired row's stored values at level 13.
+    #[test]
+    fn the_derived_maxima_reproduce_the_ddl_defaults_and_the_repaired_seed() {
+        assert_eq!(derived_max_life(5, 1), 40);
+        assert_eq!(derived_max_mana(5, 1), 20);
+        assert_eq!(derived_max_life(20, 13), 161);
+        assert_eq!(derived_max_mana(10, 13), 40);
+    }
+
+    #[test]
+    fn allocating_spends_bonus_and_raises_the_stat() {
+        let out = allocate_stat(&seeded_tester(), &UseBonus { pos: 0, amount: 5 }).unwrap();
+        assert_eq!(out.bonus, 0);
+        assert_eq!(out.str_, 25);
+        // Vit/mag are untouched, so the derived maxima do not move.
+        assert_eq!((out.max_life, out.max_mana), (161, 40));
+        // The total is invariant under an allocation: 95 + 5 both ways.
+    }
+
+    #[test]
+    fn allocating_vit_recomputes_max_life_from_the_formula() {
+        let out = allocate_stat(&seeded_tester(), &UseBonus { pos: 3, amount: 5 }).unwrap();
+        assert_eq!(out.vit, 25);
+        assert_eq!(out.max_life, 25 * (8000 + 13 * 5) / 1000); // 201
+        assert_eq!(out.bonus, 0);
+    }
+
+    #[test]
+    fn allocate_rejects_zero_and_negative_amounts() {
+        // `siAmount <= 0` is refused outright: the reset path (item 24035, the
+        // `IDC_BUTTON_*2` space) is deferred, and zero is a no-op that must not
+        // cheerfully "succeed".
+        assert!(allocate_stat(&seeded_tester(), &UseBonus { pos: 0, amount: 0 }).is_err());
+        assert!(allocate_stat(&seeded_tester(), &UseBonus { pos: 0, amount: -1 }).is_err());
+        // The reset pos space never reaches the amount rule benefit-of-the-doubt.
+        assert!(
+            allocate_stat(
+                &seeded_tester(),
+                &UseBonus {
+                    pos: 1115,
+                    amount: -1
+                }
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn allocate_rejects_pos_outside_the_zero_to_six_ability_space() {
+        for pos in [-1, 7, 1115] {
+            assert!(
+                allocate_stat(&seeded_tester(), &UseBonus { pos, amount: 1 }).is_err(),
+                "siPos {pos} must be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn allocate_rejects_spending_more_than_the_unspent_vault() {
+        // The client can only accumulate what the status window shows, but a
+        // tampered `siAmount` must not conjure points from the server's vault.
+        assert!(allocate_stat(&seeded_tester(), &UseBonus { pos: 0, amount: 6 }).is_err());
+    }
+
+    #[test]
+    fn allocate_caps_hnd_at_twice_the_level() {
+        // Hnd at exactly the level-13 cap (26) with the row's total still 100:
+        // 16 points moved out of Str keep the invariant while the cap is at its
+        // edge. A spend that would land on 27 must be refused.
+        let mut at_cap = seeded_tester();
+        at_cap.hnd = 26;
+        at_cap.str = 4;
+        assert!(allocate_stat(&at_cap, &UseBonus { pos: 4, amount: 1 }).is_err());
+        // The remaining headroom is spendable.
+        let mut headroom = seeded_tester();
+        headroom.hnd = 25;
+        headroom.str = 5;
+        let out = allocate_stat(&headroom, &UseBonus { pos: 4, amount: 1 }).unwrap();
+        assert_eq!(out.hnd, 26);
+    }
+
+    #[test]
+    fn allocate_refuses_a_row_already_over_the_level_allowance() {
+        // The unrepaired seed: the same abilities and bonus at level 10 total
+        // 100 against an allowance of 85. The server refuses to let that row
+        // spend at all — the soft-fail shape of the legacy's kick.
+        let mut character = seeded_tester();
+        character.level = 10;
+        assert!(allocate_stat(&character, &UseBonus { pos: 0, amount: 1 }).is_err());
     }
 
     /// The seven hundred range personal-shop opcodes are the legacy pair, and the

@@ -353,36 +353,109 @@ impl BasicInfo {
         w.pad(904 - 100); // 100..904: father/recommender, services, PVP, naming, attendance
 
         // cltPIPInfo (64 bytes, align 8) @ 904.
-        w.i32(self.str_); // 904
-        w.i32(self.dex); // 908
-        w.i32(self.vit); // 912
-        w.i32(self.mag); // 916
-        w.i32(self.hnd); // 920
-        w.i32(self.luk); // 924
-        w.i32(self.wis); // 928
-        w.i16(self.level); // 932..934
-        w.i16(self.bonus); // 934..936
-        w.i32(self.life); // 936..940
-        w.i32(self.mana); // 940..944
-        w.i64(self.exp); // 944..952
+        self.write_pip(&mut w);
+
+        debug_assert_eq!(w.len(), BASIC_INFO_LEN);
+        w.finish()
+    }
+
+    /// Writes the 64-byte `cltPIPInfo` block at the cursor.
+    ///
+    /// The block is carried inside `cltPBasicInfo` (offset 904, see [`encode`])
+    /// and standalone inside the opcode 215 `RESPONSE_PERSON_IP` body
+    /// ([`encode_person_ip`]); one writer serves both so the two can never
+    /// disagree about a stat.
+    fn write_pip(&self, w: &mut Writer) {
+        // cltPIPInfoCommon (`parametabox.h:95-114`).
+        w.i32(self.str_); // +0
+        w.i32(self.dex); // +4
+        w.i32(self.vit); // +8
+        w.i32(self.mag); // +12
+        w.i32(self.hnd); // +16
+        w.i32(self.luk); // +20
+        w.i32(self.wis); // +24
+        w.i16(self.level); // +28
+        w.i16(self.bonus); // +30
+        w.i32(self.life); // +32
+        w.i32(self.mana); // +36
+        w.i64(self.exp); // +40
         // The four fields `cltPIPInfo` adds on top of `cltPIPInfoCommon`
         // (`parametabox.h:246-249`). All three of the first are written
         // explicitly rather than padded, because the offsets are only safe if the
-        // layout is stated: `siMoney` has to land on 960 to be the last field.
+        // layout is stated: `siMoney` has to land on +56 to be the last field.
         //
         // `siSkillBonus` is the one that carries a value, and 1 is the legacy's
         // own default -- `cltPIPInfo::Init()` sets `siSkillBonus = 1`
         // (`parametabox.h:264`), which is what the capture's re-initialised
         // char-list block holds at 954. `character_stats.skill_bonus` holds a real
         // per-character value and is not plumbed here yet; see the handoff.
-        w.i16(0); // 952..954 siFameLevel -- no fame table
-        w.i16(1); // 954..956 siSkillBonus -- cltPIPInfo::Init()'s default
-        w.i32(0); // 956..960 siFameExp -- no fame table
-        w.i64(self.money); // 960..968 siMoney
-
-        debug_assert_eq!(w.len(), BASIC_INFO_LEN);
-        w.finish()
+        w.i16(0); // +48 siFameLevel -- no fame table
+        w.i16(1); // +50 siSkillBonus -- cltPIPInfo::Init()'s default
+        w.i32(0); // +52 siFameExp -- no fame table
+        w.i64(self.money); // +56 siMoney
     }
+}
+
+/// `sizeof(cltGameMsgResponse_IP)` — opcode 215's body.
+///
+/// `MsgType-Person.h:16-27` is `SI16 siCharUnique; cltPIPInfo clIP;`. `cltPIPInfo`
+/// is 8-byte aligned (it ends in `SI64 siExp`/`siMoney`, `parametabox.h:111-114`),
+/// so the `SI16` is padded out to offset 8 and the body is `8 + 64 = 72` under the
+/// default `/Zp8` — the `sizeof(clinfo)` the legacy's `cltMsg` frames with
+/// (`Server-Person.cpp:83`).
+pub const PERSON_IP_LEN: usize = 8 + 64;
+
+/// Builds `GAMEMSG_RESPONSE_PERSON_IP` (215): one character's full `cltPIPInfo`,
+/// keyed by its `siCharUnique`.
+///
+/// The client handler resolves the target from the payload for *any* character
+/// (`Client-Person-BigInfo.cpp:236-243`), so this one encoder serves both the
+/// self-push after an allocation (`UPDATE_IP` flush) and the on-demand
+/// `214 REQUEST_PERSON_IP` -> 215 observer pull. Broadcasting 215 *to observers*
+/// is not how the legacy works; see the handoff finding.
+#[must_use]
+pub fn encode_person_ip(char_unique: i16, basic: &BasicInfo) -> Vec<u8> {
+    let mut w = Writer::with_capacity(PERSON_IP_LEN);
+    w.i16(char_unique); // 0..2 siCharUnique
+    w.pad(6); // 2..8 /Zp8 alignment of the 8-byte-aligned cltPIPInfo
+    basic.write_pip(&mut w); // 8..72 clIP
+    debug_assert_eq!(w.len(), PERSON_IP_LEN);
+    w.finish()
+}
+
+/// `sizeof(cltGameMsgResponse_UseBonus)` — opcode 250's request body.
+///
+/// The legacy reuses the `...Response_UseBonus` class for the client's request
+/// (`NCharPerson.cpp:2137-2163`). `MsgType-Person.h:1062-1074` declares
+/// `SI32 siPos; SI16 siAmount;`, which under the default `/Zp8` is 6 bytes
+/// rounded out to 8 by the class's 4-byte alignment.
+pub const USE_BONUS_PAYLOAD_LEN: usize = 8;
+
+/// A `GAMEMSG_REQUEST_USEBONUS` (250) request.
+///
+/// Two `siPos` spaces share this field. For `siAmount > 0` it is
+/// `0..=6 = Str/Dex/Mag/Vit/Hnd/Luk/Wis` (`NCharPerson.cpp:2139-2163`); for
+/// `siAmount < 0` it is the reset `IDC_BUTTON_*2` space (1115..1120, no WIS2
+/// button), which this port refuses rather than models.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UseBonus {
+    /// Ability selector, `0..=6` for a positive allocation.
+    pub pos: i32,
+    /// Points to spend. The server only accepts `> 0`.
+    pub amount: i16,
+}
+
+/// Decodes a `GAMEMSG_REQUEST_USEBONUS` (250) body.
+///
+/// # Errors
+///
+/// [`WireError::Truncated`] if fewer than 6 bytes are present.
+pub fn decode_use_bonus(payload: &[u8]) -> Result<UseBonus, WireError> {
+    let mut r = Reader::new(payload);
+    Ok(UseBonus {
+        pos: r.i32()?,
+        amount: r.i16()?,
+    })
 }
 
 /// `sizeof(cltPersonInfoOne)` — the body of `ALLCHARINFOONE` before its four
@@ -1100,6 +1173,79 @@ mod tests {
     fn select_char_is_a_bare_i32() {
         assert_eq!(decode_select_char(&7i32.to_le_bytes()).unwrap(), 7);
         assert_eq!(SELECT_CHAR_PAYLOAD_LEN + HEADER_SIZE, 9);
+    }
+
+    #[test]
+    fn use_bonus_request_is_8_bytes_with_pos_then_amount() {
+        let mut payload = vec![0u8; USE_BONUS_PAYLOAD_LEN];
+        payload[..4].copy_from_slice(&3i32.to_le_bytes()); // siPos = Vit
+        payload[4..6].copy_from_slice(&5i16.to_le_bytes()); // siAmount
+        let req = decode_use_bonus(&payload).unwrap();
+        assert_eq!(req, UseBonus { pos: 3, amount: 5 });
+        assert_eq!(USE_BONUS_PAYLOAD_LEN + HEADER_SIZE, 13);
+
+        // A truncated body is a decode error, not a silent zero.
+        assert!(decode_use_bonus(&payload[..4]).is_err());
+    }
+
+    /// 215 carries `SI16 siCharUnique` then the same 64-byte `clPIP` block, and
+    /// must agree with the `clIP` band of the 248 encoder byte for byte — the
+    /// whole point of sharing `BasicInfo::write_pip`.
+    #[test]
+    fn person_ip_carries_the_same_pip_block_as_basic_info() {
+        let basic = BasicInfo {
+            account_idnum: 1471,
+            account_id: "tester".into(),
+            slot: 0,
+            sex: 1,
+            class_kind: 1,
+            home_village: 0,
+            map_index: 158,
+            x: 27,
+            y: 87,
+            character_id: 4242,
+            name: "Tester".into(),
+            str_: 20,
+            dex: 15,
+            vit: 20,
+            mag: 10,
+            hnd: 10,
+            luk: 10,
+            wis: 10,
+            level: 13,
+            bonus: 5,
+            life: 161,
+            mana: 40,
+            exp: 0,
+            money: 1000,
+        };
+        let body = encode_person_ip(1471, &basic);
+
+        assert_eq!(body.len(), PERSON_IP_LEN);
+        assert_eq!(PERSON_IP_LEN + HEADER_SIZE, 77);
+        // siCharUnique @ 0, the clIP block @ 8 (the SI16 is padded to /Zp8 by the
+        // block's 8-byte alignment).
+        assert_eq!(i16::from_le_bytes([body[0], body[1]]), 1471);
+        assert_eq!(
+            i16::from_le_bytes([body[8 + 28], body[8 + 29]]),
+            13,
+            "siLevel"
+        );
+        assert_eq!(
+            i32::from_le_bytes(body[8 + 32..8 + 36].try_into().unwrap()),
+            161,
+            "Life"
+        );
+        assert_eq!(
+            i64::from_le_bytes(body[8 + 56..8 + 64].try_into().unwrap()),
+            1000,
+            "siMoney"
+        );
+
+        // The clIP band inside the 248 block must be byte-identical to the 215
+        // clIP band: one writer produces them both.
+        let one = basic.encode();
+        assert_eq!(&one[904..968], &body[8..72]);
     }
 
     #[test]

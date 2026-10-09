@@ -14,6 +14,15 @@
 //! sends `GAMEMSG_REQUEST_ITEMMOVE`, and pulls the array again to check the move
 //! was persisted and re-read. That is the whole item-mutation round trip, minus
 //! the GUI's local optimistic update.
+//!
+//! `--use-bonus <pos>:<amount>` runs the stat-allocation round trip: it sends
+//! `GAMEMSG_REQUEST_USEBONUS` (250) and asserts the `GAMEMSG_RESPONSE_PERSON_IP`
+//! (215) the server replies with — the same frame the GUI status window applies —
+//! carries the accepted stat, the decremented bonus and the recomputed maxima.
+//! The assertions assume a fresh dev seed (`scripts\db-init.ps1`) run before the
+//! probe and exactly one spend. Pass `--expect-refused` to instead assert the
+//! refusal path: no 215 arrives and the session survives (proven by a
+//! `REQUEST_CHANGESTATUSINFO` round trip after the refused spend).
 
 use gz_cipher::Cipher;
 use gz_net::{Frame, FrameParser, HEADER_SIZE};
@@ -77,6 +86,28 @@ async fn main() -> Result<(), AnyError> {
                 .map(|s| s.parse::<u16>().map_err(|_| "claim_unique is not a number"))
                 .transpose()?;
             Ok::<_, AnyError>((slot, count, claim))
+        })
+        .transpose()?;
+
+    // Optional `--use-bonus <pos>:<amount>`, the `cltGameMsgResponse_UseBonus`
+    // body: ability `siPos` (0..=6, see `NCharPerson.cpp:2139-2163`) and `siAmount`.
+    // `--expect-refused` flips it from "assert the 215" to "assert the refusal":
+    // no 215, and the session still answers a later request.
+    let use_bonus = rest
+        .windows(2)
+        .find(|w| w[0] == "--use-bonus")
+        .map(|w| {
+            let (pos, amount) = w[1]
+                .split_once(':')
+                .ok_or("expected --use-bonus <pos>:<amount>")?;
+            Ok::<_, AnyError>((
+                pos.parse::<i32>()
+                    .map_err(|_| "pos is not an ability index")?,
+                amount
+                    .parse::<i16>()
+                    .map_err(|_| "amount is not a number")?,
+                rest.iter().any(|a| a == "--expect-refused"),
+            ))
         })
         .transpose()?;
 
@@ -307,6 +338,19 @@ async fn main() -> Result<(), AnyError> {
         .await?;
     }
 
+    if let Some(spec) = use_bonus {
+        probe_use_bonus(
+            &mut game,
+            &mut gparser,
+            &mut gbuf,
+            &mut link_rx,
+            &mut session_tx,
+            char_unique,
+            spec,
+        )
+        .await?;
+    }
+
     println!("probe: front + game login path OK; world entry OK");
     Ok(())
 }
@@ -507,6 +551,130 @@ async fn probe_item_drop(
     }
 
     println!("probe: the drop round-tripped through PostgreSQL (7210 confirmed)");
+    Ok(())
+}
+
+/// Runs the stat-allocation round trip: send `REQUEST_USEBONUS` (250) and check
+/// the `RESPONSE_PERSON_IP` (215) the server answers with.
+///
+/// 215 is the frame the GUI status window applies (`Client-Person-BigInfo.cpp:
+/// 236-250`), so asserting it is asserting what the player's screen updates to:
+/// `siCharUnique` echoes the session, and the 64-byte `clIP` block at offset 8
+/// carries the accepted ability, the decremented bonus and the maxima the server
+/// recomputed from the formulas. The assertions assume a fresh dev seed and a
+/// single spend; `expected stat = seed + amount` is only valid on a full
+/// `scripts\db-init.ps1` apply.
+async fn probe_use_bonus(
+    game: &mut TcpStream,
+    gparser: &mut FrameParser,
+    gbuf: &mut [u8],
+    link_rx: &mut Cipher,
+    session_tx: &mut Cipher,
+    char_unique: i32,
+    (pos, amount, expect_refused): (i32, i16, bool),
+) -> Result<(), AnyError> {
+    // `cltGameMsgResponse_UseBonus` (`MsgType-Person.h:1062-1074`), 8 bytes /Zp8:
+    // SI32 siPos, SI16 siAmount, 2 pad bytes — the client's `cltMsg` frames the
+    // body as `sizeof(clinfo)`, so the declared size on the wire is 5 + 8 = 13.
+    let mut w = Writer::with_capacity(8);
+    w.i32(pos);
+    w.i16(amount);
+    w.pad(2);
+    send_game_encoded(game, session_tx, GameMsg::RequestUsebonus, &w.finish()).await?;
+    println!("probe: sent REQUEST_USEBONUS pos {pos} amount {amount}");
+
+    if expect_refused {
+        // A refused spend answers nothing and must not drop the session: prove
+        // aliveness with a REQUEST_VILLAGESTRUCT (1101) round trip and fail if a
+        // 215 turns up first. (230 can't be the aliveness probe: under
+        // `GAME_WORLD_BULK=at-selectchar` every 230 is legacy CHANGESTATUSINFO,
+        // whose 20-byte change block a 4-byte body cannot satisfy.)
+        let mut w = Writer::with_capacity(4);
+        w.i32(1);
+        send_game_encoded(game, session_tx, GameMsg::RequestVillagestruct, &w.finish()).await?;
+        loop {
+            let (cmd, plain) = read_game_frame(game, gparser, gbuf, link_rx).await?;
+            if cmd == GameMsg::ResponsePersonIp as u16 {
+                return Err("expected the allocation to be refused, but a 215 arrived".into());
+            }
+            if cmd == GameMsg::ResponseVillagestruct as u16 {
+                println!(
+                    "probe: allocation refused and the session stayed alive \
+                     (village structure {} bytes replied after the refused spend)",
+                    plain.len() - HEADER_SIZE
+                );
+                return Ok(());
+            }
+        }
+    }
+
+    let (cmd, plain) =
+        read_until_game_cmd(game, gparser, gbuf, link_rx, GameMsg::ResponsePersonIp).await?;
+    assert_eq!(cmd, GameMsg::ResponsePersonIp as u16);
+    let body = &plain[HEADER_SIZE..];
+    println!("probe: got RESPONSE_PERSON_IP ({} bytes)", body.len());
+    if body.len() != 72 {
+        return Err(format!(
+            "215 body is {} bytes, expected 72 (8 + 64: SI16 siCharUnique, /Zp8 pad, cltPIPInfo)",
+            body.len()
+        )
+        .into());
+    }
+    let echoed = i16::from_le_bytes([body[0], body[1]]);
+    if i16::try_from(char_unique).map_err(|_| "session char_unique too large for SI16")? != echoed {
+        return Err(format!("215 names siCharUnique {echoed}, session is {char_unique}").into());
+    }
+
+    // clIP block @ 8. The dev seed's abilities (20/15/20/10/10/10/10), bonus 5,
+    // level 13, life 161, mana 40 — the values the repaired 0002 applies.
+    let idx = usize::try_from(pos).map_err(|_| "siPos is not a 0..=6 ability index")?;
+    if !(0..7).contains(&idx) {
+        return Err(format!("siPos {pos} is outside the 0..=6 ability space").into());
+    }
+    let ability = i32::from_le_bytes(body[8 + idx * 4..8 + idx * 4 + 4].try_into().unwrap());
+    let level = i16::from_le_bytes([body[36], body[37]]);
+    let bonus = i16::from_le_bytes([body[38], body[39]]);
+    let life = i32::from_le_bytes(body[40..44].try_into().unwrap());
+    let mana = i32::from_le_bytes(body[44..48].try_into().unwrap());
+
+    let seed = [20, 15, 20, 10, 10, 10, 10];
+    let raise = i32::from(amount);
+    let expected_ability = seed[idx] + raise;
+    // `Parametabox.cpp:3374/3545` — recompute expected maxima from the raised
+    // ability; untouched stats keep the seed's stored values.
+    let expected_life = if pos == 3 {
+        expected_ability * (8000 + 13 * 5) / 1000
+    } else {
+        161
+    };
+    let expected_mana = if pos == 2 {
+        expected_ability * (4000 + 13 * 5) / 1000
+    } else {
+        40
+    };
+    let expected_bonus: i16 = 5 - amount;
+
+    println!(
+        "probe: 215 -> ability[{pos}]={ability} level={level} bonus={bonus} life={life} mana={mana}"
+    );
+    if (ability, level, bonus, life, mana)
+        != (
+            expected_ability,
+            13,
+            expected_bonus,
+            expected_life,
+            expected_mana,
+        )
+    {
+        return Err(format!(
+            "215 rejected state: ability[{pos}]={ability} (want {expected_ability}), level={level} \
+             (want 13), bonus={bonus} (want {expected_bonus}), life={life} (want {expected_life}), \
+             mana={mana} (want {expected_mana})"
+        )
+        .into());
+    }
+
+    println!("probe: the allocation round-tripped and the 215 carries the recomputed stats");
     Ok(())
 }
 

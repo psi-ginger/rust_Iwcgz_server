@@ -11,7 +11,7 @@ pub mod repository;
 
 pub use character::{
     CharacterFull, CharacterRepository, CharacterSummary, PALACE_MAP_INDEX, PALACE_SPAWN_X,
-    PALACE_SPAWN_Y, PgCharacterRepository,
+    PALACE_SPAWN_Y, PgCharacterRepository, StatsUpdate,
 };
 pub use item::{
     CharacterItem, DropLocation, DropOutcome, DropStatus, GroundClaim, ItemRepository, MoveOutcome,

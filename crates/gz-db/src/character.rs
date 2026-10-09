@@ -123,6 +123,36 @@ pub struct CharacterFull {
     pub bonus_points: i16,
 }
 
+/// An accepted stat allocation, ready to write (`GAMEMSG_REQUEST_USEBONUS`, 250).
+///
+/// The caller has already validated the request against the server's own row;
+/// this is the durable half of that decision — the seven abilities, the remaining
+/// bonus points and the two derived maxima, rewritten together so a crash cannot
+/// leave the invariant half-applied.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StatsUpdate {
+    /// `character_stats.str`.
+    pub str_: i32,
+    /// `character_stats.dex`.
+    pub dex: i32,
+    /// `character_stats.vit`.
+    pub vit: i32,
+    /// `character_stats.mag`.
+    pub mag: i32,
+    /// `character_stats.hnd`.
+    pub hnd: i32,
+    /// `character_stats.luk`.
+    pub luk: i32,
+    /// `character_stats.wis`.
+    pub wis: i32,
+    /// `character_stats.bonus_points` — points still unspent.
+    pub bonus_points: i16,
+    /// `character_stats.max_life`, recomputed from the post-state vit/level.
+    pub max_life: i32,
+    /// `character_stats.max_mana`, recomputed from the post-state mag/level.
+    pub max_mana: i32,
+}
+
 /// The character storage interface.
 #[async_trait]
 pub trait CharacterRepository: Send + Sync {
@@ -225,6 +255,21 @@ pub trait CharacterRepository: Send + Sync {
         character_id: i32,
         x: i32,
         y: i32,
+    ) -> Result<(), RepositoryError>;
+
+    /// Persist an accepted stat allocation (`GAMEMSG_REQUEST_USEBONUS`, 250).
+    ///
+    /// Rewrites the seven abilities, the remaining bonus points and the two
+    /// derived maxima in one statement. The caller validates the request against
+    /// the server's own row first; this only stores the accepted result.
+    ///
+    /// # Errors
+    ///
+    /// [`RepositoryError::Database`] if the update fails.
+    async fn update_stats(
+        &self,
+        character_id: i32,
+        stats: &StatsUpdate,
     ) -> Result<(), RepositoryError>;
 }
 
@@ -517,6 +562,33 @@ impl CharacterRepository for PgCharacterRepository {
             .bind(y)
             .execute(&self.pool)
             .await?;
+        Ok(())
+    }
+
+    async fn update_stats(
+        &self,
+        character_id: i32,
+        stats: &StatsUpdate,
+    ) -> Result<(), RepositoryError> {
+        sqlx::query(
+            "UPDATE character_stats SET \
+             str = $2, dex = $3, vit = $4, mag = $5, hnd = $6, luk = $7, wis = $8, \
+             bonus_points = $9, max_life = $10, max_mana = $11 \
+             WHERE character_id = $1",
+        )
+        .bind(character_id)
+        .bind(stats.str_)
+        .bind(stats.dex)
+        .bind(stats.vit)
+        .bind(stats.mag)
+        .bind(stats.hnd)
+        .bind(stats.luk)
+        .bind(stats.wis)
+        .bind(stats.bonus_points)
+        .bind(stats.max_life)
+        .bind(stats.max_mana)
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 }
