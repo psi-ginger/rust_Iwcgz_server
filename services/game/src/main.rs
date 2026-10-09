@@ -647,14 +647,7 @@ async fn handle_client(
                             .await?
                         }
                         Prologue::Live => {
-                            send_world_entry(
-                                &mut stream,
-                                &mut outbound,
-                                char_unique,
-                                &items,
-                                character_id.character_id,
-                            )
-                            .await?
+                            send_world_entry(&mut stream, &mut outbound, &live).await?
                         }
                     }
                     // Deliver the ~67 KB world bulk with the entry prologue
@@ -832,6 +825,17 @@ async fn handle_client(
                     // dispatched as the legacy message. Only
                     // `GAME_WORLD_BULK=on230` still leaves step 0 for the
                     // client's first 230 to pick up.
+                    //
+                    // The `Prologue::Capture` conjunct is load-bearing: under
+                    // `Prologue::Live` there is no captured bulk to replay -- the
+                    // entry prologue and `send_character_state` generate the whole
+                    // world from the database instead, and the captured frames
+                    // still name the reference character (1471). Walking the plan
+                    // here would push the *reference* character's 248/249 at a
+                    // `live` session, whose `char_unique` was allocated per session
+                    // and does not match. The client would discard them for a null
+                    // per-character record -- the fault `send_character_state` was
+                    // written to fix.
                     let world_bulk_pending = cfg.prologue == Prologue::Capture && plan_step == 0;
                     if world_bulk_pending {
                         replay_plan_step(&mut stream, &mut outbound, cmd, &mut plan_step, &live)
@@ -2028,20 +2032,23 @@ async fn replay(
 async fn send_world_entry(
     stream: &mut TcpStream,
     cipher: &mut Cipher,
-    char_unique: i32,
-    items: &PgItemRepository,
-    character_id: i32,
+    live: &LiveFrames<'_>,
 ) -> Result<(), AnyError> {
+    let Some(character) = live.character.as_ref() else {
+        return Err("world entry before the character row is loaded".into());
+    };
+    let character_id = character.character_id;
     // `clMakeCharInfo.uiMakeCharUnique` is a 16-bit field, so the session id has
     // to fit one; the same narrowing `handle_select_char` does.
-    let char_unique = u16::try_from(char_unique)
-        .map_err(|_| format!("session char_unique {char_unique} does not fit u16"))?;
+    let char_unique = u16::try_from(live.char_unique)
+        .map_err(|_| format!("session char_unique {} does not fit u16", live.char_unique))?;
     // `PERSONITEMINFO` is a single-slot notification. The captured one announces
     // slot 8 as empty, so we send whatever the database holds for that slot --
     // which for the reference character is also empty, and for any other is
     // correct rather than a replay of someone else's inventory.
     let slot = world_entry::PERSON_ITEM_INFO_SLOT;
-    let stored = items
+    let stored = live
+        .items
         .list(character_id)
         .await?
         .into_iter()
@@ -2067,11 +2074,92 @@ async fn send_world_entry(
         "game: generating world-entry prologue: {} frames, {total} payload bytes",
         sequence.len()
     );
-    let _ = character_id; // 248/249 in the 230 burst; see `LiveFrames::regenerate`
 
     for (cmd, body) in sequence {
         send_raw(stream, cipher, cmd, &body).await?;
     }
+    send_character_state(stream, cipher, live).await
+}
+
+/// The frames that carry the character's own identity and stats, in the order the
+/// reference session sent them within its 230 burst: 244 names the avatar, 248 is
+/// the `clBI` + `clIP` block, 249 the item array (`generated_capture`'s module docs
+/// record that the burst opens 14 frames earlier than 248/249 and that 244 is the
+/// last of those).
+///
+/// A named constant rather than a literal in the loop, so a test can assert the set
+/// — the bug this exists to fix was precisely these three never being sent under
+/// [`Prologue::Live`], and a test that could have named them is the point.
+const LIVE_CHARACTER_STATE: &[u16] = &[
+    GameMsg::ResponseName as u16,
+    GameMsg::ResponseAllcharinfoone as u16,
+    GameMsg::ResponseAllcharinfotwo as u16,
+];
+
+/// The per-character state block, generated from the database.
+///
+/// ## Why this is separate from [`world_entry::prologue`]
+///
+/// The 45 generated frames are all *context* — country war, the 35 guild records,
+/// the transform and item-type tables, the friend list, server time. **None of
+/// them describes the character.** Its identity and stats live in
+/// `RESPONSE_ALLCHARINFOONE` (248, the `clBI` + `clIP` block) and
+/// `RESPONSE_ALLCHARINFOTWO` (249, the item array), which in the reference
+/// session rode the 25-frame burst answering the client's first
+/// `REQUEST_CHANGESTATUSINFO` (230) — `generated_capture::REPLY_PLAN` step 0.
+///
+/// That burst was reachable only under [`Prologue::Capture`]: both the push at
+/// char-select and the 230 arm were gated on it, and `world_entry::prologue`
+/// emitted neither frame. Under `Prologue::Live` no 248/249 was ever sent, and
+/// the client faulted on a null per-character record — the character stood on the
+/// map with no name, black HP/MP bars, and could not move. Reported live
+/// 2026-10-09; the four symptoms are all `clBI`/`clIP` fields
+/// (`szCharName`, `siLife`, `siMaxLife`, `siMana`, `siMaxMana`).
+///
+/// ## Why it goes out with the entry prologue, not on the 230
+///
+/// The capture's own timing was the measured cause of the ~20 s re-entry stall
+/// (see [`config::WorldBulk`]): its first 230 rides a process-global 30 s timer
+/// anchored at *first* world entry, so under `live` a burst waiting for that 230
+/// would arrive up to 30 s late — after the client had built a world without the
+/// character in it. Sending it here is the same fix `WorldBulk::AtSelectchar`
+/// applies to the captured burst.
+///
+/// ## Why 248 goes out even though `withhold_on_resync` normally withholds it
+///
+/// That withholding is about *re-sends*: `SetOne` copies `clBI` wholesale,
+/// `clPos` included (`Client-Person.cpp:776`, `PersonInfo.h:589`), and
+/// `cltCharCommon::GetX()` reads `clPos.siX` back out of it
+/// (`Char-Common.cpp:1206`, `Common.cpp:2917`), so replaying 248 after a mutation
+/// would teleport the player to the database's stale cell. That reasoning holds
+/// for a *repeat*. It does not apply to first entry, where the character has no
+/// `clBI` at all without it — and under `live` the database cell *is* current,
+/// because `handle_userorder` persists every `ORDER_MOVE` destination before the
+/// stepped cell diverges from it. The gate stays exactly where it is; only this
+/// first delivery is unconditional.
+///
+/// # Errors
+///
+/// A database failure reading the item array, or a socket/cipher failure. A frame
+/// with no generated body is logged and skipped rather than aborting the session,
+/// matching [`replay`]'s tolerance for a frame it cannot rebuild.
+async fn send_character_state(
+    stream: &mut TcpStream,
+    cipher: &mut Cipher,
+    live: &LiveFrames<'_>,
+) -> Result<(), AnyError> {
+    let mut sent = 0usize;
+    let mut bytes = 0usize;
+    for cmd in LIVE_CHARACTER_STATE {
+        let Some(body) = live.regenerate(*cmd).await? else {
+            logln!("game: withholding live character-state frame {cmd}: no generated body");
+            continue;
+        };
+        bytes += body.len();
+        send_raw(stream, cipher, *cmd, &body).await?;
+        sent += 1;
+    }
+    logln!("game: generated character state: {sent} frames, {bytes} payload bytes (244/248/249)");
     Ok(())
 }
 
@@ -3740,6 +3828,69 @@ mod tests {
             rfar.try_recv().is_err(),
             "cell (40, 26) is not in the 3x3 block around (2, 6)"
         );
+    }
+
+    /// `Prologue::Live` must send all three per-character state frames. This is the
+    /// regression test for the 2026-10-09 fault: under `live` no 248/249 was ever
+    /// sent, because both the char-select push and the 230 arm were gated on
+    /// `Prologue::Capture`, so the client entered the world with a null
+    /// per-character record — no name, black HP/MP bars, unable to move.
+    ///
+    /// Asserted against the *shape* (which opcodes, and that they are the ones that
+    /// carry `clBI`/`clIP`) rather than against a socket, because the original bug
+    /// was an absent call, not a wrong body.
+    #[test]
+    fn live_world_entry_sends_the_per_character_state_block() {
+        // 244 names the avatar, 248 is clBI+clIP, 249 is the item array. Anything
+        // missing here is a field the client reads out of a null record.
+        for cmd in [
+            GameMsg::ResponseName as u16,
+            GameMsg::ResponseAllcharinfoone as u16,
+            GameMsg::ResponseAllcharinfotwo as u16,
+        ] {
+            assert!(
+                LIVE_CHARACTER_STATE.contains(&cmd),
+                "opcode {cmd} carries the character state and must be sent under Prologue::Live"
+            );
+        }
+        // Nothing else belongs here: these are the only three the burst frames
+        // regenerate from the row, and each is one `regenerate` arm.
+        assert_eq!(LIVE_CHARACTER_STATE.len(), 3);
+        // The nameplate must precede the block that names the same character, or
+        // the client can resolve an id it has not been told the name of yet.
+        assert_eq!(
+            LIVE_CHARACTER_STATE[0],
+            GameMsg::ResponseName as u16,
+            "244 names the avatar before 248/249 describe it"
+        );
+    }
+
+    /// The 200 fan must be reachable under `Prologue::Live`, and it is only
+    /// meaningful there: under `capture` every session is pinned to
+    /// `CAPTURED_CHAR_UNIQUE`, so two clients share one character id and each
+    /// treats the other's 200 as its own (`bselfswitch`,
+    /// `Client-Person-BigInfo.cpp:1160-1176`).
+    ///
+    /// Pinned as a property of the mode rather than of a socket, because the
+    /// failure it guards against is a client-side identity collision that no
+    /// server-side test can observe.
+    #[test]
+    fn only_live_mode_gives_two_sessions_distinct_character_ids() {
+        let capture = GameConfig::with_prologue_for_test(Prologue::Capture);
+        let live = GameConfig::with_prologue_for_test(Prologue::Live);
+        let pinned = generated_capture::CAPTURED_CHAR_UNIQUE as u32;
+
+        assert_eq!(
+            capture.char_unique(1),
+            capture.char_unique(2),
+            "capture pins both sessions to one id, which is why two-client testing needs live"
+        );
+        assert_ne!(
+            live.char_unique(1),
+            live.char_unique(2),
+            "live allocates per session, so an observer's 200 names somebody else"
+        );
+        assert_ne!(live.char_unique(1), pinned);
     }
 
     /// The recalc formulas are the ones the dev seed's stored maxima must match:

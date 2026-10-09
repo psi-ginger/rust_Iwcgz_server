@@ -164,6 +164,33 @@ pub struct GameConfig {
 }
 
 impl GameConfig {
+    /// The default config with only `prologue` overridden.
+    ///
+    /// For tests that need to compare two modes. It reads no environment, so it
+    /// cannot be perturbed by whatever the test process happens to export — which
+    /// is the whole reason [`Self::from_env`] is unusable in a unit test (it also
+    /// demands `GAME_LINK_KEY1`/`2`).
+    #[cfg(test)]
+    #[must_use]
+    pub fn with_prologue_for_test(prologue: Prologue) -> Self {
+        // Spelled out rather than `..Self::default()`: `GameConfig` deliberately
+        // has no `Default`, because `link_key` must never acquire one (SEC-014).
+        // A test constructor is the safe way to get one, and it is `#[cfg(test)]`.
+        Self {
+            database_url: String::new(),
+            listen: String::new(),
+            // Never consulted by `char_unique`, and never sent: this exists only so
+            // the struct can be built.
+            link_key: (0, 0),
+            client_compat_version: DEFAULT_CLIENT_COMPAT_VERSION,
+            service_area: DEFAULT_SERVICE_AREA,
+            server_unique: DEFAULT_SERVER_UNIQUE,
+            timeouts: SessionTimeouts::default(),
+            prologue,
+            world_bulk: WorldBulk::default(),
+        }
+    }
+
     /// Read the environment, or explain precisely what is missing.
     ///
     /// # Errors

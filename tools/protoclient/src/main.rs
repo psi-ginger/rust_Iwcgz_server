@@ -30,6 +30,7 @@ use gz_proto::game::MAKE_CHAR_INFO_PAYLOAD_LEN;
 use gz_proto::item::{CLT_ITEM_SIZE, Item};
 use gz_proto::opcodes_front::FrontMsg;
 use gz_proto::opcodes_game::GameMsg;
+use gz_proto::order::{BasicCharUpdate, OrderData};
 use gz_proto::wire::{Reader, Writer};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -108,6 +109,21 @@ async fn main() -> Result<(), AnyError> {
                     .map_err(|_| "amount is not a number")?,
                 rest.iter().any(|a| a == "--expect-refused"),
             ))
+        })
+        .transpose()?;
+
+    // Optional `--observe-char-update <observer_user>:<observer_password>`: hold a
+    // second account in the world and assert the 200 fan reaches it (slice 6 B1).
+    // The primary session moves; the observer must receive `RESPONSE_CHARUPDATE`
+    // frames naming the *mover's* id and tracking the stepped cell.
+    let observe_char_update = rest
+        .windows(2)
+        .find(|w| w[0] == "--observe-char-update")
+        .map(|w| {
+            let (user, password) = w[1]
+                .split_once(':')
+                .ok_or("expected --observe-char-update <user>:<password>")?;
+            Ok::<_, AnyError>((user.to_owned(), password.to_owned()))
         })
         .transpose()?;
 
@@ -351,8 +367,403 @@ async fn main() -> Result<(), AnyError> {
         .await?;
     }
 
+    // Take ownership of this session's socket so the observer probe can borrow it
+    // and send the move on the connection that is already in the world.
+    let mut mover = Session::adopt(
+        Wire {
+            stream: game,
+            parser: gparser,
+            buf: gbuf.to_vec(),
+            link_rx,
+            session_tx,
+        },
+        Who {
+            char_unique,
+            spawn_x: i32::try_from(x).unwrap_or(0),
+            spawn_y: i32::try_from(y).unwrap_or(0),
+        },
+    );
+
+    if let Some(observer) = observe_char_update {
+        probe_observer_fan(&addr, &mut mover, observer).await?;
+    }
+
     println!("probe: front + game login path OK; world entry OK");
     Ok(())
+}
+
+/// Walks a second account all the way into the world, then asserts the 200 fan
+/// (slice 6 B1) reaches it.
+///
+/// Both characters spawn on the palace tile — `0009_seed_second_account.sql` puts
+/// `Tester2` on `Tester`'s cell deliberately — so the observer is inside the mover's
+/// 3x3 near cell and the fan can reach it.
+///
+/// # What is asserted
+///
+/// The observer must receive `RESPONSE_CHARUPDATE` (200) frames naming the
+/// **mover's** session id, with `siX`/`siY` changing as the mover walks. The id
+/// matters as much as the position: under `GAME_PROLOGUE=capture` every session is
+/// pinned to one id, so the observer would receive frames it believes are its own
+/// and skip the position branch (`bselfswitch`,
+/// `Client-Person-BigInfo.cpp:1160-1190`). Asserting the id is what makes this
+/// probe fail loudly in capture mode instead of passing vacuously.
+///
+/// It deliberately does *not* look for a health bar. The client draws the floating
+/// gauge for `CR[1]` only (`NCharPerson.cpp:3920`), so no bystander ever sees one;
+/// the fan is for position and walk animation.
+///
+/// The mover's socket is borrowed so the 240 goes out on the connection that is
+/// already in the world, rather than a third login.
+async fn probe_observer_fan(
+    front_addr: &str,
+    mover: &mut Session,
+    (observer_user, observer_password): (String, String),
+) -> Result<(), AnyError> {
+    let mover_id = mover.char_unique;
+    let mut observer = Session::enter(front_addr, &observer_user, &observer_password).await?;
+    println!(
+        "probe: observer {observer_user:?} in the world as char_unique {} (mover is {mover_id})",
+        observer.char_unique
+    );
+    if observer.char_unique == mover_id {
+        return Err(format!(
+            "observer and mover share char_unique {mover_id}: that is the capture-mode pin \
+             (CAPTURED_CHAR_UNIQUE), under which the client discards the other's \
+             position updates. Run the server with GAME_PROLOGUE=live"
+        )
+        .into());
+    }
+
+    // Three tiles along x, from the observer's own spawn: a 3-tile walk commits one
+    // tile per `5000 / move_speed` ms, so at the base speed of 10 that is ~500 ms
+    // per tile and three distinct cells are comfortably inside the deadline.
+    let dest = (mover.spawn_x + 3, mover.spawn_y);
+    println!(
+        "probe: mover walking ({}, {}) -> {dest:?}",
+        mover.spawn_x, mover.spawn_y
+    );
+    mover.send_move(dest).await?;
+
+    let mut seen: Vec<(i16, i16)> = Vec::new();
+    let mut bystander_frames = 0usize;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    while std::time::Instant::now() < deadline && seen.len() < 3 {
+        let Some((cmd, plain)) = observer.read_frame().await? else {
+            return Err("observer socket closed while waiting for the fan".into());
+        };
+        if cmd != GameMsg::ResponseCharupdate as u16 {
+            continue;
+        }
+        let update = BasicCharUpdate::decode(&plain[HEADER_SIZE..])?;
+        // A 200 naming somebody *else* is expected, not an error: the near block is
+        // shared, so any third character standing nearby fans here too. Only the
+        // mover's own frames are what this probe is asserting on. (An earlier
+        // version failed the probe on exactly this, and it fired against a leftover
+        // GUI client walking around the palace — correct server behaviour, wrong
+        // assertion.)
+        if i32::from(update.si_char_unique) != mover_id {
+            bystander_frames += 1;
+            continue;
+        }
+        let cell = (update.si_x, update.si_y);
+        if seen.last() != Some(&cell) {
+            seen.push(cell);
+        }
+    }
+
+    if bystander_frames > 0 {
+        println!(
+            "probe: observer also received {bystander_frames} 200 frame(s) from other characters \
+             in the near block (expected -- the fan is not mover-exclusive)"
+        );
+    }
+    if seen.is_empty() {
+        return Err(format!(
+            "observer {observer_user:?} received no 200 for the mover's walk: the fan did not \
+             reach it. Is the observer inside the mover's 3x3 cell block?"
+        )
+        .into());
+    }
+    println!(
+        "probe: observer saw the mover at {} distinct cell(s): {seen:?}",
+        seen.len()
+    );
+    if seen.len() < 2 {
+        return Err(format!(
+            "observer saw only one cell ({seen:?}); the fan is not tracking the walk tile by tile"
+        )
+        .into());
+    }
+    println!("probe: the 200 fan reached a second, distinct session over a real socket");
+    Ok(())
+}
+
+/// One account's live game session: char select, world entry, and the ciphers and
+/// framing needed to keep reading frames off it.
+///
+/// The `--observe-char-update` probe needs a *second* one of these, built by
+/// [`Session::enter`] — the same path the mover walked, factored out so the two
+/// cannot drift. The primary session adopts its already-open socket via
+/// [`Session::adopt`] rather than logging in twice.
+struct Session {
+    stream: TcpStream,
+    parser: FrameParser,
+    buf: Vec<u8>,
+    /// Server->client is the fixed link cipher; client->server is the session cipher
+    /// keyed by the `RESPONSE_CLIENTCHARUNIQUE` pair.
+    link_rx: Cipher,
+    session_tx: Cipher,
+    /// This session's `char_unique`, as handed out in `RESPONSE_CLIENTCHARUNIQUE`.
+    char_unique: i32,
+    /// Where the character was placed on entry, from `RESPONSE_LOGIN`'s `clPos`.
+    spawn_x: i32,
+    spawn_y: i32,
+}
+
+/// The socket half of a [`Session`]: how its bytes are framed and deciphered.
+struct Wire {
+    stream: TcpStream,
+    parser: FrameParser,
+    buf: Vec<u8>,
+    link_rx: Cipher,
+    session_tx: Cipher,
+}
+
+/// What the server said about who a [`Session`] is.
+struct Who {
+    /// The session's `char_unique`, from `RESPONSE_CLIENTCHARUNIQUE`.
+    char_unique: i32,
+    /// The entry cell, from `RESPONSE_LOGIN`'s `clPos`.
+    spawn_x: i32,
+    spawn_y: i32,
+}
+
+impl Session {
+    /// Takes ownership of a socket that has already completed world entry.
+    ///
+    /// The wire half and the character facts are grouped because they are two
+    /// different things being joined: one is how the bytes are read, the other is
+    /// what the server said about who this session is.
+    fn adopt(wire: Wire, who: Who) -> Self {
+        Self {
+            stream: wire.stream,
+            parser: wire.parser,
+            buf: wire.buf,
+            link_rx: wire.link_rx,
+            session_tx: wire.session_tx,
+            char_unique: who.char_unique,
+            spawn_x: who.spawn_x,
+            spawn_y: who.spawn_y,
+        }
+    }
+
+    /// Logs a fresh account in and puts its character in the world.
+    ///
+    /// Steps S1-S13 of the entry path: front secret key, English login, notice,
+    /// world list, reconnect to the game server, `CLIENTCHARUNIQUE`, game login, the
+    /// 15 char-list frames, char select, `SERVERINFO`, `RESPONSE_LOGIN`, and the
+    /// village-struct round trip the client blocks movement on.
+    async fn enter(front_addr: &str, user: &str, password: &str) -> Result<Self, AnyError> {
+        println!("probe: entering as {user:?}");
+        let mut stream = TcpStream::connect(front_addr).await?;
+        let mut parser = FrameParser::new();
+        let mut buf = [0u8; 4096];
+
+        // S1: secret key, unprompted and in the clear.
+        let frame = read_frame(&mut stream, &mut parser, &mut buf).await?;
+        expect_cmd(&frame, FrontMsg::ResponseSecretkey)?;
+        let key1 = frame.payload()[2];
+        let key2 = frame.payload()[4];
+        let mut cipher = Cipher::session_cipher(key1, key2);
+
+        // S2: English login (21), ciphered.
+        send_encoded(
+            &mut stream,
+            &mut cipher,
+            FrontMsg::RequestEnglishLogin,
+            &english_login(user, password),
+        )
+        .await?;
+        let frame = read_frame(&mut stream, &mut parser, &mut buf).await?;
+        expect_cmd(&frame, FrontMsg::ResponseLogin)?;
+        let mut r = Reader::new(frame.payload());
+        let result = r.u16()?;
+        let auth_key = r.i32()?;
+        if result != 0 {
+            return Err(format!("login failed with result {result}").into());
+        }
+
+        // S5: notice, then S6: world list.
+        send_encoded(&mut stream, &mut cipher, FrontMsg::RequestNotice, &[]).await?;
+        let frame = read_frame(&mut stream, &mut parser, &mut buf).await?;
+        expect_cmd(&frame, FrontMsg::ResponseNotice)?;
+
+        let mut w = Writer::new();
+        w.fixed_str(user, 20);
+        send_encoded(
+            &mut stream,
+            &mut cipher,
+            FrontMsg::RequestWorldlist,
+            &w.finish(),
+        )
+        .await?;
+        let frame = read_frame(&mut stream, &mut parser, &mut buf).await?;
+        expect_cmd(&frame, FrontMsg::ResponseWorldlist)?;
+        let payload = frame.payload();
+        let count = u16::from_le_bytes([payload[0], payload[1]]);
+        if count == 0 {
+            return Err("world list was empty".into());
+        }
+        let entry = &payload[2..];
+        let ip = Reader::new(&entry[28..44])
+            .fixed_str(16)
+            .unwrap_or_default();
+        let port = u16::from_le_bytes([entry[44], entry[45]]);
+
+        // S7: reconnect to the game server the world list advertised.
+        let mut stream = TcpStream::connect(format!("{ip}:{port}")).await?;
+        let mut parser = FrameParser::new();
+        let mut buf = vec![0u8; 8192];
+        let mut link_rx = Cipher::link_cipher();
+
+        // S8: CLIENTCHARUNIQUE.
+        let (cmd, plain) =
+            read_game_frame(&mut stream, &mut parser, &mut buf, &mut link_rx).await?;
+        expect_game_cmd(cmd, GameMsg::ResponseClientcharunique)?;
+        let mut r = Reader::new(&plain[HEADER_SIZE..]);
+        let char_unique = r.i32()?;
+        let gkey1 = r.u8()?;
+        let gkey2 = r.u8()?;
+        let gversion = r.i16()?;
+        if gversion > 1 {
+            return Err(format!("server advertises version {gversion}; client is 1").into());
+        }
+        let mut session_tx = Cipher::session_cipher(gkey1, gkey2);
+
+        // S9: game login.
+        let mut w = Writer::with_capacity(48);
+        w.i32(auth_key);
+        w.fixed_str(user, 20);
+        w.fixed_str(password, 20);
+        w.u8(0);
+        w.pad(3);
+        send_game_encoded(
+            &mut stream,
+            &mut session_tx,
+            GameMsg::RequestLogin,
+            &w.finish(),
+        )
+        .await?;
+
+        // S10/S11: one char-list packet per slot; the client wants all 15.
+        for _ in 0..15 {
+            let (cmd, _plain) =
+                read_game_frame(&mut stream, &mut parser, &mut buf, &mut link_rx).await?;
+            expect_game_cmd(cmd, GameMsg::ResponseCharlist)?;
+        }
+
+        // S12: select slot 0, then SERVERINFO and RESPONSE_LOGIN.
+        let mut w = Writer::with_capacity(4);
+        w.i32(0);
+        send_game_encoded(
+            &mut stream,
+            &mut session_tx,
+            GameMsg::RequestSelectchar,
+            &w.finish(),
+        )
+        .await?;
+        let (cmd, _plain) =
+            read_game_frame(&mut stream, &mut parser, &mut buf, &mut link_rx).await?;
+        expect_game_cmd(cmd, GameMsg::ResponseServerinfo)?;
+        let (cmd, plain) =
+            read_game_frame(&mut stream, &mut parser, &mut buf, &mut link_rx).await?;
+        expect_game_cmd(cmd, GameMsg::ResponseLogin)?;
+        let p = &plain[HEADER_SIZE..];
+        if p.len() != MAKE_CHAR_INFO_PAYLOAD_LEN {
+            return Err(format!(
+                "response-login body is {} bytes, expected {MAKE_CHAR_INFO_PAYLOAD_LEN}",
+                p.len()
+            )
+            .into());
+        }
+        let life_x = u32::from_le_bytes([p[8], p[9], p[10], p[11]]);
+        let y_map_speed = u32::from_le_bytes([p[12], p[13], p[14], p[15]]);
+        let x = i32::try_from((life_x >> 20) & 0x3FF).unwrap_or(0);
+        let y = i32::try_from(y_map_speed & 0x3FF).unwrap_or(0);
+        println!("probe: {user:?} in the world at ({x}, {y}) as char_unique {char_unique}");
+
+        // S13: the village-struct round trip the client blocks movement on.
+        let mut w = Writer::with_capacity(4);
+        w.i32(1);
+        send_game_encoded(
+            &mut stream,
+            &mut session_tx,
+            GameMsg::RequestVillagestruct,
+            &w.finish(),
+        )
+        .await?;
+        let _ = read_until_game_cmd(
+            &mut stream,
+            &mut parser,
+            &mut buf,
+            &mut link_rx,
+            GameMsg::ResponseVillagestruct,
+        )
+        .await?;
+
+        Ok(Self::adopt(
+            Wire {
+                stream,
+                parser,
+                buf,
+                link_rx,
+                session_tx,
+            },
+            Who {
+                char_unique,
+                spawn_x: x,
+                spawn_y: y,
+            },
+        ))
+    }
+
+    /// The next game frame, or `None` at end of stream.
+    async fn read_frame(&mut self) -> Result<Option<(u16, Vec<u8>)>, AnyError> {
+        match read_frame(&mut self.stream, &mut self.parser, &mut self.buf).await {
+            Ok(frame) => {
+                let wire = frame.as_bytes();
+                let mut plain = vec![0u8; wire.len()];
+                if !self.link_rx.decode(wire, &mut plain)? {
+                    return Err("game link cipher integrity mismatch".into());
+                }
+                Ok(Some((u16::from_le_bytes([plain[3], plain[4]]), plain)))
+            }
+            Err(e) if e.to_string().contains("closed") => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Sends `REQUEST_USERORDER` (240) with an `ORDER_MOVE` to `dest`.
+    ///
+    /// Built through [`OrderData::move_order`] rather than by hand: the wire layout
+    /// is 24 bytes with three pad slots, and a hand-written `Writer` produced a
+    /// 32-byte body that decoded to `si_order = 0` and was dropped by the server
+    /// as an unmodelled order. The probe must speak the same body the GUI does.
+    async fn send_move(&mut self, dest: (i32, i32)) -> Result<(), AnyError> {
+        let order = OrderData::move_order(
+            self.char_unique,
+            i16::try_from(dest.0).unwrap_or(0),
+            i16::try_from(dest.1).unwrap_or(0),
+        );
+        send_game_encoded(
+            &mut self.stream,
+            &mut self.session_tx,
+            GameMsg::RequestUserorder,
+            &order.encode(),
+        )
+        .await
+    }
 }
 
 /// Runs the inventory round trip: read the item array the server generated, move
