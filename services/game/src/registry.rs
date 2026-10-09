@@ -55,6 +55,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use gz_proto::chat::{MAX_PLAYER_NAME, cut};
 use gz_proto::map_geometry::{cell_of, cells_adjacent};
+use gz_proto::opcodes_game::GameMsg;
 use tokio::sync::mpsc::UnboundedSender;
 
 /// `MAX_CHAR_NUMBER` (`CommonHeader.h:556`) — `GetIDFromCharUnique` returns 0
@@ -202,8 +203,31 @@ impl Registry {
     /// Drops a connection's entry. Called by [`Registered`] on every exit path;
     /// a `key` that was never registered (a drop before `REQUEST_SELECTCHAR`)
     /// is a no-op.
+    ///
+    /// Before removing, broadcasts `GAMEMSG_RESPONSE_LOGOUT` (11) to every
+    /// character in the departing session's 3×3 near block — the legacy's
+    /// `SendPersonLeaveMsgToOthers` (`ServerMap.cpp:51-63`). This is distinct
+    /// from [`Self::logout_departed`] (walking out of range): this is the
+    /// *session ending* (logout, disconnect, crash), and must be sent
+    /// synchronously because the `Drop` guard cannot await.
     pub fn remove(&self, key: SessionKey) {
-        self.lock().remove(&key);
+        let mut sessions = self.lock();
+        if let Some(departing) = sessions.get(&key) {
+            let info = departing.info.clone();
+            // Encode LOGOUT (11) = 4-byte char_unique (little-endian)
+            let mut payload = Vec::with_capacity(4);
+            payload.extend_from_slice(&info.char_unique.to_le_bytes());
+            // Broadcast to near block (excluding self, which is already going away)
+            for (other_key, other) in sessions.iter() {
+                if *other_key != key && is_near(&info, &other.info) {
+                    let _ = other.tx.send(Outbound {
+                        cmd: GameMsg::ResponseLogout as u16,
+                        payload: payload.clone(),
+                    });
+                }
+            }
+        }
+        sessions.remove(&key);
     }
 
     /// A copy of one session's character row, or `None` if it is not

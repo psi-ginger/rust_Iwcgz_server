@@ -103,6 +103,15 @@ const MOVE_PERCENT_COST: i32 = 100;
 /// `CHAR_ACTION_INTERVAL_FRAME` is 6 at `Char-Common.h`).
 const MOVE_DELAY_CAP_MS: u32 = 350;
 
+/// Legacy frame tick: `CHAR_ACTION_INTERVAL_FRAME * 50` = 300ms? No, the frame
+/// tick is 50ms (`GetTickCount` delta per frame). The cap is `(6+1)*50=350ms`.
+/// We run the movement timer at this 50ms tick so `advance()` accumulates
+/// exactly like the legacy's per-frame `Move()` call (`char-move.cpp:145-171`).
+/// This ensures 200 frames are sent at the same micro-cadence the client's
+/// animation expects, eliminating the step-and-pause caused by our previous
+/// per-step timer (425ms) being slower than the client's animation frame rate.
+const MOVE_TICK_MS: u32 = 50;
+
 /// `< 0x4E20` (20000): the client indexes its `CharUniqueInfo` table by
 /// `uiMakeCharUnique` (`SetCharReservedChar`).
 const MAX_SESSION_CHAR_UNIQUE: u64 = 19_999;
@@ -312,12 +321,6 @@ async fn handle_client(
     // The move being stepped, if any. Driven by the read loop's timer arm; see
     // [`Movement`].
     let mut movement: Option<Movement> = None;
-    // The absolute deadline for the next movement step. `None` when no move is
-    // in flight or the move has arrived. Using a deadline instead of a relative
-    // duration prevents a `Read`/`Send` arm winning the select from shortening
-    // the next wait — the bug that bunched 200 frames and made observer
-    // animation jerky.
-    let mut move_deadline: Option<Instant> = None;
     // Which frames get built from PostgreSQL on the way out.
     let mut live = LiveFrames {
         items: &items,
@@ -340,18 +343,24 @@ async fn handle_client(
     // to the socket (`Outbound`).
     let (out_tx, mut out_rx) = tokio::sync::mpsc::unbounded_channel::<Outbound>();
 
+    // Movement timer: fires at the legacy frame tick (50ms) when a move is in
+    // flight. This matches the legacy's per-frame `Move()` call
+    // (`char-move.cpp:145-171`), so `advance()` accumulates at the same
+    // micro-cadence and 200 frames are sent at the exact cadence the client's
+    // animation expects. Without this, our per-step timer (425ms) was slower
+    // than the client's animation frame rate, causing step-and-pause.
+    let mut move_tick = tokio::time::interval(Duration::from_millis(MOVE_TICK_MS as u64));
+    move_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
     loop {
         // The handshake window runs from accept to the first inbound frame. Past
         // it, a peer that has said nothing is a silent half-open connection and
         // gets reclaimed rather than parked forever -- the fix the legacy's
         // 10 s check does not deliver. See gz_net::session.
-        //
-        // Once a move is in flight the same read is bounded by the next step
-        // instead, so an idle client still has its avatar stepped (`Movement`).
         let read_window = if !session_state.state().is_active() {
             Some(cfg.timeouts.handshake)
         } else {
-            move_deadline.map(|dl| dl.saturating_duration_since(Instant::now()))
+            None
         };
         let tick = tokio::select! {
             read = stream.read(&mut buf) => LoopTick::Read(read),
@@ -359,8 +368,7 @@ async fn handle_client(
             _ = async {
                 match read_window {
                     Some(window) => tokio::time::sleep(window).await,
-                    // No window: nothing but a read or a queued frame can end
-                    // the wait, exactly as the blocking read did before.
+                    None if movement.is_some() => { move_tick.tick().await; }
                     None => std::future::pending::<()>().await,
                 }
             } => LoopTick::TimedOut,
@@ -371,24 +379,23 @@ async fn handle_client(
                 continue;
             }
             LoopTick::Send(None) => {
-                // Unreachable: `out_tx` is held for the whole connection.
                 return Err("outbound channel closed while the session was live".into());
             }
             LoopTick::TimedOut => {
                 if session_state.state().is_active() {
-                    // A move's next tile is due: step it and keep reading.
-                    step_movement(
-                        &mut stream,
-                        &mut outbound,
-                        &mut live,
-                        &mut login,
-                        &mut movement,
-                        &registry,
-                        session_key,
-                    )
-                    .await?;
-                    // Re-arm the deadline from the (potentially updated) movement.
-                    move_deadline = movement.as_ref().map(|mv| Instant::now() + mv.next_delay());
+                    // Movement tick fired: step if a tile is due.
+                    if movement.is_some() {
+                        step_movement(
+                            &mut stream,
+                            &mut outbound,
+                            &mut live,
+                            &mut login,
+                            &mut movement,
+                            &registry,
+                            session_key,
+                        )
+                        .await?;
+                    }
                     continue;
                 }
                 let now = now_tick();
@@ -514,7 +521,7 @@ async fn handle_client(
                     // in-flight step so the old character cannot walk on
                     // (`ServerDB-Person.cpp:1795`).
                     movement = None;
-                    move_deadline = None;
+
                     let character_id = {
                         let session = login
                             .as_ref()
@@ -794,14 +801,13 @@ async fn handle_client(
                                 });
                             }
                             // Arm the deadline for the first step.
-                            move_deadline = Some(Instant::now() + mv.next_delay());
+
                             movement = Some(mv);
                         }
                         // A modelled stop, or any order this port does not act
                         // on: stop stepping so the authoritative cell freezes.
                         None => {
                             movement = None;
-                            move_deadline = None;
                         }
                     }
                 }
@@ -2564,6 +2570,7 @@ impl Movement {
 
     /// How long until the accumulator should next reach [`MOVE_PERCENT_STEP`],
     /// capped at [`MOVE_DELAY_CAP_MS`] exactly as one legacy tick is capped.
+    #[allow(dead_code)]
     fn next_delay(&self) -> Duration {
         let needed = i64::from((MOVE_PERCENT_STEP - self.percent).max(1));
         let speed = i64::from(self.move_speed).max(1);
