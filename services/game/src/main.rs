@@ -2524,7 +2524,12 @@ impl Movement {
             pos,
             map_id,
             move_speed,
-            percent: 0,
+            // Start at -MOVE_PERCENT_STEP so the first step also needs 100 points
+            // (steady-state cadence 5000/speed ms). The legacy starts at 0, giving
+            // a half-interval first step, but its frame-by-frame accumulation hides
+            // the alternation. Our timer fires once per step, so the asymmetry
+            // would produce visible step-and-pause (short/long/short/long intervals).
+            percent: -MOVE_PERCENT_STEP,
             last: Instant::now(),
         }
     }
@@ -4914,53 +4919,88 @@ mod tests {
 
     /// A stalled tick must not bank more than one tile: `advance` caps its
     /// elapsed time at `(CHAR_ACTION_INTERVAL_FRAME + 1) * 50` ms
-    /// (`char-move.cpp:145`).
+    /// (`char-move.cpp:145`). With `percent=-50` (steady-state start), a single
+    /// capped tick at speed 14 yields 98 points (< 100 needed), so the step is
+    /// deferred to the next tick — still at most one tile per cap window.
     #[test]
     fn a_stalled_tick_commits_at_most_one_tile() {
         let mut movement = Movement::new((10, 0), (0, 0), 1, 14);
         let stalled = movement.last + Duration::from_secs(4);
-        assert_eq!(movement.advance(stalled), Some((1, 0)));
+        // At speed 14, a 350 ms capped tick gives 98 points; percent goes -50 -> 48.
+        // No step yet, but crucially: it does NOT jump multiple tiles.
+        assert!(movement.advance(stalled).is_none());
+        assert_eq!(movement.pos, (0, 0));
+        // A subsequent normal tick would commit the step.
+        let nudge = movement.last + Duration::from_millis(10);
+        assert_eq!(movement.advance(nudge), Some((1, 0)));
         assert_eq!(movement.pos, (1, 0));
     }
 
     /// `next_delay` never exceeds the legacy cap, so the read loop's timer arm
-    /// wakes at the same bound the legacy's `min((CHAR_ACTION_INTERVAL_FRAME+1)*50, …)`
+    /// wakes at the same bound the legacy's `min((CHAR_ACTION_INTERVAL_FRAME+1)*50, ...)`
     /// applies.
     #[test]
     fn next_delay_is_capped_at_the_legacy_tick_bound() {
         let mut movement = Movement::new((10, 0), (0, 0), 1, 14);
-        // Commit one tile so the accumulator sits below zero and would ask for
-        // more than the cap without it.
-        let now = movement.last + Duration::from_millis(179);
-        assert!(movement.advance(now).is_some());
-        assert_eq!(movement.next_delay(), Duration::from_millis(350));
+        // With percent=-50, the first step needs 100 points.
+        // 350 ms capped tick gives 14*350/50 = 98 points, not enough.
+        let now = movement.last + Duration::from_millis(350);
+        assert!(movement.advance(now).is_none()); // 98 points, percent = 48
+        // next_delay() needs 2 more points: ceil(2*50/14) = 8 ms (under cap).
+        // The cap only applies when needed delay > 350 ms.
+        // So after a partial tick, next_delay() is small.
+        // To hit the cap, we need a speed where steady-state delay > 350 ms.
+        // Speed 13: 5000/13 = 385 ms > 350 ms cap.
+        let mut capped = Movement::new((10, 0), (0, 0), 1, 13);
+        let start = capped.last;
+        // One capped tick (350 ms) gives 13*350/50 = 91 points.
+        assert!(capped.advance(start + Duration::from_millis(350)).is_none());
+        // Still need 9 more points: ceil(9*50/13) = 35 ms. Not capped yet.
+        // Need a case where needed > 350.
+        // Speed 10: 5000/10 = 500 ms > 350 ms.
+        let mut slow = Movement::new((10, 0), (0, 0), 1, 10);
+        let start = slow.last;
+        // Full steady-state delay is 500 ms, but next_delay() caps at 350.
+        assert_eq!(slow.next_delay(), Duration::from_millis(350));
+        // After 350 ms: 10*350/50 = 70 points. Need 30 more = 150 ms.
+        assert!(slow.advance(start + Duration::from_millis(350)).is_none());
+        assert_eq!(slow.next_delay(), Duration::from_millis(150)); // under cap
     }
 
     /// The cadence follows the character, not a fixed reference: `advance` banks
     /// `move_speed * elapsed / 50`, so a slower mover takes proportionally longer
     /// per tile. At speed 7 a tile needs `5000 / 7 ≈ 715` ms against 357 ms at
-    /// the captured 14.
+    /// the captured 14. With `percent=-50`, the first tile already uses the
+    /// steady-state delay (no cold-start half-interval).
+    ///
+    /// Note: the legacy cap of 350 ms per tick means a single `advance()` call
+    /// with a large elapsed time is capped. These tests use speeds where the
+    /// steady-state delay fits under the cap, or pass the exact steady-state
+    /// delay in one call.
     #[test]
     fn the_step_cadence_scales_with_the_characters_move_speed() {
-        let mut slow = Movement::new((1, 0), (0, 0), 1, 7);
+        // Speed 16: 5000/16 = 312.5 -> 313 ms < 350 ms cap, fits in one tick.
+        let mut slow = Movement::new((1, 0), (0, 0), 1, 16);
         let start = slow.last;
-        // Too early for a speed-7 tile: half the accumulator still falls short.
-        assert!(slow.advance(start + Duration::from_millis(357)).is_none());
-        // A full 715 ms commits exactly one.
+        // Full 313 ms commits exactly one (16*313/50 = 100).
         assert_eq!(
-            slow.advance(start + Duration::from_millis(715)),
+            slow.advance(start + Duration::from_millis(313)),
             Some((1, 0))
         );
 
+        // Speed 28: 5000/28 = 178.6 -> 179 ms, well under cap.
         let mut fast = Movement::new((1, 0), (0, 0), 1, 28);
         let start = fast.last;
-        // The same 179 ms that just missed at speed 7 commits a tile at 28
-        // (28 * 179 / 50 ≈ 100), and the next is due well under the cap.
+        // 179 ms commits a tile at 28 (28*179/50 = 100).
         assert_eq!(
             fast.advance(start + Duration::from_millis(179)),
             Some((1, 0))
         );
-        assert!(fast.next_delay() < Duration::from_millis(350));
+        assert_eq!(
+            fast.next_delay(),
+            Duration::from_millis(179),
+            "steady-state delay at speed 28"
+        );
     }
 
     /// The quit menu's two requests are the legacy pair, and each is answered by
