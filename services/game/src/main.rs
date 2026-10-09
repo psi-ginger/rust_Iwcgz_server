@@ -103,17 +103,23 @@ const MOVE_PERCENT_COST: i32 = 100;
 /// `CHAR_ACTION_INTERVAL_FRAME` is 6 at `Char-Common.h`).
 const MOVE_DELAY_CAP_MS: u32 = 350;
 
-/// Movement timer interval: the legacy runs its per-frame `Move()` every
-/// `GetTickCount` delta (50ms), but checks movement and broadcasts 200
-/// immediately when a tile commits. Our 50ms tick introduced up to 50ms
-/// latency between step commitment and 200 broadcast, which exceeded the
-/// client's animation frame budget and caused step-and-pause.
+/// Computes the exact `Instant` when the next movement step will be ready,
+/// matching the legacy's per-frame accumulation exactly.
 ///
-/// Use a 10ms interval so the max latency is 10ms — well within the
-/// client's ~417ms step animation at speed 12. The step cadence itself
-/// is still governed by `advance()`'s accumulator (5000/speed ms per tile);
-/// this timer only controls how promptly we detect and broadcast a step.
-const MOVE_TICK_MS: u32 = 10;
+/// The legacy computes `movedlength = movespeed * elapsed_ms / 50` per frame
+/// (capped at 350ms), adds it to `siMovePercent`, and steps when >= 50.
+/// We replicate this by computing the exact `Instant` when the accumulator
+/// will reach 50, rather than polling on a fixed interval. This avoids the
+/// integer-division truncation error that made a 10ms tick run at ~500ms/step
+/// instead of ~417ms at speed 12.
+fn next_move_deadline(movement: &Movement) -> Instant {
+    let needed = (MOVE_PERCENT_STEP - movement.percent).max(1) as i64;
+    let speed = movement.move_speed as i64;
+    // ms needed = ceil(needed * 50 / speed)
+    let ms_needed = (needed * 50 + speed - 1) / speed;
+    let capped = ms_needed.min(MOVE_DELAY_CAP_MS as i64).max(1) as u64;
+    Instant::now() + Duration::from_millis(capped)
+}
 
 /// `< 0x4E20` (20000): the client indexes its `CharUniqueInfo` table by
 /// `uiMakeCharUnique` (`SetCharReservedChar`).
@@ -346,15 +352,6 @@ async fn handle_client(
     // to the socket (`Outbound`).
     let (out_tx, mut out_rx) = tokio::sync::mpsc::unbounded_channel::<Outbound>();
 
-    // Movement timer: fires at the legacy frame tick (50ms) when a move is in
-    // flight. This matches the legacy's per-frame `Move()` call
-    // (`char-move.cpp:145-171`), so `advance()` accumulates at the same
-    // micro-cadence and 200 frames are sent at the exact cadence the client's
-    // animation expects. Without this, our per-step timer (425ms) was slower
-    // than the client's animation frame rate, causing step-and-pause.
-    let mut move_tick = tokio::time::interval(Duration::from_millis(MOVE_TICK_MS as u64));
-    move_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-
     loop {
         // The handshake window runs from accept to the first inbound frame. Past
         // it, a peer that has said nothing is a silent half-open connection and
@@ -362,6 +359,9 @@ async fn handle_client(
         // 10 s check does not deliver. See gz_net::session.
         let read_window = if !session_state.state().is_active() {
             Some(cfg.timeouts.handshake)
+        } else if let Some(mv) = movement.as_ref() {
+            mv.deadline
+                .map(|dl| dl.saturating_duration_since(Instant::now()))
         } else {
             None
         };
@@ -371,7 +371,6 @@ async fn handle_client(
             _ = async {
                 match read_window {
                     Some(window) => tokio::time::sleep(window).await,
-                    None if movement.is_some() => { move_tick.tick().await; }
                     None => std::future::pending::<()>().await,
                 }
             } => LoopTick::TimedOut,
@@ -386,7 +385,7 @@ async fn handle_client(
             }
             LoopTick::TimedOut => {
                 if session_state.state().is_active() {
-                    // Movement tick fired: step if a tile is due.
+                    // Movement deadline fired: step if a tile is due.
                     if movement.is_some() {
                         step_movement(
                             &mut stream,
@@ -398,6 +397,10 @@ async fn handle_client(
                             session_key,
                         )
                         .await?;
+                        // Re-arm the deadline from the (potentially updated) movement.
+                        if let Some(mv) = movement.as_mut() {
+                            mv.deadline = Some(next_move_deadline(mv));
+                        }
                     }
                     continue;
                 }
@@ -523,6 +526,9 @@ async fn handle_client(
                     // world entry, exactly like the legacy `CloseAction`. Stop any
                     // in-flight step so the old character cannot walk on
                     // (`ServerDB-Person.cpp:1795`).
+                    if let Some(mv) = movement.as_mut() {
+                        mv.deadline = None;
+                    }
                     movement = None;
 
                     let character_id = {
@@ -795,7 +801,7 @@ async fn handle_client(
                     )
                     .await?
                     {
-                        Some(mv) => {
+                        Some(mut mv) => {
                             if let Some(session) = login.as_mut() {
                                 session.entry_cell = Some(DropLocation {
                                     map_id: mv.map_id,
@@ -805,11 +811,15 @@ async fn handle_client(
                             }
                             // Arm the deadline for the first step.
 
+                            mv.deadline = Some(next_move_deadline(&mv));
                             movement = Some(mv);
                         }
                         // A modelled stop, or any order this port does not act
                         // on: stop stepping so the authoritative cell freezes.
                         None => {
+                            if let Some(mv) = movement.as_mut() {
+                                mv.deadline = None;
+                            }
                             movement = None;
                         }
                     }
@@ -2524,6 +2534,9 @@ struct Movement {
     percent: i32,
     /// When [`Movement::advance`] last ran, i.e. `clMoveInfo.dwLastMoveClock`.
     last: Instant,
+    /// Absolute deadline for the next step. `None` when the move has arrived.
+    /// Stored here so `step_movement` can update it after each step.
+    deadline: Option<Instant>,
 }
 
 impl Movement {
@@ -2540,6 +2553,7 @@ impl Movement {
             // would produce visible step-and-pause (short/long/short/long intervals).
             percent: -MOVE_PERCENT_STEP,
             last: Instant::now(),
+            deadline: None,
         }
     }
 
@@ -2587,18 +2601,22 @@ impl Movement {
 /// Sends one 200 `CHARUPDATE` for the given cell (`cltServer::SendCharUpdate`,
 /// `Server.cpp:1654-1689`). Life, mana and move speed come from the cached row,
 /// because stats are not modelled yet.
+/// Sends one 200 `CHARUPDATE` for the given cell.
+///
+/// `urgent=true` for teleports/long jumps (>3 tiles); `false` for normal steps.
 async fn send_char_update(
     stream: &mut TcpStream,
     outbound: &mut Cipher,
     live: &LiveFrames<'_>,
     x: i32,
     y: i32,
+    urgent: bool,
 ) -> Result<(), AnyError> {
     let character = live
         .character
         .as_ref()
         .ok_or("char update before the character row is loaded")?;
-    let body = char_update_body(live.char_unique, character, x, y)?;
+    let body = char_update_body(live.char_unique, character, x, y, urgent)?;
     send_encoded(stream, outbound, GameMsg::ResponseCharupdate, &body).await
 }
 
@@ -2613,11 +2631,19 @@ async fn send_char_update(
 /// # Errors
 ///
 /// A `char_unique` or tile that does not fit the struct's narrower fields.
+/// Builds the 200 `CHARUPDATE` body for one cell.
+///
+/// `urgent` controls `bUrgentMode`:
+/// - `true`  -> teleports / long jumps (>3 tiles) where the client must snap and animate via `MoveTo`+`MoveInit`.
+/// - `false` -> normal single-tile steps. The 241 ORDER_MOVE already told the client the destination;
+///   200 packets are just position confirmations. Sending `b_urgent_mode=true` every tile would
+///   call `MoveTo`+`MoveInit` repeatedly, resetting the animation and causing step-and-pause.
 fn char_update_body(
     char_unique: i32,
     character: &CharacterFull,
     x: i32,
     y: i32,
+    urgent: bool,
 ) -> Result<Vec<u8>, AnyError> {
     let update = BasicCharUpdate {
         si_char_unique: i16::try_from(char_unique).map_err(|_| {
@@ -2626,11 +2652,10 @@ fn char_update_body(
         // The character's effective `GetTotalMoveSpeed()`; the client uses it for
         // the avatar's step animation rate.
         si_move_speed: i8::try_from(character.move_speed.clamp(0, i16::from(i8::MAX))).unwrap_or(0),
-        // `bUrgentMode = true` tells the client to animate this step via `MoveTo` + `MoveInit`.
-        // Without it, the client only animates when the position jump exceeds 3 tiles
-        // (`Client-Person-BigInfo.cpp:1176-1195`). For single-tile steps, `false` causes
-        // the observer to update position without animating — the step-and-pause bug.
-        b_urgent_mode: true,
+        // `bUrgentMode`:
+        // - `true`  -> teleport / long jump (>3 tiles): client calls `MoveTo` + `MoveInit`.
+        // - `false` -> normal step: 241 ORDER_MOVE already gave destination; 200 is just confirmation.
+        b_urgent_mode: urgent,
         si_life: character.max_life,
         si_reserved_life: 0,
         si_mana: character.max_mana,
@@ -2687,6 +2712,8 @@ fn char_update_body(
 /// also writes the frame to its own socket directly, and one writer per connection
 /// keeps a queued copy from overtaking a later direct one.
 ///
+/// `urgent=true` for teleports/long jumps (>3 tiles); `false` for normal steps.
+///
 /// # Errors
 ///
 /// No character row yet, or a tile/`char_unique` that does not fit the struct.
@@ -2697,8 +2724,9 @@ fn fan_char_update(
     character: &CharacterFull,
     x: i32,
     y: i32,
+    urgent: bool,
 ) -> Result<usize, AnyError> {
-    let body = char_update_body(char_unique, character, x, y)?;
+    let body = char_update_body(char_unique, character, x, y, urgent)?;
     let origin = registry
         .info(session_key)
         .ok_or("char update fan before the session is in the registry")?;
@@ -2772,6 +2800,7 @@ async fn step_movement(
     };
     let map_id = mv.map_id;
     if mv.arrived() {
+        mv.deadline = None;
         *movement = None;
     }
     // The legacy fans this frame to the 3×3 near block (`Server.cpp:1689`), so a
@@ -2786,7 +2815,15 @@ async fn step_movement(
             .character
             .as_ref()
             .ok_or("char update fan before the character row is loaded")?;
-        fan_char_update(registry, session_key, live.char_unique, character, x, y)?
+        fan_char_update(
+            registry,
+            session_key,
+            live.char_unique,
+            character,
+            x,
+            y,
+            false,
+        )?
     };
     let now = registry.info(session_key);
     if let (Some(was), Some(now)) = (was.as_ref(), now.as_ref())
@@ -2818,7 +2855,7 @@ async fn step_movement(
         }
     }
 
-    send_char_update(stream, outbound, live, x, y).await?;
+    send_char_update(stream, outbound, live, x, y, false).await?;
     if observers > 0 {
         logln!("game: char {session_key} fanned 200 to {observers} observer(s) at ({x}, {y})");
     }
@@ -2960,7 +2997,7 @@ async fn handle_userorder(
     // both, so an observer that missed the origin tile would otherwise start its
     // walk from a stale one. Self still gets it directly, before the fan, so the
     // ordering the capture shows (241, 200, 200…) is preserved for this client.
-    send_char_update(stream, outbound, live, start.0, start.1).await?;
+    send_char_update(stream, outbound, live, start.0, start.1, false).await?;
     fan_char_update(
         registry,
         session_key,
@@ -2970,6 +3007,7 @@ async fn handle_userorder(
             .ok_or("userorder before the row is loaded")?,
         start.0,
         start.1,
+        false,
     )?;
 
     // Persist the destination, then mirror: a later 248 (resync) or a re-login
@@ -3715,7 +3753,7 @@ mod tests {
     /// (`Client-Person-BigInfo.cpp:1187-1222`), so those are the fields under test.
     #[test]
     fn the_observer_fan_carries_the_same_cell_and_speed_as_the_movers_own_frame() {
-        let body = char_update_body(1471, &seeded_tester(), 28, 90).unwrap();
+        let body = char_update_body(1471, &seeded_tester(), 28, 90, false).unwrap();
         let update = BasicCharUpdate::decode(&body).expect("the fan body decodes as a 200");
 
         assert_eq!(update.si_char_unique, 1471);
@@ -3776,7 +3814,7 @@ mod tests {
         // is the cell just reached.
         registry.update_pos(mover_key, 28, 90);
         let observers =
-            fan_char_update(&registry, mover_key, 1471, &seeded_tester(), 28, 90).unwrap();
+            fan_char_update(&registry, mover_key, 1471, &seeded_tester(), 28, 90, false).unwrap();
         assert_eq!(
             observers, 1,
             "Tester2 shares the cell; the far one does not"
