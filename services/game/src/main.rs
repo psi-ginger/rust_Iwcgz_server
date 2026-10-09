@@ -2896,6 +2896,64 @@ async fn handle_userorder(
         &OrderData::move_order(live.char_unique, x16, y16).encode(),
     )
     .await?;
+    // The legacy broadcasts the ORDER_MOVE (241) to observers via
+    // `SendNeighbourMsg` (`char-order.cpp:170`), so the observer's client knows
+    // the destination and can interpolate the path. Without this, observers only
+    // see incremental 200 updates and animate each step as a discrete jump.
+    let order_241_body: Vec<u8> = OrderData::move_order(live.char_unique, x16, y16)
+        .encode()
+        .to_vec();
+    send_encoded(
+        stream,
+        outbound,
+        GameMsg::ResponseUserorder,
+        &order_241_body,
+    )
+    .await?;
+    // Build a temporary SessionInfo for the mover to fan the 241.
+    let mover_session_info = SessionInfo {
+        char_unique: live.char_unique as i16,
+        name: live
+            .character
+            .as_ref()
+            .map(|c| c.name.clone())
+            .unwrap_or_default(),
+        level: live.character.as_ref().map(|c| c.level as i32).unwrap_or(1),
+        map_id: live.character.as_ref().map(|c| c.map_id).unwrap_or(0),
+        x: start.0,
+        y: start.1,
+        school_id: live.character.as_ref().map(|c| c.school_id).unwrap_or(0),
+        class_kind: live
+            .character
+            .as_ref()
+            .map(|c| c.class_kind as u16)
+            .unwrap_or(1),
+        life: live
+            .character
+            .as_ref()
+            .map(|c| c.max_life as u32)
+            .unwrap_or(161),
+        move_speed: live
+            .character
+            .as_ref()
+            .map(|c| c.move_speed.clamp(0, 63) as u8)
+            .unwrap_or(12),
+        sex: live.character.as_ref().map(|c| c.gender as u8).unwrap_or(1),
+        gm_level: 0,
+    };
+    let fanned_241 = registry.broadcast_near_others(
+        &mover_session_info,
+        session_key,
+        GameMsg::ResponseUserorder as u16,
+        order_241_body.clone(),
+    );
+    if fanned_241 > 0 {
+        logln!(
+            "game: char {session_key} fanned 241 to {fanned_241} observer(s) at ({}, {})",
+            start.0,
+            start.1
+        );
+    }
     // The reference server broadcasts the cell the move starts from, then one
     // 200 per committed tile (the captured run was 241, 200, 200). The start-cell
     // 200 is fanned too (slice 6 B1): the legacy's `SendCharUpdate` is one call for
