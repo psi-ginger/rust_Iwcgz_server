@@ -312,6 +312,12 @@ async fn handle_client(
     // The move being stepped, if any. Driven by the read loop's timer arm; see
     // [`Movement`].
     let mut movement: Option<Movement> = None;
+    // The absolute deadline for the next movement step. `None` when no move is
+    // in flight or the move has arrived. Using a deadline instead of a relative
+    // duration prevents a `Read`/`Send` arm winning the select from shortening
+    // the next wait — the bug that bunched 200 frames and made observer
+    // animation jerky.
+    let mut move_deadline: Option<Instant> = None;
     // Which frames get built from PostgreSQL on the way out.
     let mut live = LiveFrames {
         items: &items,
@@ -345,7 +351,7 @@ async fn handle_client(
         let read_window = if !session_state.state().is_active() {
             Some(cfg.timeouts.handshake)
         } else {
-            movement.as_ref().map(Movement::next_delay)
+            move_deadline.map(|dl| dl.saturating_duration_since(Instant::now()))
         };
         let tick = tokio::select! {
             read = stream.read(&mut buf) => LoopTick::Read(read),
@@ -381,6 +387,8 @@ async fn handle_client(
                         session_key,
                     )
                     .await?;
+                    // Re-arm the deadline from the (potentially updated) movement.
+                    move_deadline = movement.as_ref().map(|mv| Instant::now() + mv.next_delay());
                     continue;
                 }
                 let now = now_tick();
@@ -506,6 +514,7 @@ async fn handle_client(
                     // in-flight step so the old character cannot walk on
                     // (`ServerDB-Person.cpp:1795`).
                     movement = None;
+                    move_deadline = None;
                     let character_id = {
                         let session = login
                             .as_ref()
@@ -784,11 +793,16 @@ async fn handle_client(
                                     y: mv.pos.1,
                                 });
                             }
+                            // Arm the deadline for the first step.
+                            move_deadline = Some(Instant::now() + mv.next_delay());
                             movement = Some(mv);
                         }
                         // A modelled stop, or any order this port does not act
                         // on: stop stepping so the authoritative cell freezes.
-                        None => movement = None,
+                        None => {
+                            movement = None;
+                            move_deadline = None;
+                        }
                     }
                 }
                 c if c == GameMsg::RequestHopetoquit as u16
