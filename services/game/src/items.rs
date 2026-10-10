@@ -231,7 +231,7 @@ pub(crate) async fn handle_inv_drop(
             format!("slot {slot} holds {stored}, cannot drop {requested}")
         }
         DropStatus::GroundBlocked { x, y } => {
-            format!("drop cell ({x}, {y}) and all eight neighbours are occupied")
+            format!("drop cell ({x}, {y}): every cell of the 5x5 box around it is occupied")
         }
     };
     logln!("game: invdrop slot {slot} for character {character_id}: {detail}");

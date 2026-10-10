@@ -114,8 +114,8 @@ pub enum DropStatus {
         /// Count the client asked to remove.
         requested: u16,
     },
-    /// The requested cell and every one of its eight neighbours already holds
-    /// a dropped item, so the drop was refused and the slot left alone.
+    /// Every cell of the 5x5 box around the requested cell already holds a
+    /// dropped item, so the drop was refused and the slot left alone.
     GroundBlocked {
         /// Cell the client asked to drop onto.
         x: i32,
@@ -528,30 +528,27 @@ fn carry_slots() -> impl Iterator<Item = u16> {
         .chain(BAG1..=BAG1_END)
 }
 
-/// The eight cells around a requested drop cell, orthogonal neighbours before
-/// diagonals so the most reachable spot is tried first. There is no legacy
-/// order to reproduce here: the reference build has no fallback at all, it
-/// simply loses the item (`ITZMap::AddItem` fails, the row is still inserted
-/// into its item list, and the client never learns of it).
+/// The 24 cells of the 5x5 box around a requested drop cell, nearest ring
+/// first and within each ring in the legacy's scan order (dy then dx,
+/// ascending) — the exact preference of `FindProperAreaForDrop`
+/// (`MapManager.cpp:999`), minus its map-bounds and collision checks, which
+/// this server has no map model for.
 fn neighbor_cells(x: i32, y: i32) -> impl Iterator<Item = (i32, i32)> {
-    const RING: [(i32, i32); 8] = [
-        (0, -1),
-        (0, 1),
-        (-1, 0),
-        (1, 0),
-        (-1, -1),
-        (1, -1),
-        (-1, 1),
-        (1, 1),
-    ];
-    RING.into_iter()
-        .map(move |(dx, dy)| (x + dx, y + dy))
+    let ring = |d: i32| {
+        (-d..=d).flat_map(move |dy| {
+            (-d..=d)
+                .filter(move |dx| dx.abs() == d || dy.abs() == d)
+                .map(move |dx| (x + dx, y + dy))
+        })
+    };
+    ring(1)
+        .chain(ring(2))
         .filter(|(nx, ny)| *nx >= 0 && *ny >= 0)
 }
 
-/// The cells a drop tries, requested cell first then its eight neighbours, so
-/// an empty target cell always wins and a crowded neighbourhood resolves in the
-/// legacy's nearest-first order (`FindProperAreaForDrop`, `MapManager.cpp:999`).
+/// The cells a drop tries, requested cell first then the other 24 cells of the
+/// 5x5 box around it, so an empty target cell always wins and a crowded box
+/// resolves in the legacy's nearest-first order (see [`neighbor_cells`]).
 fn drop_candidates(at: DropLocation) -> impl Iterator<Item = DropLocation> {
     std::iter::once(at).chain(neighbor_cells(at.x, at.y).map(move |(x, y)| DropLocation {
         map_id: at.map_id,
@@ -1349,10 +1346,11 @@ mod tests {
     }
 
     /// A drop lands on the requested cell whenever that cell is free, and falls
-    /// back to neighbours otherwise — in the legacy's nearest-first order
-    /// (orthogonals before diagonals, matching `FindProperAreaForDrop`'s
-    /// Chebyshev preference at `MapManager.cpp:999`). `drop_slot`'s insert loop
-    /// tries exactly this sequence, so pinning it keeps the recovery stable.
+    /// back through the rest of the 5x5 box (up to 24 further cells) otherwise —
+    /// nearest ring first, in `FindProperAreaForDrop`'s scan order
+    /// (`MapManager.cpp:999`). `drop_slot`'s insert loop tries exactly this
+    /// sequence and reports `GroundBlocked` only when all 25 cells are taken, so
+    /// pinning the stream keeps the recovery stable.
     #[test]
     fn drop_candidates_try_the_requested_cell_before_any_neighbour() {
         let at = DropLocation {
@@ -1363,19 +1361,23 @@ mod tests {
         let cells: Vec<DropLocation> = drop_candidates(at).collect();
 
         assert_eq!(cells[0], at, "the empty requested cell must win");
-        assert_eq!(cells.len(), 9, "requested cell plus its eight neighbours");
+        assert_eq!(
+            cells.len(),
+            25,
+            "the full 5x5 box around the requested cell"
+        );
 
         let rest = &cells[1..];
-        // Every neighbour appears exactly once.
+        // Every cell of the box appears exactly once.
         let mut distinct = rest.to_vec();
         distinct.sort_unstable_by_key(|c| (c.x, c.y));
         distinct.dedup();
-        assert_eq!(distinct.len(), 8);
+        assert_eq!(distinct.len(), 24);
 
-        // Orthogonal neighbours (step 1) come before diagonals (step 2).
-        let is_diagonal = |c: &DropLocation| (c.x - at.x).abs() == 1 && (c.y - at.y).abs() == 1;
-        assert!(rest[..4].iter().all(|c| !is_diagonal(c)));
-        assert!(rest[4..].iter().all(is_diagonal));
+        // Nearest ring (Chebyshev distance 1) comes before the outer ring (2).
+        let chebyshev = |c: &DropLocation| (c.x - at.x).abs().max((c.y - at.y).abs());
+        assert!(rest[..8].iter().all(|c| chebyshev(c) == 1));
+        assert!(rest[8..].iter().all(|c| chebyshev(c) == 2));
 
         // The map travels with every candidate.
         assert!(cells.iter().all(|c| c.map_id == at.map_id));
