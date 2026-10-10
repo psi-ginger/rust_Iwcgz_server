@@ -1,15 +1,16 @@
 # MUST FIX
 
-Tracking for the two **Must fix** findings from the 2026-10-10 repository audit.
-These are the only two findings that either let someone in without a password or
-lose/corrupt player data. Everything else the audit listed is *Should fix* /
-*Nice to have* and is out of scope here.
+Tracking for the repository audit. It began as the two **Must fix** findings from
+the 2026-10-10 audit — the only two that either let someone in without a password
+or lose/corrupt player data — and now also carries the **Should fix** items from
+the same audit, all of which are closed. The remaining *Nice to have* items are
+listed at the end.
 
 **Assumed load:** M1 local test cluster — 1–2 clients, PostgreSQL on localhost,
 dev-run front + game. Where a fix only bites at higher concurrency, the item says
 so.
 
-Validation command for both items:
+Validation command for every item:
 
 ```powershell
 cargo fmt --check
@@ -108,7 +109,8 @@ per-unique answer as a sorted table `PILEABLE: &[u16]` (1828 uniques) plus a pur
 `Item/Data/ItemType*E.txt` files whose type lacks `ITEMATB_OBJECT` (HEAL, FOOD,
 BOOK, MINERAL, ANIMAL, TREE, CLOTH, SEAFOOD, ETC, SCROLL, DOLL, TICKET, EVENTITEM,
 QUEST, BOX, PREMIUM, COMPOSITIONMATERIAL), first column, deduplicated and sorted;
-the generation recipe is in the module docs. A unique that is **not** listed is not
+the generation recipe is `scripts/generate-pileable-table.ps1`, whose output
+reproduces the checked-in table and whose `-Check` mode verifies it. A unique that is **not** listed is not
 pileable, matching the legacy's type-0 result (`FindItemRefFromUnique` finds no
 type → `CanPile` false). The pileable and object-flagged non-pileable sets were
 verified non-overlapping.
@@ -147,7 +149,8 @@ the slot an item sits in is irrelevant — equipment never stacks in *any* conta
 decision boundary (`stackable`/`is_pileable`) because `gz-db` has no DB test
 harness; the swap / free-slot fall-through paths themselves are existing code. The
 table is generated from the deployed GameServer data and must be regenerated when
-that data changes (recipe documented in the `gz-data` module docs).
+that data changes — `scripts/generate-pileable-table.ps1 -Check` fails when it is
+stale.
 
 ---
 
@@ -176,12 +179,13 @@ residual risks. Status after the review:
    stacking — a functional-only regression (refusing to stack never corrupts data).
    Documented in the module docs; a config knob is deferred until an
    artifact-enabled deployment exists.
-3. **Remark — the table generator is documented, not committed.** The module docs
-   describe the recipe (union of the first column of the pileable English `*E.txt`
-   files, dedup, sort), but the PowerShell that produced the table is not checked
-   in. When the GameServer item data changes the table must be regenerated from the
-   recipe, and the failure mode of a missed regenerate is a silent no-stack
-   regression, not a crash. Follow-up: commit the generator under `scripts/`.
+3. **Resolved (2026-10-11) — the table generator is now committed.** The recipe
+   (union of the first column of the pileable English `*E.txt` files, dedup, sort)
+   is `scripts/generate-pileable-table.ps1`. Run it with no arguments to print the
+   `const PILEABLE` block (a byte-for-byte drop-in — it lays the body out the way
+   rustfmt does), or with `-Check` to verify the committed table is current
+   (exit 1 on drift). The failure mode of a missed regenerate — a silent no-stack
+   regression, not a crash — is now caught by `-Check` against the deployed data.
 4. **Remark — verified at the decision boundary, not against the database.** The
    swap-vs-stack fall-through is asserted through `stackable`/`is_pileable`;
    `gz-db` has no live-PostgreSQL harness, so no item path ran against a real DB.
@@ -190,13 +194,19 @@ residual risks. Status after the review:
 
 ---
 
-## Audit backlog status (2026-10-10)
+## Audit backlog status (2026-10-11)
 
-**Done (Must fix).** #1 game-login password check and #2 item merge honours
-pileability — both fixed and validated in this file. Full workspace: fmt/clippy
-clean, `cargo test --workspace` 462 passed / 0 failures. Changes are uncommitted.
+**All Must fix and Should fix items are closed and committed; the tree is clean.**
+Full workspace: `cargo fmt --check` and
+`cargo clippy --workspace --all-targets -- -D warnings` clean,
+`cargo test --workspace` 0 failures.
 
-**Remaining — Should fix (from the same 2026-10-10 audit, unstarted):**
+**Must fix (2026-10-10) — done.**
+
+- #1 game-login password check.
+- #2 item merge honours pileability.
+
+**Should fix (2026-10-10 audit) — done.**
 
 - **Drop-slot race condition.** Fixed 2026-10-11: `world_items` now has a
   UNIQUE `(map_id, x, y)` index (`sql/0010_world_items_cell_unique.sql`, which
@@ -212,14 +222,19 @@ clean, `cargo test --workspace` 462 passed / 0 failures. Changes are uncommitted
   legacy-style per-tile 'dead cell' flag left to clear. Residual: arbitration is
   per-INSERT, so two concurrent drops can still land on different cells of the
   same box — that is the legacy's own behaviour.
-- **`create_character` is not transactional.** Confirmed open: it inserts the
-  `characters` row and the `character_stats` row as two separate statements on the
-  pool (`gz-db/src/character.rs`); a failure between them orphans a character
-  without stats. Wrap both in one transaction.
-- **Slot bound validation.** The repository layer already bounds-checks
-  move/split/drop/set-items against `MAX_ITEM_PER_PERSON` and select-char against
-  `CHAR_SLOTS`. Re-derive the audit's exact surface (e.g. the pickup destination
-  slot) before closing the item — the obvious ones are covered.
+- **`create_character` is not transactional.** Fixed 2026-10-11:
+  `Repository::create_character` (`gz-db/src/character.rs`) now inserts the
+  `characters` row and the `character_stats` row inside one transaction
+  (`pool.begin()` … `tx.commit()`); a failure between them can no longer orphan a
+  character without stats.
+- **Slot bound validation.** Fixed 2026-10-11: the repository layer already
+  bounded move/split/drop/set-items against `MAX_ITEM_PER_PERSON` and select-char
+  against `CHAR_SLOTS`; the outstanding surface, make-new-char, now rejects any
+  slot outside `0..CHAR_SLOTS` via `admit_make_new_char_slot`
+  (`services/game/src/auth.rs`), closing a crafted `slot >= CHAR_SLOTS` that
+  would otherwise write an invisible, unloseable row.
+  `services/game/src/tests.rs::make_new_char_rejects_slots_at_or_above_the_roster_bound`
+  covers the boundary.
 - **DB credentials in config.** Fixed 2026-10-11: no password is committed any
   more. `DEFAULT_DATABASE_URL` (`services/game/src/config.rs`), the front
   fallback (`services/front/src/main.rs`) and the auth-service fallback
@@ -229,5 +244,6 @@ clean, `cargo test --workspace` 462 passed / 0 failures. Changes are uncommitted
   gitignored `scripts/dev-db.ps1` on this dev box. Plan §9 (OS keychain) is not
   implemented — credentials live in a gitignored local file instead.
 
-**Nice to have.** The audit's cleanup items (not yet carded here), plus the
-`scripts/` pileability generator from remark 3.
+**Nice to have.** The pileability table generator is committed
+(`scripts/generate-pileable-table.ps1`, remark 3). The audit's remaining cleanup
+items are not carded here.

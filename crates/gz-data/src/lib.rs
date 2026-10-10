@@ -21,8 +21,9 @@
 //! English `Item/Data/ItemType*E.txt` files whose type lacks `ITEMATB_OBJECT`:
 //! HEAL, FOOD, BOOK, MINERAL, ANIMAL, TREE, CLOTH, SEAFOOD, ETC, SCROLL, DOLL,
 //! TICKET, EVENTITEM, QUEST, BOX, PREMIUM and COMPOSITIONMATERIAL. Regenerate it
-//! whenever the GameServer item data changes; a unique that is not listed is not
-//! pileable, matching the legacy's type-0 result.
+//! with `scripts/generate-pileable-table.ps1` whenever the GameServer item data
+//! changes (`-Check` verifies the committed table); a unique that is not listed
+//! is not pileable, matching the legacy's type-0 result.
 //!
 //! Two edge cases are baked into the table:
 //! - CRYSTAL stays non-pileable: its type carries `ITEMATB_OBJECT` when
