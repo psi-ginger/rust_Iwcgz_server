@@ -198,13 +198,17 @@ clean, `cargo test --workspace` 462 passed / 0 failures. Changes are uncommitted
 
 **Remaining — Should fix (from the same 2026-10-10 audit, unstarted):**
 
-- **Drop-slot race condition.** Confirmed open in the current code:
-  `world_items` has only an index on `(map_id, x, y)`
-  (`sql/0004_world_items.sql:48`), no `UNIQUE` constraint, and `drop_slot`
-  (`gz-db/src/item.rs`) does `SELECT NOT EXISTS(...)` then `INSERT` — two
-  concurrent drops to one cell can both pass. The client renders one item per
-  cell, so the loser is invisible and unpickable. Fix: unique constraint on the
-  cell plus `INSERT ... ON CONFLICT` (or `SELECT ... FOR UPDATE`).
+- **Drop-slot race condition.** Fixed 2026-10-11: `world_items` now has a
+  UNIQUE `(map_id, x, y)` index (`sql/0010_world_items_cell_unique.sql`, which
+  also dedupes the rows a used dev world already accumulated), and `drop_slot`
+  no longer check-then-inserts — it tries each candidate cell with
+  `INSERT ... ON CONFLICT (map_id, x, y) DO NOTHING` and moves to the next
+  neighbour when a concurrent drop won the cell (requested cell first, then the
+  legacy's nearest-first order). Two concurrent drops can no longer both land
+  on one cell; `GroundBlocked` is now only reached when the cell and all eight
+  neighbours are genuinely taken. Residual: the lock on the whole 9-cell
+  neighbourhood is per-INSERT, so two drops may still land next to each other —
+  that is the legacy's own behaviour.
 - **`create_character` is not transactional.** Confirmed open: it inserts the
   `characters` row and the `character_stats` row as two separate statements on the
   pool (`gz-db/src/character.rs`); a failure between them orphans a character

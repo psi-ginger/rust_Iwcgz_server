@@ -549,6 +549,17 @@ fn neighbor_cells(x: i32, y: i32) -> impl Iterator<Item = (i32, i32)> {
         .filter(|(nx, ny)| *nx >= 0 && *ny >= 0)
 }
 
+/// The cells a drop tries, requested cell first then its eight neighbours, so
+/// an empty target cell always wins and a crowded neighbourhood resolves in the
+/// legacy's nearest-first order (`FindProperAreaForDrop`, `MapManager.cpp:999`).
+fn drop_candidates(at: DropLocation) -> impl Iterator<Item = DropLocation> {
+    std::iter::once(at).chain(neighbor_cells(at.x, at.y).map(move |(x, y)| DropLocation {
+        map_id: at.map_id,
+        x,
+        y,
+    }))
+}
+
 /// Finds the lowest free carry slot inside an open transaction.
 ///
 /// "Free" means no row, or a row whose unique is zero. The table only ever holds
@@ -1012,80 +1023,61 @@ impl ItemRepository for PgItemRepository {
         // dropped onto an occupied cell renders nowhere and cannot be picked
         // up: it is lost. Mirror the legacy's recovery by landing on a free
         // neighbouring cell instead; without this the item is destroyed.
-        let target = {
-            let requested_free: bool = sqlx::query_scalar(
-                "SELECT NOT EXISTS(SELECT 1 FROM world_items \
-                 WHERE map_id = $1 AND x = $2 AND y = $3)",
-            )
-            .bind(at.map_id)
-            .bind(at.x)
-            .bind(at.y)
-            .fetch_one(&mut *tx)
-            .await?;
-            if requested_free {
-                at
-            } else {
-                let mut resolved = None;
-                for (nx, ny) in neighbor_cells(at.x, at.y) {
-                    let free: bool = sqlx::query_scalar(
-                        "SELECT NOT EXISTS(SELECT 1 FROM world_items \
-                         WHERE map_id = $1 AND x = $2 AND y = $3)",
-                    )
-                    .bind(at.map_id)
-                    .bind(nx)
-                    .bind(ny)
-                    .fetch_one(&mut *tx)
-                    .await?;
-                    if free {
-                        resolved = Some(DropLocation {
-                            map_id: at.map_id,
-                            x: nx,
-                            y: ny,
-                        });
-                        break;
-                    }
-                }
-                match resolved {
-                    Some(spot) => spot,
-                    None => {
-                        tx.rollback().await?;
-                        return Ok(DropOutcome {
-                            status: DropStatus::GroundBlocked { x: at.x, y: at.y },
-                            current: stored,
-                            dropped: None,
-                            grounded: None,
-                        });
-                    }
+        //
+        // The cell is chosen by the INSERT itself, not by a prior read:
+        // `world_items (map_id, x, y)` is UNIQUE (sql/0010) and every attempt is
+        // `ON CONFLICT DO NOTHING`, so a cell a concurrent drop just took simply
+        // yields the next candidate. There is no check-then-insert window left
+        // for two drops to race into the same cell.
+        let mut target = at;
+        let mut obj_index = None;
+        // A zero count would violate `world_items.count > 0`; the legacy guards
+        // the same case by sending `clChangedItem` only when both fields are
+        // non-zero (`ServerDB-Item.cpp:2810`).
+        if requested > 0 {
+            let mut landed: Option<(DropLocation, i32)> = None;
+            for spot in drop_candidates(at) {
+                let inserted: Option<i32> = sqlx::query_scalar(
+                    "INSERT INTO world_items \
+                     (item_unique, count, raw, map_id, x, y, dropped_by, obj_index) \
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, nextval('world_items_obj_index_seq')) \
+                     ON CONFLICT (map_id, x, y) DO NOTHING \
+                     RETURNING obj_index",
+                )
+                .bind(i32::from(stored_unique))
+                .bind(i32::from(requested))
+                .bind(dropped.encode())
+                .bind(spot.map_id)
+                .bind(spot.x)
+                .bind(spot.y)
+                .bind(character_id)
+                .fetch_optional(&mut *tx)
+                .await?;
+                if let Some(list_index) = inserted {
+                    landed = Some((spot, list_index));
+                    break;
                 }
             }
-        };
-
-        // A zero count would violate `world_items.count > 0`; the legacy guards the
-        // same case by sending `clChangedItem` only when both fields are non-zero
-        // (`ServerDB-Item.cpp:2810`).
-        let mut obj_index = None;
-        if requested > 0 {
-            let handle: i32 = sqlx::query_scalar(
-                "INSERT INTO world_items \
-                 (item_unique, count, raw, map_id, x, y, dropped_by, obj_index) \
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, nextval('world_items_obj_index_seq')) \
-                 RETURNING obj_index",
-            )
-            .bind(i32::from(stored_unique))
-            .bind(i32::from(requested))
-            .bind(dropped.encode())
-            .bind(target.map_id)
-            .bind(target.x)
-            .bind(target.y)
-            .bind(character_id)
-            .fetch_one(&mut *tx)
-            .await?;
-            obj_index = Some(u16::try_from(handle).map_err(|_| {
-                RepositoryError::Invalid(format!(
-                    "ground item handle {handle} does not fit the UI16 that \
-                     GAMEMSG_RESPONSE_ITEMDROP carries"
-                ))
-            })?);
+            match landed {
+                Some((spot, list_index)) => {
+                    target = spot;
+                    obj_index = Some(u16::try_from(list_index).map_err(|_| {
+                        RepositoryError::Invalid(format!(
+                            "ground item handle {list_index} does not fit the UI16 that \
+                             GAMEMSG_RESPONSE_ITEMDROP carries"
+                        ))
+                    })?);
+                }
+                None => {
+                    tx.rollback().await?;
+                    return Ok(DropOutcome {
+                        status: DropStatus::GroundBlocked { x: at.x, y: at.y },
+                        current: stored,
+                        dropped: None,
+                        grounded: None,
+                    });
+                }
+            }
         }
 
         // `GAMEMSG_RESPONSE_ITEMDROP` names the cell in signed 16-bit words, and the
@@ -1309,7 +1301,7 @@ impl ItemRepository for PgItemRepository {
 
 #[cfg(test)]
 mod tests {
-    use super::{carry_slots, stackable};
+    use super::{DropLocation, carry_slots, drop_candidates, stackable};
     use gz_proto::item::personitem::*;
 
     /// A pickup may land anywhere the character carries, but never in equipment:
@@ -1354,6 +1346,39 @@ mod tests {
         sorted.sort_unstable();
         assert_eq!(slots, sorted);
         assert_eq!(slots[0], INV0);
+    }
+
+    /// A drop lands on the requested cell whenever that cell is free, and falls
+    /// back to neighbours otherwise — in the legacy's nearest-first order
+    /// (orthogonals before diagonals, matching `FindProperAreaForDrop`'s
+    /// Chebyshev preference at `MapManager.cpp:999`). `drop_slot`'s insert loop
+    /// tries exactly this sequence, so pinning it keeps the recovery stable.
+    #[test]
+    fn drop_candidates_try_the_requested_cell_before_any_neighbour() {
+        let at = DropLocation {
+            map_id: 7,
+            x: 100,
+            y: 100,
+        };
+        let cells: Vec<DropLocation> = drop_candidates(at).collect();
+
+        assert_eq!(cells[0], at, "the empty requested cell must win");
+        assert_eq!(cells.len(), 9, "requested cell plus its eight neighbours");
+
+        let rest = &cells[1..];
+        // Every neighbour appears exactly once.
+        let mut distinct = rest.to_vec();
+        distinct.sort_unstable_by_key(|c| (c.x, c.y));
+        distinct.dedup();
+        assert_eq!(distinct.len(), 8);
+
+        // Orthogonal neighbours (step 1) come before diagonals (step 2).
+        let is_diagonal = |c: &DropLocation| (c.x - at.x).abs() == 1 && (c.y - at.y).abs() == 1;
+        assert!(rest[..4].iter().all(|c| !is_diagonal(c)));
+        assert!(rest[4..].iter().all(is_diagonal));
+
+        // The map travels with every candidate.
+        assert!(cells.iter().all(|c| c.map_id == at.map_id));
     }
 
     /// Non-pileable items (equipment: weapons, armour, accessories) never merge,
