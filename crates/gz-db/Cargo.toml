@@ -17,3 +17,6 @@ sha2 = "0.10"
 # `character_items` schema mirrors the client's 80-entry array, so the two must
 # not be able to drift.
 gz-proto = { path = "../gz-proto" }
+# Item pileability (`cltItem::CanPile`) decides whether same-item slots merge or
+# swap; the per-unique answer ships with the item metadata.
+gz-data = { path = "../gz-data" }

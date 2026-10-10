@@ -486,6 +486,18 @@ async fn write_slot(
 /// this and leaves the overflow in the source slot.
 const MAX_PILE: i32 = 30000;
 
+/// Whether two slots holding the same `siUnique` merge into one stack.
+///
+/// The legacy merges only when the item is pileable: `cltItem::CanPile`
+/// (`ItemUnit.cpp:1458`) is false when the item's type carries `ITEMATB_OBJECT`,
+/// which is every weapon, armour piece and accessory (the `ITEMATB_OBJECT` types
+/// in `cltItemManagerCommon::SetItemType`, `cltItem-SetItemData.Cpp`).
+/// `gz_data::is_pileable` carries the resulting per-unique answer, so equipment
+/// in any slot -- equipped or in a bag -- does not stack.
+fn stackable(item_unique: i32) -> bool {
+    u16::try_from(item_unique).is_ok_and(gz_data::is_pileable)
+}
+
 /// Clears one slot inside an open transaction.
 async fn clear_slot(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
@@ -661,11 +673,15 @@ impl ItemRepository for PgItemRepository {
         }
 
         let outcome = match read_slot(&mut tx, character_id, to).await? {
-            // Two stacks of the same item merge into the destination, which is
-            // what the client's own drag handler does locally. The sum is capped
-            // at `MAX_PILE`, like the pickup stacking path; the overflow stays
-            // in the source slot instead of being dropped.
-            Some((dst_unique, dst_count, dst_raw)) if dst_unique == src_unique => {
+            // Two stacks of the same pileable item merge into the destination,
+            // which is what the client's own drag handler does locally. The sum
+            // is capped at `MAX_PILE`, like the pickup stacking path; the
+            // overflow stays in the source slot instead of being dropped.
+            // Equipment does not stack, so a same-unique move of it falls
+            // through to the swap arm below.
+            Some((dst_unique, dst_count, dst_raw))
+                if dst_unique == src_unique && stackable(dst_unique) =>
+            {
                 let src_item = Item::decode(&src_raw).map_err(|e| {
                     RepositoryError::Invalid(format!("stored record for slot {from}: {e}"))
                 })?;
@@ -809,7 +825,9 @@ impl ItemRepository for PgItemRepository {
         let outcome = match dest_slot {
             Some((dst_unique, dst_count, dst_raw)) => {
                 let dst_unique = u16::try_from(dst_unique).unwrap_or(0);
-                if dst_unique != u16::try_from(src_unique).unwrap_or(0) {
+                // Same item, but a non-pileable item (equipment) cannot be
+                // merged either: refuse rather than pile two swords.
+                if dst_unique != u16::try_from(src_unique).unwrap_or(0) || !stackable(src_unique) {
                     tx.rollback().await?;
                     return Ok(SplitOutcome {
                         status: SplitStatus::DestinationMismatch {
@@ -1183,13 +1201,20 @@ impl ItemRepository for PgItemRepository {
     .fetch_all(&mut *tx)
     .await?;
             let mut merge_target: Option<(u16, i32)> = None;
-            for (slot, c, _raw) in &candidates {
-                let c = *c;
-                if c > 0 && c < MAX_PILE {
-                    let newc = c + count;
-                    if newc <= MAX_PILE {
-                        merge_target = Some((u16::try_from(*slot).unwrap_or(0), newc));
-                        break;
+            // Only pileable items stack into an existing slot. Equipment -- even
+            // a duplicate of an equipped item -- goes to a free carry slot,
+            // exactly as the legacy `CanAddInv` (which piles only
+            // `if(pileswitch)`, `ItemPerson.cpp:315`) would place it.
+            if stackable(item_unique) {
+                for (slot, c, _raw) in &candidates {
+                    let slot = u16::try_from(*slot).unwrap_or(0);
+                    let c = *c;
+                    if c > 0 && c < MAX_PILE {
+                        let newc = c + count;
+                        if newc <= MAX_PILE {
+                            merge_target = Some((slot, newc));
+                            break;
+                        }
                     }
                 }
             }
@@ -1284,7 +1309,7 @@ impl ItemRepository for PgItemRepository {
 
 #[cfg(test)]
 mod tests {
-    use super::carry_slots;
+    use super::{carry_slots, stackable};
     use gz_proto::item::personitem::*;
 
     /// A pickup may land anywhere the character carries, but never in equipment:
@@ -1329,5 +1354,23 @@ mod tests {
         sorted.sort_unstable();
         assert_eq!(slots, sorted);
         assert_eq!(slots[0], INV0);
+    }
+
+    /// Non-pileable items (equipment: weapons, armour, accessories) never merge,
+    /// no matter which container they sit in. `stackable` is false for them, so
+    /// a same-unique move swaps and a pickup lands in a free carry slot instead
+    /// of piling two e.g. rings on top of each other.
+    #[test]
+    fn equipment_never_stacks_even_inside_bag_slots() {
+        // Equipment does not stack, whether equipped or in a bag.
+        assert!(!stackable(1)); // a sword
+        assert!(!stackable(600)); // armour
+        assert!(!stackable(7500)); // a ring
+        // Pileable consumables and materials still merge.
+        assert!(stackable(2000)); // a heal item
+        assert!(stackable(4000)); // a book
+        // Unknown uniques are not pileable, like the legacy's type-0 result.
+        assert!(!stackable(0));
+        assert!(!stackable(i32::from(u16::MAX)));
     }
 }

@@ -20,3 +20,8 @@ tools/lzf-oracle/build/
 # T-014 combat simulator: Python bytecode cache is a build artifact.
 __pycache__/
 *.pyc
+
+# Local backups from manual edits (src.rar, *.bak, *.pre-*).
+*.rar
+*.bak
+*.pre-*

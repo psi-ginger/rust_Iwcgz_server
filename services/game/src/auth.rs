@@ -5,7 +5,7 @@
 use gz_cipher::Cipher;
 use gz_db::{
     AccountRepository, CharacterFull, CharacterRepository, PgAccountRepository,
-    PgCharacterRepository, RepositoryError,
+    PgCharacterRepository, RepositoryError, password,
 };
 use gz_proto::game::{
     CharListEntry, GameLogin, MakeCharInfo, client_map_index, decode_make_new_char,
@@ -101,6 +101,43 @@ pub(crate) async fn send_char_list(
     Ok(occupied)
 }
 
+/// The admission decision for `GAMEMSG_REQUEST_LOGIN` (opcode 1).
+///
+/// Kept separate from the repository read so it can be tested without a
+/// database. Two independent checks, both required:
+///
+/// * `auth_key` must equal the account's own idnum. The front hands the
+///   account id out as the key, so a mismatch is a stale or replayed key.
+/// * the password carried in the packet must verify against the stored hash.
+///   The client is told the game address by the front and connects directly,
+///   so without this check any client could name a userid and its guessable
+///   `SERIAL` account id and enter without ever passing the front's login.
+///   The legacy validates the same pair through the auth server
+///   (`Server-Login.cpp:82` forwards `siAuthKey` and `szPassword`).
+///
+/// # Errors
+///
+/// Names which of the two checks failed, for the log.
+pub(crate) fn admit_game_login(
+    account_id: i32,
+    password_hash: &str,
+    login: &GameLogin,
+) -> Result<(), String> {
+    if account_id != login.auth_key {
+        return Err(format!(
+            "game login auth key {} does not match account {account_id}",
+            login.auth_key
+        ));
+    }
+    if !password::verify_password(password_hash, &login.password) {
+        return Err(format!(
+            "game login for {:?}: password does not match",
+            login.userid
+        ));
+    }
+    Ok(())
+}
+
 /// S9–S11: verify the game login and answer with one char-list packet per slot.
 pub(crate) async fn handle_game_login(
     stream: &mut TcpStream,
@@ -109,8 +146,9 @@ pub(crate) async fn handle_game_login(
     characters: &PgCharacterRepository,
     login: &GameLogin,
 ) -> Result<GameSession, AnyError> {
-    // The auth key is the account idnum the front handed out at login; a
-    // mismatch means a stale or replayed key, so refuse rather than guess.
+    // The auth key is the account idnum the front handed out at login, and the
+    // password must match the stored hash. A mismatch on either means a stale,
+    // replayed or forged login, so refuse rather than guess.
     let account = match accounts.find_by_username(&login.userid).await {
         Ok(account) => account,
         Err(RepositoryError::NotFound) => {
@@ -118,13 +156,7 @@ pub(crate) async fn handle_game_login(
         }
         Err(e) => return Err(e.into()),
     };
-    if account.account_id != login.auth_key {
-        return Err(format!(
-            "game login auth key {} does not match account {}",
-            login.auth_key, account.account_id
-        )
-        .into());
-    }
+    admit_game_login(account.account_id, &account.password_hash, login).map_err(AnyError::from)?;
 
     let occupied = send_char_list(
         stream,

@@ -62,13 +62,13 @@ use config::GameConfig;
 use registry::{Outbound, Registered, Registry, SessionInfo};
 
 // The auth/character-lifecycle family lives in `auth.rs`. The dispatcher calls
-// the login/selectchar/make-new-char/delete handlers; `send_char_list` and
-// `admit_select_char` are reached from the `mod tests` below through
-// `super::*`, hence the allow.
+// the login/selectchar/make-new-char/delete handlers; `send_char_list`,
+// `admit_select_char` and `admit_game_login` are reached from the `mod tests`
+// below through `super::*`, hence the allow.
 #[allow(unused_imports)]
 pub(crate) use auth::{
-    admit_select_char, handle_game_login, handle_make_new_char, handle_select_char,
-    handle_userchar_deletion, send_char_list,
+    admit_game_login, admit_select_char, handle_game_login, handle_make_new_char,
+    handle_select_char, handle_userchar_deletion, send_char_list,
 };
 
 // The chat family lives in `chat.rs`; the crate root re-exports the handlers

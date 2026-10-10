@@ -403,6 +403,7 @@ name = "gz-db"
 version = "0.0.1"
 dependencies = [
  "async-trait",
+ "gz-data",
  "gz-proto",
  "sha2",
  "sqlx",

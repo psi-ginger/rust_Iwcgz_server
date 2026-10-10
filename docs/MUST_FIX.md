@@ -1,0 +1,224 @@
+# MUST FIX
+
+Tracking for the two **Must fix** findings from the 2026-10-10 repository audit.
+These are the only two findings that either let someone in without a password or
+lose/corrupt player data. Everything else the audit listed is *Should fix* /
+*Nice to have* and is out of scope here.
+
+**Assumed load:** M1 local test cluster — 1–2 clients, PostgreSQL on localhost,
+dev-run front + game. Where a fix only bites at higher concurrency, the item says
+so.
+
+Validation command for both items:
+
+```powershell
+cargo fmt --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+```
+
+---
+
+## #1 — Game login accepted any password
+
+**Status: DONE** (2026-10-10)
+
+### Root cause
+
+`handle_game_login` (`services/game/src/auth.rs`) checked only that the packet's
+`auth_key` equalled the account's own idnum, then loaded the character list. The
+password field of the login packet was never checked. The front's own login *does*
+check the password, but the front tells the client where the game server is and the
+client connects to the game port directly — so the front's check is bypassable.
+
+### Concrete case
+
+Account `bob` has `account_id = 3` (`accounts.account_id` is a `SERIAL`, so ids are
+small, sequential and guessable). A client sends a game login with
+`userid = "bob"`, `auth_key = 3`, and *any* password. Before the fix that entered
+bob's account without ever passing the front's login.
+
+### Affected file
+
+- `services/game/src/auth.rs` — `handle_game_login`.
+
+### Fix
+
+New pure function `admit_game_login(account_id, password_hash, login)` in
+`auth.rs` checks **both** the key (`account_id == login.auth_key`) and the password
+(`gz_db::password::verify_password(stored, login.password)`); `handle_game_login`
+calls it and refuses on either mismatch. The decision is a pure function so it can
+be tested without a database. Legacy parity: `Server-Login.cpp:82` forwards
+`siAuthKey` **and** `szPassword` to the auth server.
+
+### Validation
+
+- `services/game/src/tests.rs::game_login_refuses_a_wrong_password` — correct
+  key + correct password is admitted; wrong password, empty password, and wrong key
+  are all refused.
+- `cargo test -p game` → 99 passed, 0 failed.
+
+---
+
+## #2 — Item merge ignored pileability
+
+**Status: DONE** (2026-10-10) — the ItemType `ITEMATB_OBJECT` attribute is ported
+into `gz-data` and all three merge decisions read it.
+
+### Root cause
+
+The move-merge (`move_slot`), the split-merge (`split_slot`) and the pickup-stack
+path merged any two slots holding the same `siUnique`, regardless of whether the
+item can actually stack. The legacy merges only when both items are *pileable*:
+`cltItem::CanPile` reads the item type's `ITEMATB_OBJECT` attribute
+(`ItemUnit.cpp:1458`), and the pickup path stacks only `if(pileswitch)`
+(`ItemPerson.cpp:315`). The server had no item-type attribute table to consult —
+`gz-data` was an empty stub.
+
+### Concrete cases
+
+1. A player has a weapon equipped and picks up a second, identical weapon. The
+   pickup candidate query matched the item in the *equipment* slot and merged the
+   ground copy into it, leaving the equipped weapon with count 2. Legacy
+   `CanAddInv` searches only the carry range, so the copy would have gone to a free
+   bag slot.
+2. A hostile client sends an `itemmove` of an equipped item onto a carry slot
+   holding the same unique. The server merged instead of swapping. The real client
+   never sends this (its drag handler refuses a non-pileable destination), so this
+   is hardening.
+3. A non-pileable item stored in a **bag** slot (a ring off the hand, say) is
+   merged by unique when picked onto another copy, because the slot alone cannot
+   say the item is equipment.
+
+### Affected files
+
+- `crates/gz-data/src/lib.rs` — new: the pileability table and `is_pileable`.
+- `crates/gz-db/src/item.rs` — `move_slot`, `split_slot`, the pickup-stack
+  candidate loop, driven by `stackable`.
+- `crates/gz-db/Cargo.toml` — depends on `gz-data`.
+
+### Fix
+
+**Pileability data (`gz-data`).** An item's type is fixed by the data file it is
+loaded from (`cltItemManagerCommon::SetItemData`, `cltItem-SetItemData.Cpp`), and
+the `ITEMATB_OBJECT` flag per type is the hard-coded table in
+`cltItemManagerCommon::SetItemType` in the same file. `gz-data` ships the resulting
+per-unique answer as a sorted table `PILEABLE: &[u16]` (1828 uniques) plus a pure
+`is_pileable(unique)`. The table is generated from the deployed English
+`Item/Data/ItemType*E.txt` files whose type lacks `ITEMATB_OBJECT` (HEAL, FOOD,
+BOOK, MINERAL, ANIMAL, TREE, CLOTH, SEAFOOD, ETC, SCROLL, DOLL, TICKET, EVENTITEM,
+QUEST, BOX, PREMIUM, COMPOSITIONMATERIAL), first column, deduplicated and sorted;
+the generation recipe is in the module docs. A unique that is **not** listed is not
+pileable, matching the legacy's type-0 result (`FindItemRefFromUnique` finds no
+type → `CanPile` false). The pileable and object-flagged non-pileable sets were
+verified non-overlapping.
+
+Two edge cases are baked in and documented in the `gz-data` module docs: CRYSTAL is
+kept non-pileable (its type carries `ITEMATB_OBJECT` with `Switch_Artifact` off,
+the default branch of `SetItemType`), and files the English `SetItemData` does not
+load (e.g. `ItemBoxE`, `SoulGuardE`) leave their uniques at type 0, i.e.
+non-pileable.
+
+**Wiring (`item.rs`).** The earlier `slot_is_equipment`/`merge_allowed` heuristic
+was replaced by a single `stackable(item_unique)` that consults `is_pileable`, so
+the slot an item sits in is irrelevant — equipment never stacks in *any* container:
+
+- `move_slot`'s same-unique merge arm is guarded by `stackable(dst_unique)`; a
+  non-pileable same-unique move falls through to the existing swap arm.
+- `split_slot` refuses (`DestinationMismatch`) a same-unique merge of a
+  non-pileable item, closing the pre-fix case of a count-2 equipment stack.
+- The pickup candidate loop only merges when `stackable(item_unique)`; a
+  non-pileable ground item goes to a free carry slot instead.
+
+### Validation
+
+- `crates/gz-data/src/lib.rs::tests` — the table is sorted for the binary search;
+  the first item of every pileable category (including BOX, PREMIUM,
+  COMPOSITIONMATERIAL) is in the table; weapons/armour/accessories are not; unknown
+  uniques are not (legacy type-0 result).
+- `crates/gz-db/src/item.rs::tests::equipment_never_stacks_even_inside_bag_slots`
+  — same assertions through the `stackable` boundary that all three merge
+  decisions share.
+- `cargo test --workspace` → 0 failures (game 99, gz-db 11, gz-data 2, rest 0).
+- `cargo clippy --workspace --all-targets -- -D warnings` and
+  `cargo fmt --check` → clean.
+
+**Residual note:** the panic/swap-vs-stack behaviour is verified at the
+decision boundary (`stackable`/`is_pileable`) because `gz-db` has no DB test
+harness; the swap / free-slot fall-through paths themselves are existing code. The
+table is generated from the deployed GameServer data and must be regenerated when
+that data changes (recipe documented in the `gz-data` module docs).
+
+---
+
+## Scrutiny follow-up (2026-10-10, post-DONE review)
+
+An outsider review of the #2 fix caught one real omission and recorded three
+residual risks. Status after the review:
+
+1. **Resolution — missing pileable categories (BOX, PREMIUM,
+   COMPOSITIONMATERIAL).** The first version of the table was generated from the
+   Korea branch's loader list plus the deployed filenames, which silently dropped
+   the three categories the **English** branch of `SetItemData` also loads —
+   `AddBox`/`AddPremium`/`AddCompositionManterial` at
+   `cltItem-SetItemData.Cpp:738/741/732` — even though their types all lack
+   `ITEMATB_OBJECT`. That made ~709 uniques (466 boxes + 218 premium + 25
+   composition materials) non-pileable where the legacy merges them — most visibly,
+   boxes would no longer stack. The table is regenerated to **1,828** uniques, the
+   pileable and object-flagged sets are still disjoint, and the per-category
+   first-item test (`consumables_materials_and_boxes_stack_but_equipment_does_not`)
+   asserts every one of the 17 pileable categories, so this class of miss now fails
+   a test.
+2. **Remark — CRYSTAL pileability is switch-dependent.** `SetItemType` gives
+   `ITEMTYPE_CRYSTAL` `ITEMATB_OBJECT` only with `Switch_Artifact` **off** (the
+   default `else` branch; `cltItem-SetItemData.Cpp:98-119`). The table hardcodes
+   that default. If a future deployment runs with artifacts on, crystals would stop
+   stacking — a functional-only regression (refusing to stack never corrupts data).
+   Documented in the module docs; a config knob is deferred until an
+   artifact-enabled deployment exists.
+3. **Remark — the table generator is documented, not committed.** The module docs
+   describe the recipe (union of the first column of the pileable English `*E.txt`
+   files, dedup, sort), but the PowerShell that produced the table is not checked
+   in. When the GameServer item data changes the table must be regenerated from the
+   recipe, and the failure mode of a missed regenerate is a silent no-stack
+   regression, not a crash. Follow-up: commit the generator under `scripts/`.
+4. **Remark — verified at the decision boundary, not against the database.** The
+   swap-vs-stack fall-through is asserted through `stackable`/`is_pileable`;
+   `gz-db` has no live-PostgreSQL harness, so no item path ran against a real DB.
+   The full `scripts/check.ps1` gate (codegen-drift + fuzz) was also skipped. Both
+   remain the standing pre-commit gap.
+
+---
+
+## Audit backlog status (2026-10-10)
+
+**Done (Must fix).** #1 game-login password check and #2 item merge honours
+pileability — both fixed and validated in this file. Full workspace: fmt/clippy
+clean, `cargo test --workspace` 462 passed / 0 failures. Changes are uncommitted.
+
+**Remaining — Should fix (from the same 2026-10-10 audit, unstarted):**
+
+- **Drop-slot race condition.** Confirmed open in the current code:
+  `world_items` has only an index on `(map_id, x, y)`
+  (`sql/0004_world_items.sql:48`), no `UNIQUE` constraint, and `drop_slot`
+  (`gz-db/src/item.rs`) does `SELECT NOT EXISTS(...)` then `INSERT` — two
+  concurrent drops to one cell can both pass. The client renders one item per
+  cell, so the loser is invisible and unpickable. Fix: unique constraint on the
+  cell plus `INSERT ... ON CONFLICT` (or `SELECT ... FOR UPDATE`).
+- **`create_character` is not transactional.** Confirmed open: it inserts the
+  `characters` row and the `character_stats` row as two separate statements on the
+  pool (`gz-db/src/character.rs`); a failure between them orphans a character
+  without stats. Wrap both in one transaction.
+- **Slot bound validation.** The repository layer already bounds-checks
+  move/split/drop/set-items against `MAX_ITEM_PER_PERSON` and select-char against
+  `CHAR_SLOTS`. Re-derive the audit's exact surface (e.g. the pickup destination
+  slot) before closing the item — the obvious ones are covered.
+- **DB credentials in config.** Confirmed open: `DEFAULT_DATABASE_URL`
+  (`services/game/src/config.rs`) and the auth-service fallback
+  (`services/auth/src/main.rs`) embed a connection string with a password in
+  source; Plan §9 (OS keychain) is not implemented. Both are read-only defaults —
+  the services run against whatever `DATABASE_URL` says — so the exposure is to
+  anyone who can read the source, not a runtime leak.
+
+**Nice to have.** The audit's cleanup items (not yet carded here), plus the
+`scripts/` pileability generator from remark 3.

@@ -2,9 +2,9 @@ use super::*;
 use crate::registry::SessionKey;
 use gz_db::CharacterFull;
 use gz_proto::game::{
-    MakeCharInfo, encode_all_char_info_one, encode_all_char_info_two, encode_change_horse,
-    encode_family_update, encode_get_village_info, encode_login_many_batches, encode_person_horse,
-    encode_response_name, encode_skillbook_magic_info,
+    GameLogin, MakeCharInfo, encode_all_char_info_one, encode_all_char_info_two,
+    encode_change_horse, encode_family_update, encode_get_village_info, encode_login_many_batches,
+    encode_person_horse, encode_response_name, encode_skillbook_magic_info,
 };
 use gz_proto::item::{Item, encode_person_item_info};
 use gz_proto::order::BasicCharUpdate;
@@ -42,6 +42,30 @@ fn selectchar_no_ops_the_same_slot_and_switches_a_different_one() {
     assert!(admit_select_char(Some(1), 2));
     // Out-of-range slots never reach the predicate; `handle_select_char`
     // rejects them.
+}
+
+/// The 2026-10-10 audit's must-fix #1: the game login checked only that
+/// `auth_key` equalled the account idnum and **ignored the password**, so any
+/// client that knew (or guessed) an account's `SERIAL` id could enter as that
+/// account without passing the front's login. The packet's password is
+/// verified against the stored hash now.
+#[test]
+fn game_login_refuses_a_wrong_password() {
+    let hash = gz_db::password::hash_password("secret");
+    let login = |key: i32, password: &str| GameLogin {
+        auth_key: key,
+        userid: "bob".to_owned(),
+        password: password.to_owned(),
+        game_mode: 0,
+    };
+
+    // Correct key and correct password: admitted.
+    assert!(admit_game_login(7, &hash, &login(7, "secret")).is_ok());
+    // Correct key, wrong password: refused. (The bug: this used to succeed.)
+    assert!(admit_game_login(7, &hash, &login(7, "guess")).is_err());
+    assert!(admit_game_login(7, &hash, &login(7, "")).is_err());
+    // Wrong key, correct password: refused.
+    assert!(admit_game_login(7, &hash, &login(8, "secret")).is_err());
 }
 
 /// A fully-populated row for the allocation tests. Level 13 with abilities
