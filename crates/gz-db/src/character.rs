@@ -447,6 +447,8 @@ impl CharacterRepository for PgCharacterRepository {
         gender: i16,
         slot: i16,
     ) -> Result<i32, RepositoryError> {
+        let mut tx = self.pool.begin().await?;
+
         let character_id: i32 = sqlx::query_scalar(
             "INSERT INTO characters \
              (account_id, slot, name, class_kind, gender, map_id, pos_x, pos_y) \
@@ -465,14 +467,19 @@ impl CharacterRepository for PgCharacterRepository {
         .bind(PALACE_MAP_INDEX)
         .bind(PALACE_SPAWN_X)
         .bind(PALACE_SPAWN_Y)
-        .fetch_one(&self.pool)
+        .fetch_one(&mut *tx)
         .await?;
 
+        // One transaction, matching the legacy's "create the person aggregate"
+        // intent (`rsp_PersonInfoCreate` + `rsp_IPCreate`): if the stats row
+        // fails, rollback so the character never occupies its (account_id, slot)
+        // without being listable.
         sqlx::query("INSERT INTO character_stats (character_id) VALUES ($1)")
             .bind(character_id)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await?;
 
+        tx.commit().await?;
         Ok(character_id)
     }
 
