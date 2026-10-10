@@ -31,22 +31,34 @@ const MOVE_PERCENT_COST: i32 = 100;
 /// `CHAR_ACTION_INTERVAL_FRAME` is 6 at `Char-Common.h`).
 const MOVE_DELAY_CAP_MS: u32 = 350;
 
-/// Computes the exact `Instant` when the next movement step will be ready,
-/// matching the legacy's per-frame accumulation exactly.
+/// The exact `Instant` when the next movement step will be ready.
 ///
-/// The legacy computes `movedlength = movespeed * elapsed_ms / 50` per frame
-/// (capped at 350ms), adds it to `siMovePercent`, and steps when >= 50.
-/// We replicate this by computing the exact `Instant` when the accumulator
-/// will reach 50, rather than polling on a fixed interval. This avoids the
-/// integer-division truncation error that made a 10ms tick run at ~500ms/step
-/// instead of ~417ms at speed 12.
-pub(crate) fn next_move_deadline(movement: &Movement) -> Instant {
-    let needed = (MOVE_PERCENT_STEP - movement.percent).max(1) as i64;
-    let speed = movement.move_speed as i64;
-    // ms needed = ceil(needed * 50 / speed)
-    let ms_needed = (needed * 50 + speed - 1) / speed;
-    let capped = ms_needed.min(MOVE_DELAY_CAP_MS as i64).max(1) as u64;
-    Instant::now() + Duration::from_millis(capped)
+/// `now` is the caller's clock, so the deadline stays a pure function of the
+/// accumulator and the production path is testable; `main.rs` passes
+/// `Instant::now()`.
+///
+/// # Why the result sits inside [`MOVE_DELAY_CAP_MS`]
+///
+/// [`Movement::advance`] credits **at most 350 ms** of elapsed time per call —
+/// the legacy's `min((CHAR_ACTION_INTERVAL_FRAME + 1) * 50, ...)` per frame
+/// (`char-move.cpp:145`) — so a wake further out than the cap *discards* the
+/// excess instead of banking it, and the step lands late.
+///
+/// Measured 2026-10-10 with an uncapped deadline: at speed 10 the deadline
+/// armed for the full 500 ms, `advance` credited only 350 ms (70 points, not
+/// the 100 needed), so the loop re-armed for the missing 150 ms and the tile
+/// committed at **650 ms** instead of 500 ms — a 30 % slowdown, visible in
+/// `target/m1-logs/game.log` as `fanned 200` every ~650 ms. The observing
+/// client animates one single-tile order per 200 and that cycle is exactly
+/// `5000 / movespeed` ms, so any slower cadence leaves the avatar idle for
+/// the difference: **one step, a pause, repeat.**
+///
+/// Capping keeps every gap between two [`Movement::advance`] calls inside the
+/// credit window, so nothing is lost: the wake at the cap is a no-op and the
+/// follow-up wake lands on the exact legacy cadence of `5000 / movespeed` ms
+/// per tile.
+pub(crate) fn next_move_deadline(movement: &Movement, now: Instant) -> Instant {
+    now + movement.next_delay()
 }
 
 /// A move in progress, stepped the way `cltCharCommon::Move` steps it
@@ -126,9 +138,15 @@ impl Movement {
         self.pos == self.dest
     }
 
-    /// How long until the accumulator should next reach [`MOVE_PERCENT_STEP`],
-    /// capped at [`MOVE_DELAY_CAP_MS`] exactly as one legacy tick is capped.
-    #[allow(dead_code)]
+    /// How long until the accumulator should next reach [`MOVE_PERCENT_STEP`]:
+    /// `ceil(needed * 50 / movespeed)` ms, **capped at**
+    /// [`MOVE_DELAY_CAP_MS`] exactly as one legacy tick is capped
+    /// (`char-move.cpp:145`).
+    ///
+    /// The cap is load-bearing rather than cosmetic — see
+    /// [`next_move_deadline`]: `advance` credits at most that many
+    /// milliseconds per call, so the deadline must never be further out or
+    /// the difference is silently dropped and every tile lands late.
     pub(crate) fn next_delay(&self) -> Duration {
         let needed = i64::from((MOVE_PERCENT_STEP - self.percent).max(1));
         let speed = i64::from(self.move_speed).max(1);
@@ -344,6 +362,23 @@ pub(crate) async fn step_movement(
         mv.deadline = None;
         *movement = None;
     }
+    // The stepped tile is now the authoritative cell, and it has to become so
+    // *before* anything is built from the row: `announce_nearby_characters`
+    // stamps `live.character`'s position into the `LOGINMANY` record it hands
+    // to the neighbours. `handle_userorder` wrote the **destination** there
+    // when the walk was ordered, so announcing from a stale row placed the
+    // avatar at the far end of the path (or one tile behind) and the client,
+    // which deletes and re-creates on a repeat record, warped to it.
+    //
+    // A 248 resync mid-walk and a re-issued 240 have to see this tile too, not
+    // the destination the row was set to.
+    if let Some(character) = live.character.as_mut() {
+        character.pos_x = x;
+        character.pos_y = y;
+    }
+    if let Some(session) = login.as_mut() {
+        session.entry_cell = Some(DropLocation { map_id, x, y });
+    }
     // The legacy fans this frame to the 3×3 near block (`Server.cpp:1689`), so a
     // bystander's copy of this avatar steps with ours instead of standing still
     // (slice 6 B1). `update_pos` runs *before* the fan so the observer set is
@@ -379,7 +414,13 @@ pub(crate) async fn step_movement(
         // player who walks up to somebody is never told they exist: no LOGINMANY, so no
         // avatar, so the 200 fan above is discarded on arrival.
         if let Some(character) = live.character.as_ref() {
-            announce_nearby_characters(registry, session_key, character, live.char_unique)?;
+            announce_nearby_characters(
+                registry,
+                session_key,
+                character,
+                live.char_unique,
+                Some(was),
+            )?;
         }
         // ...and the mirror image, which was missing entirely until now: the people
         // who *had* us and no longer do have to be told the avatar is gone.
@@ -399,15 +440,6 @@ pub(crate) async fn step_movement(
     send_char_update(stream, outbound, live, x, y, false).await?;
     if observers > 0 {
         logln!("game: char {session_key} fanned 200 to {observers} observer(s) at ({x}, {y})");
-    }
-    // The stepped tile is now the authoritative cell: a 248 resync mid-walk and
-    // a re-issued 240 both have to see it, not the destination the row holds.
-    if let Some(character) = live.character.as_mut() {
-        character.pos_x = x;
-        character.pos_y = y;
-    }
-    if let Some(session) = login.as_mut() {
-        session.entry_cell = Some(DropLocation { map_id, x, y });
     }
     Ok(())
 }

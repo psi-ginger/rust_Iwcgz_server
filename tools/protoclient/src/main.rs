@@ -468,13 +468,31 @@ async fn probe_observer_fan(
     // character appear to somebody who walks up to them (`m_pNewCell`,
     // `ServerMap.cpp:73-150`).
     if !observer.is_near(mover.spawn_x, mover.spawn_y) {
+        // Measured before `send_move`, which re-seats these fields on the
+        // destination — computing it afterwards always yields zero.
+        let tiles = (mover.spawn_x - observer.spawn_x)
+            .abs()
+            .max((mover.spawn_y - observer.spawn_y).abs());
         println!(
-            "probe: observer at ({}, {}) is not in the mover's near block; walking it to ({}, {})",
+            "probe: observer at ({}, {}) is not in the mover's near block; \
+             walking it to ({}, {}) — {tiles} tile(s)",
             observer.spawn_x, observer.spawn_y, mover.spawn_x, mover.spawn_y
         );
         observer.send_move((mover.spawn_x, mover.spawn_y)).await?;
-        // One tile per `5000 / move_speed` ms; a cell is 10x15 tiles.
-        tokio::time::sleep(std::time::Duration::from_millis(9_000)).await;
+        // One tile per `5000 / move_speed` ms — 500 ms at the base speed of 10 —
+        // stepping both axes at once, so the walk is as long as the wider of the
+        // two deltas. The announcement fires when the observer's cell first
+        // becomes *adjacent*, not when it arrives, so this has to cover the whole
+        // approach. The old fixed 9 s assumed the pair spawned within about one
+        // cell (10x15 tiles) of each other; leftover positions from an earlier run
+        // can be several cells apart, and 9 s then expired long before the
+        // observer came into view — the probe reported a missing LOGINMANY that
+        // simply had not been walked into yet.
+        // `tiles` is a max of two `abs()` values, so it is non-negative by
+        // construction and the narrowing cast cannot lose anything real.
+        debug_assert!(tiles >= 0);
+        let walk_ms = u64::from(tiles as u32) * 550 + 4_000;
+        tokio::time::sleep(std::time::Duration::from_millis(walk_ms)).await;
     }
 
     // (1) The observer must know the mover exists. Either the announcement arrived at

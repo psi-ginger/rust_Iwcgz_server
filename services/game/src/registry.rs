@@ -402,6 +402,48 @@ impl Registry {
         out
     }
 
+    /// The sessions that could **not** see the mover at `was` and can now — the
+    /// legacy's `m_pNewCell` (`ITZMap.cpp:73-150`), and the recipient set for
+    /// the appearance half of a cell crossing.
+    ///
+    /// This is the mirror of [`Self::no_longer_near`] and it matters for the
+    /// opposite reason: `GAMEMSG_RESPONSE_LOGINMANY` (6) is **not**
+    /// idempotent on the client. `SetCharReservedChar`
+    /// (`Client-SetChar.cpp:111-119`) sees a record for a `char_unique` it
+    /// already holds, **deletes that avatar** (`DeleteInCell` + `DeleteChar`)
+    /// and re-`SetChar`s it from the record — so a 6 aimed at somebody who is
+    /// already watching does not refresh them, it teleports the avatar to
+    /// whatever cell the record names and discards the in-flight walk order.
+    /// That is "walks, then warps back" seen from the other client.
+    ///
+    /// The legacy cannot emit that frame: `SendNewOthersInfoToPerson` and the
+    /// matching `GAMEMSG_RESPONSE_LOGIN` only ever walk `m_pNewCell`, the cells
+    /// the mover just stepped into, whose occupants by definition could not see
+    /// it a moment ago. Recomputing `near(now) - near(was)` is the same set,
+    /// because adjacency is symmetric: `p` sits in a cell the mover just
+    /// entered exactly when the mover just became adjacent to `p`.
+    ///
+    /// At world entry there is no `was`, so the whole block is new — that is the
+    /// `None` the callers of [`crate::announce_nearby_characters`] pass.
+    #[must_use]
+    pub fn newly_near(
+        &self,
+        was: &SessionInfo,
+        now: &SessionInfo,
+        mover_key: SessionKey,
+    ) -> Vec<(SessionKey, SessionInfo)> {
+        let sessions = self.lock();
+        let mut out: Vec<(SessionKey, SessionInfo)> = sessions
+            .iter()
+            .filter(|(key, session)| {
+                **key != mover_key && !is_near(was, &session.info) && is_near(now, &session.info)
+            })
+            .map(|(key, session)| (*key, session.info.clone()))
+            .collect();
+        out.sort_by_key(|(key, _)| *key);
+        out
+    }
+
     /// [`Self::broadcast_near`] minus the sender's own connection.
     ///
     /// The legacy has no equivalent because it has no split between "write to my
@@ -816,6 +858,59 @@ mod tests {
         assert_eq!(
             back.iter().map(|(key, _)| *key).collect::<Vec<_>>(),
             vec![arrives_key],
+            "the inverse direction picks the character that gained sight"
+        );
+    }
+
+    /// The appearance half: `near(now) - near(was)`, the legacy's `m_pNewCell`,
+    /// and the only set that may be sent a `GAMEMSG_RESPONSE_LOGINMANY`.
+    ///
+    /// Sending the 6 to somebody who is already adjacent is not a harmless
+    /// refresh. `SetCharReservedChar` (`Client-SetChar.cpp:111-119`) finds a
+    /// record for a `char_unique` it already holds and **deletes that avatar**
+    /// (`DeleteInCell` + `DeleteChar`) before re-`SetChar`ing it from the record —
+    /// so a walker's observer would see it warp back to whatever cell the record
+    /// names, with the 241's walk order discarded along with it.
+    #[test]
+    fn newly_near_is_only_the_cells_the_mover_just_entered() {
+        let registry = Registry::new();
+        // Same five sessions and cells as `no_longer_near_...` above, so the two
+        // halves of one crossing are pinned against each other.
+        let (mover_key, _rmover) = join(&registry, info(11, "Mover", 15, 20));
+        let (stays_key, _rstays) = join(&registry, info(12, "Stays", 32, 35));
+        let (leaves_key, _rleaves) = join(&registry, info(13, "Leaves", 15, 10));
+        let (arrives_key, _rarrives) = join(&registry, info(15, "Arrives", 64, 28));
+        let (far_key, _rfar) = join(&registry, info(14, "Far", 50, 5));
+
+        let was = registry.info(mover_key).unwrap();
+        let mut now = was.clone();
+        now.x = 60;
+        now.y = 40;
+
+        let gained = registry.newly_near(&was, &now, mover_key);
+        let gained_keys: Vec<SessionKey> = gained.iter().map(|(key, _)| *key).collect();
+        assert_eq!(
+            gained_keys,
+            vec![arrives_key],
+            "only the character that could not see the mover before this step"
+        );
+        // The three that must NOT be announced to, each for its own reason.
+        assert!(
+            !gained_keys.contains(&stays_key),
+            "already watching: a repeat 6 would delete and recreate its avatar"
+        );
+        assert!(!gained_keys.contains(&leaves_key), "not in the new block");
+        assert!(!gained_keys.contains(&far_key), "in neither block");
+        assert!(
+            !gained_keys.contains(&mover_key),
+            "a client is never sent a record of itself"
+        );
+
+        // Walking back is the mirror, exactly as it is for `no_longer_near`.
+        let back = registry.newly_near(&now, &was, mover_key);
+        assert_eq!(
+            back.iter().map(|(key, _)| *key).collect::<Vec<_>>(),
+            vec![leaves_key],
             "the inverse direction picks the character that gained sight"
         );
     }

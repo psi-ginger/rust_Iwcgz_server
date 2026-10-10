@@ -207,6 +207,26 @@ pub(crate) fn make_char_info_for(
 /// the receiver among "others", and a client re-`SetChar`ing itself would reset the
 /// character it is already standing on.
 ///
+/// # `was` — and why a repeat announcement warps the avatar
+///
+/// `was` is the mover's registry entry *before* the step that crossed a cell
+/// boundary; `None` at world entry, where there is no before and the whole block
+/// is new.
+///
+/// It is load-bearing rather than a nicety. The 6 is **not** idempotent on the
+/// client: `SetCharReservedChar` (`Client-SetChar.cpp:111-119`) finds a record
+/// for a `char_unique` it already holds and **deletes that avatar**
+/// (`DeleteInCell` + `DeleteChar`) before re-`SetChar`ing it from the record. So
+/// announcing the mover to somebody already watching does not refresh them — it
+/// teleports their copy to whatever cell the record names and discards the walk
+/// order the 241 installed. The observer sees a few steps and then a **warp
+/// back**, and after that a one-tile-per-200 crawl with a pause between tiles.
+///
+/// With `was` present the recipients are [`Registry::newly_near`] — the legacy's
+/// `m_pNewCell` — instead of the whole current block, so a neighbour that could
+/// already see the mover gets nothing, exactly as
+/// `SendNewOthersInfoToPerson` (`ServerMap.cpp:73-150`) is driven.
+///
 /// # Errors
 ///
 /// A `char_unique` that does not fit `uiMakeCharUnique`'s 16 bits, or a tile that
@@ -217,14 +237,39 @@ pub(crate) fn announce_nearby_characters(
     session_key: SessionKey,
     self_row: &CharacterFull,
     self_char_unique: i32,
+    was: Option<&SessionInfo>,
 ) -> Result<(), AnyError> {
     let origin = registry
         .info(session_key)
         .ok_or("nearby announcement before the session is in the registry")?;
+
+    // Who has to be told. At world entry (`was == None`) every cell of the
+    // block is new, so it is the whole block. On a mid-walk cell crossing it is
+    // only the cells just entered — the legacy's `m_pNewCell` — because the 6
+    // is *not* idempotent on the client: `SetCharReservedChar`
+    // (`Client-SetChar.cpp:111-119`) finds a `char_unique` it already holds and
+    // **deletes that avatar** before re-`SetChar`ing it from the record. Aimed at
+    // somebody already watching, that teleports the avatar to the record's cell
+    // and throws away the walk order the 241 installed — "walks, then warps
+    // back", then a one-tile-per-200 crawl for the rest of the walk. Both
+    // directions are the same set: adjacency is symmetric, so "the cells I
+    // entered" and "the sessions I just became adjacent to" are the same pairs.
+    let new: Vec<(SessionKey, SessionInfo)> = match was {
+        Some(was) => registry.newly_near(was, &origin, session_key),
+        None => registry.near_others(&origin, session_key),
+    };
+    // Nothing new: either a crossing where every neighbour was already adjacent
+    // (the normal case) or the legacy's own `if(index)` guard
+    // (`ServerMap.cpp:140`) for an empty near block, which must yield no body at
+    // all rather than a zero-length one — the client reads `uiType` before it
+    // knows it got any bytes (`Client-Login.cpp:61-63`).
+    if new.is_empty() {
+        return Ok(());
+    }
     let self_record = make_char_info_for(self_row, self_char_unique)?;
 
-    // To the newcomer: everyone already in its near block.
-    let existing = registry.near_others(&origin, session_key);
+    // To the newcomer: everyone in the cells it just entered.
+    let existing = &new;
     let to_self: Vec<MakeCharInfo> = existing
         .iter()
         .filter_map(|(_, info)| make_char_info_from_session(info).ok())
@@ -237,13 +282,12 @@ pub(crate) fn announce_nearby_characters(
     }
     let existing_count = existing.len();
 
-    let existing_keys: Vec<SessionKey> = existing.iter().map(|(key, _)| *key).collect();
     // To each of them: the newcomer. One frame each, as the legacy does — the
     // record is identical, only the recipient differs.
     // One record always fits in one frame, so `encode_login_many_batches` yields
     // exactly one body here; the loop stays so a future wider record keeps working.
     for body in encode_login_many_batches(std::slice::from_ref(&self_record)) {
-        for key in &existing_keys {
+        for (key, _) in &new {
             registry.send_to(*key, GameMsg::ResponseLoginmany as u16, body.clone());
         }
     }
