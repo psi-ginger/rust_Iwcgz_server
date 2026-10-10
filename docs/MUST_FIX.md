@@ -213,12 +213,14 @@ clean, `cargo test --workspace` 462 passed / 0 failures. Changes are uncommitted
   move/split/drop/set-items against `MAX_ITEM_PER_PERSON` and select-char against
   `CHAR_SLOTS`. Re-derive the audit's exact surface (e.g. the pickup destination
   slot) before closing the item — the obvious ones are covered.
-- **DB credentials in config.** Confirmed open: `DEFAULT_DATABASE_URL`
-  (`services/game/src/config.rs`) and the auth-service fallback
-  (`services/auth/src/main.rs`) embed a connection string with a password in
-  source; Plan §9 (OS keychain) is not implemented. Both are read-only defaults —
-  the services run against whatever `DATABASE_URL` says — so the exposure is to
-  anyone who can read the source, not a runtime leak.
+- **DB credentials in config.** Fixed 2026-10-11: no password is committed any
+  more. `DEFAULT_DATABASE_URL` (`services/game/src/config.rs`), the front
+  fallback (`services/front/src/main.rs`) and the auth-service fallback
+  (`services/auth/src/main.rs`) now default to the credential-free
+  `postgres://localhost:5432/goonzu`; sqlx reads user/password from the libpq
+  `PGUSER`/`PGPASSWORD` env vars, which the launcher scripts source from the
+  gitignored `scripts/dev-db.ps1` on this dev box. Plan §9 (OS keychain) is not
+  implemented — credentials live in a gitignored local file instead.
 
 **Nice to have.** The audit's cleanup items (not yet carded here), plus the
 `scripts/` pileability generator from remark 3.

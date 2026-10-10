@@ -25,3 +25,6 @@ __pycache__/
 *.rar
 *.bak
 *.pre-*
+
+# Machine-local DB credentials; the launcher scripts dot-source this when present.
+scripts/dev-db.ps1

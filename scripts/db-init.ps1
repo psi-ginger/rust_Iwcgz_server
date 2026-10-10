@@ -2,7 +2,8 @@
 #
 #   powershell -NoProfile -ExecutionPolicy Bypass -File scripts\db-init.ps1
 #
-# Override the target with environment variables:
+# Override the target with environment variables (or scripts\dev-db.ps1, which
+# is sourced below when present and is gitignored):
 #   $env:PGHOST / $env:PGPORT / $env:PGUSER / $env:PGPASSWORD / $env:GZ_DB
 #
 # This is a development bootstrap only; it is NOT invoked by scripts\check.ps1
@@ -15,7 +16,15 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-if (-not $env:PGPASSWORD) { $env:PGPASSWORD = "Moon@2020" }
+# No DB password may live in the repo. This dev box's credentials come from the
+# gitignored scripts\dev-db.ps1 when present; otherwise the shell must export
+# PGPASSWORD (and PGHOST/PGUSER if they differ from the defaults below).
+$devDb = Join-Path $PSScriptRoot "dev-db.ps1"
+if (Test-Path $devDb) { . $devDb }
+
+if (-not $env:PGPASSWORD) {
+    throw "PGPASSWORD is not set: export it, or create the gitignored scripts\dev-db.ps1 (see the head of this file)"
+}
 if (-not $env:PGHOST)     { $env:PGHOST = "localhost" }
 if (-not $env:PGUSER)     { $env:PGUSER = "postgres" }
 

@@ -2,8 +2,11 @@
 # acceptance run.
 #
 # Each service gets its own window so its log stays visible; close the windows
-# (or Ctrl+C in them) to stop. Both talk to PostgreSQL via DATABASE_URL, which
-# defaults to the development instance in the service sources.
+# (or Ctrl+C in them) to stop. Both talk to PostgreSQL: DATABASE_URL defaults to
+# the credential-free postgres://localhost:5432/goonzu, so no secret sits in
+# Rust source. sqlx resolves the user/password from PGUSER/PGPASSWORD, which
+# this script takes from the gitignored scripts\dev-db.ps1 when present (this
+# dev box's credentials) and otherwise from the calling shell.
 #
 # This script also supplies the game link-cipher key (GAME_LINK_KEY1/2).
 # game.exe has no built-in key and will refuse to start without them, naming the
@@ -49,6 +52,10 @@ New-Item -ItemType Directory -Force -Path $logDir | Out-Null
 # launches this script without editing it.
 $env:GAME_LINK_KEY1 = if ($env:GAME_LINK_KEY1) { $env:GAME_LINK_KEY1 } else { "12" }
 $env:GAME_LINK_KEY2 = if ($env:GAME_LINK_KEY2) { $env:GAME_LINK_KEY2 } else { "34" }
+
+# --- Database credentials (see the header comment) ---------------------------
+$devDb = Join-Path $PSScriptRoot "dev-db.ps1"
+if (Test-Path $devDb) { . $devDb }
 
 $front = Start-Process -FilePath (Join-Path $bin "front.exe") -WorkingDirectory $root `
     -RedirectStandardOutput (Join-Path $logDir "front.log") `

@@ -35,7 +35,9 @@ use tokio::net::{TcpListener, TcpStream};
 
 type AnyError = Box<dyn std::error::Error + Send + Sync>;
 
-const DEFAULT_DATABASE_URL: &str = "postgres://postgres:Moon@2020@localhost:5432/goonzu";
+// Credential-free local default; `DATABASE_URL` or the PG* libpq env vars carry
+// any real credentials at run time (see scripts\dev-db.ps1, gitignored).
+const DEFAULT_DATABASE_URL: &str = "postgres://localhost:5432/goonzu";
 const DEFAULT_LISTEN: &str = "0.0.0.0:5700";
 const DEFAULT_GAME_IP: &str = "127.0.0.1";
 const DEFAULT_GAME_PORT: u16 = 4010;

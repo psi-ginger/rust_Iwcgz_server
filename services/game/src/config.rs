@@ -40,7 +40,12 @@ use gz_net::SessionTimeouts;
 
 /// `DEFAULT_DATABASE_URL`, kept next to the other defaults so there is one place
 /// to look for "what does this service assume".
-pub const DEFAULT_DATABASE_URL: &str = "postgres://postgres:Moon@2020@localhost:5432/goonzu";
+///
+/// Deliberately credential-free: no user or password, so no secret sits in
+/// source. sqlx fills user/password from the `PGUSER`/`PGPASSWORD` libpq env
+/// vars (`sqlx-postgres` 0.8 `options/parse.rs:10`); the launcher scripts
+/// source a gitignored `scripts/dev-db.ps1`. Anything else sets `DATABASE_URL`.
+pub const DEFAULT_DATABASE_URL: &str = "postgres://localhost:5432/goonzu";
 
 /// The legacy game link's port. `GameProtocol.cpp:32` — the `CreateListen` call
 /// there is commented out, but `:27`'s `CreateFactory` and the capture's `:4010`
@@ -334,6 +339,15 @@ mod tests {
         assert_eq!(cfg.client_compat_version, 1);
         assert_eq!(cfg.service_area, 0x08);
         assert_eq!(cfg.server_unique, 1);
+    }
+
+    /// A committed DB password in the fallback URL is how the credential leaked
+    /// into source. The default must stay credential-free; `DATABASE_URL` or
+    /// `PGPASSWORD`/`PGUSER` (read from the process env by sqlx, like libpq)
+    /// carry it at run time instead.
+    #[test]
+    fn the_database_default_is_credential_free() {
+        assert_eq!(DEFAULT_DATABASE_URL, "postgres://localhost:5432/goonzu");
     }
 
     /// The replay mode is gone, and with it the two knobs that selected it.

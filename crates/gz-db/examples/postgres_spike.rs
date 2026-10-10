@@ -13,8 +13,9 @@ use sqlx::Row;
 use sqlx::postgres::PgPoolOptions;
 
 /// Default connection string — used when DATABASE_URL is not set.
-/// Format: postgres://user:password@host:port/database
-const DEFAULT_DATABASE_URL: &str = "postgres://postgres:Moon@2020@localhost:5432/postgres";
+/// Credential-free local default; sqlx reads any user/password from the
+/// PGPASSWORD/PGUSER env vars (libpq-compatible).
+const DEFAULT_DATABASE_URL: &str = "postgres://localhost:5432/postgres";
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
