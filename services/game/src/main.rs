@@ -67,8 +67,8 @@ use registry::{Outbound, Registered, Registry, SessionInfo};
 // below through `super::*`, hence the allow.
 #[allow(unused_imports)]
 pub(crate) use auth::{
-    admit_game_login, admit_select_char, handle_game_login, handle_make_new_char,
-    handle_select_char, handle_userchar_deletion, send_char_list,
+    admit_game_login, admit_make_new_char_slot, admit_select_char, handle_game_login,
+    handle_make_new_char, handle_select_char, handle_userchar_deletion, send_char_list,
 };
 
 // The chat family lives in `chat.rs`; the crate root re-exports the handlers

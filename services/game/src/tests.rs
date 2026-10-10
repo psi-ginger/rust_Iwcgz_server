@@ -44,6 +44,22 @@ fn selectchar_no_ops_the_same_slot_and_switches_a_different_one() {
     // rejects them.
 }
 
+/// A make-new-char slot at or above the 15-row roster bound would persist a
+/// character the roster never lists (`send_char_list` walks exactly 0..15), so
+/// it can never be selected or deleted — an invisible, unloseable row. The same
+/// bound guards selectchar (auth.rs) and the 9/83 delete pair.
+#[test]
+fn make_new_char_rejects_slots_at_or_above_the_roster_bound() {
+    // All fifteen listable slots are accepted.
+    for slot in 0..CHAR_SLOTS {
+        assert!(admit_make_new_char_slot(slot as u8), "slot {slot}");
+    }
+    // Every byte the client could never legitimately send is refused.
+    for slot in CHAR_SLOTS..=u8::MAX as i16 {
+        assert!(!admit_make_new_char_slot(slot as u8), "slot {slot}");
+    }
+}
+
 /// The 2026-10-10 audit's must-fix #1: the game login checked only that
 /// `auth_key` equalled the account idnum and **ignored the password**, so any
 /// client that knew (or guessed) an account's `SERIAL` id could enter as that

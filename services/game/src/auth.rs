@@ -49,6 +49,15 @@ pub(crate) fn admit_select_char(bound_slot: Option<i16>, slot: i32) -> bool {
     }
 }
 
+/// Whether a make-new-char `slot` resolves to one of the 15 roster rows.
+///
+/// The client only ever sends 0..CHAR_SLOTS, but a crafted `slot >= CHAR_SLOTS`
+/// would persist a character the roster never lists (see `send_char_list`, which
+/// walks exactly `0..CHAR_SLOTS`): an invisible and unloseable row.
+pub(crate) fn admit_make_new_char_slot(slot: u8) -> bool {
+    (0..CHAR_SLOTS).contains(&i16::from(slot))
+}
+
 /// Sends every slot's `cltCharListInfo` (opcode 3), zeroed for empty slots, so
 /// the client's `PutCharList` writes 15 copies and the roster dialog repaints.
 pub(crate) async fn send_char_list(
@@ -296,6 +305,9 @@ pub(crate) async fn handle_make_new_char(
     payload: &[u8],
 ) -> Result<(), AnyError> {
     let (name, sex, class_kind, slot) = decode_make_new_char(payload)?;
+    if !admit_make_new_char_slot(slot) {
+        return Err(format!("make-new-char slot {slot} out of range 0..{CHAR_SLOTS}").into());
+    }
     let character_id = characters
         .create_character(
             account_id,
