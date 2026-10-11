@@ -2234,3 +2234,317 @@ fn secret_chat_failure_names_null_and_echoes_the_request_id() {
         11
     );
 }
+
+/// The whisper channel's opcodes are the legacy's, so the dispatcher's
+/// `c == … as u16` guards are matched: 123 `REQUEST_MAKESECRETCHATCHANNEL`,
+/// 124 `RESPONSE_MAKESECRETCHATCHANNEL`, 6200/6201 friend add,
+/// 6202/6203 friend add accept and the 1108 general ack.
+#[test]
+fn whisper_channel_and_friend_opcodes_are_the_legacy_pair() {
+    assert_eq!(GameMsg::RequestMakesecretchatchannel as u16, 123);
+    assert_eq!(GameMsg::ResponseMakesecretchatchannel as u16, 124);
+    assert_eq!(GameMsg::RequestFriendadd as u16, 6200);
+    assert_eq!(GameMsg::ResponseFriendadd as u16, 6201);
+    assert_eq!(GameMsg::RequestFriendaddaccept as u16, 6202);
+    assert_eq!(GameMsg::ResponseFriendaddaccept as u16, 6203);
+    assert_eq!(GameMsg::ResponseServerrtn as u16, 1108);
+}
+
+/// A stat block for the whisper/friend tests — the person id the request-side
+/// frames carry, the account id the replies carry.
+fn basic_info_for_test(level: i16, name: &str) -> BasicInfo {
+    BasicInfo {
+        account_idnum: 7,
+        account_id: "tester".into(),
+        slot: 1,
+        sex: 1,
+        class_kind: 2,
+        home_village: 3,
+        map_index: 7,
+        x: 15,
+        y: 20,
+        character_id: 42,
+        name: name.into(),
+        str_: 10,
+        dex: 11,
+        vit: 12,
+        mag: 13,
+        hnd: 14,
+        luk: 15,
+        wis: 16,
+        level,
+        bonus: 2,
+        life: 100,
+        mana: 50,
+        exp: 0,
+        money: 0,
+    }
+}
+
+/// A 123 for an online target is answered on *this* connection with a 124
+/// carrying the target's identity (`Server-System.cpp:638-651`) — that is what
+/// opens the requester's whisper window.
+#[test]
+fn make_chat_channel_answers_the_requester_with_the_target() {
+    let registry = Registry::new();
+    let (alice, mut ra) = chat_join(&registry, chat_info(11, "Alice", 0, 0));
+    let (bob_key, _rb) = chat_join(&registry, chat_info(12, "Bob", 0, 0));
+    registry.set_basic_info(bob_key, basic_info_for_test(34, "Bob"));
+
+    handle_makesecret_chat_channel(
+        &registry,
+        alice,
+        MakeSecretChatChannelRequest {
+            person_id: 0,
+            char_unique: 12,
+            name: String::new(),
+            chat_buffer: String::new(),
+        },
+    );
+
+    let frame = ra.try_recv().expect("Alice gets the 124");
+    assert_eq!(frame.cmd, GameMsg::ResponseMakesecretchatchannel as u16);
+    let body = &frame.payload;
+    assert_eq!(
+        body.len(),
+        gz_proto::chat::RESPONSE_MAKESECRETCHATCHANNEL_SIZE
+    );
+    assert_eq!(body[0], 0, "bGameMaster");
+    assert_eq!(i16::from_le_bytes([body[2], body[3]]), 12, "the target");
+    assert_eq!(
+        i32::from_le_bytes(body[4..8].try_into().unwrap()),
+        34,
+        "its level"
+    );
+    assert_eq!(&body[8..11], b"Bob", "its name");
+    assert_eq!(&body[28..34], b"tester", "its account id");
+}
+
+/// A 123 answers the `NONAME`/`NONMAE` failure for an unknown target, which the
+/// client pops as its 900/901 notice (`Server-System.cpp:653-658`).
+#[test]
+fn make_chat_channel_fails_with_noname_for_unknown_targets() {
+    let registry = Registry::new();
+    let (alice, mut ra) = chat_join(&registry, chat_info(11, "Alice", 0, 0));
+
+    handle_makesecret_chat_channel(
+        &registry,
+        alice,
+        MakeSecretChatChannelRequest {
+            person_id: 0,
+            char_unique: 999,
+            name: String::new(),
+            chat_buffer: String::new(),
+        },
+    );
+
+    let frame = ra.try_recv().expect("Alice gets the failure");
+    assert_eq!(
+        i16::from_le_bytes([frame.payload[2], frame.payload[3]]),
+        0,
+        "siCharUnique 0"
+    );
+    assert_eq!(
+        i32::from_le_bytes(frame.payload[4..8].try_into().unwrap()),
+        0,
+        "siLevel 0"
+    );
+    assert_eq!(&frame.payload[8..14], b"NONAME");
+    assert_eq!(
+        &frame.payload[28..34],
+        b"NONMAE",
+        "the legacy's typo, pinned"
+    );
+}
+
+/// The 123 target resolution is the legacy's chain: `siCharUnique`, then
+/// `siPersonID`, then `szCharName` (`Server-System.cpp:617-624`).
+#[test]
+fn make_chat_channel_falls_back_to_person_id_then_name() {
+    let registry = Registry::new();
+    let (alice, mut ra) = chat_join(&registry, chat_info(11, "Alice", 0, 0));
+    let (bob_key, _rb) = chat_join(&registry, chat_info(12, "Bob", 0, 0));
+    registry.set_basic_info(bob_key, basic_info_for_test(34, "Bob"));
+
+    handle_makesecret_chat_channel(
+        &registry,
+        alice,
+        MakeSecretChatChannelRequest {
+            person_id: 42,
+            char_unique: 0,
+            name: String::new(),
+            chat_buffer: String::new(),
+        },
+    );
+    let frame = ra.try_recv().expect("person-id fallback");
+    assert_eq!(i16::from_le_bytes([frame.payload[2], frame.payload[3]]), 12);
+
+    handle_makesecret_chat_channel(
+        &registry,
+        alice,
+        MakeSecretChatChannelRequest {
+            person_id: 0,
+            char_unique: 0,
+            name: "Bob".into(),
+            chat_buffer: String::new(),
+        },
+    );
+    let frame = ra.try_recv().expect("name fallback");
+    assert_eq!(i16::from_le_bytes([frame.payload[2], frame.payload[3]]), 12);
+}
+
+/// A target at or above `BASIC_GAMEMASTER_LEVEL` (100) marks the 124 as a GM
+/// (`Server-System.cpp:634`); the gmmode half of the gate is unmodelled and
+/// treated as "showing".
+#[test]
+fn make_chat_channel_marks_a_game_master() {
+    let registry = Registry::new();
+    let (alice, mut ra) = chat_join(&registry, chat_info(11, "Alice", 0, 0));
+    let mut info = chat_info(12, "GM", 0, 0);
+    info.gm_level = 100;
+    let (gm_key, _rg) = chat_join(&registry, info);
+    registry.set_basic_info(gm_key, basic_info_for_test(34, "GM"));
+
+    handle_makesecret_chat_channel(
+        &registry,
+        alice,
+        MakeSecretChatChannelRequest {
+            person_id: 0,
+            char_unique: 12,
+            name: String::new(),
+            chat_buffer: String::new(),
+        },
+    );
+    let frame = ra.try_recv().expect("Alice gets the 124");
+    assert_eq!(frame.payload[0], 1, "bGameMaster");
+}
+
+/// A 6200 names the target; an online one gets the 6201 accept dialog carrying
+/// the requester's group, char id, person id and name
+/// (`Server-Friend.cpp:101-104`).
+#[test]
+fn friend_add_forwards_an_online_target() {
+    let registry = Registry::new();
+    let (alice, _ra) = chat_join(&registry, chat_info(11, "Alice", 0, 0));
+    let (_bob_key, mut rb) = chat_join(&registry, chat_info(12, "Bob", 0, 0));
+    registry.set_basic_info(alice, basic_info_for_test(34, "Alice"));
+
+    let mut body = vec![0u8; gz_proto::friends::REQUEST_FRIENDADD_SIZE];
+    body[0] = 3;
+    body[1..4].copy_from_slice(b"Bob");
+    handle_friend_add(&registry, alice, &body).unwrap();
+
+    let frame = rb.try_recv().expect("Bob gets the 6201 accept dialog");
+    assert_eq!(frame.cmd, GameMsg::ResponseFriendadd as u16);
+    let body = &frame.payload;
+    assert_eq!(body.len(), gz_proto::friends::RESPONSE_FRIENDADD_SIZE);
+    assert_eq!(body[0], 3, "the group");
+    assert_eq!(
+        i32::from_le_bytes(body[4..8].try_into().unwrap()),
+        11,
+        "the requester's char id"
+    );
+    assert_eq!(
+        i32::from_le_bytes(body[8..12].try_into().unwrap()),
+        42,
+        "the requester's person id"
+    );
+    assert_eq!(&body[12..17], b"Alice");
+}
+
+/// An offline target answers the *requester* with the 1108 "not connected"
+/// notice (`Server-Friend.cpp:82`).
+#[test]
+fn friend_add_notices_when_the_target_is_offline() {
+    let registry = Registry::new();
+    let (alice, mut ra) = chat_join(&registry, chat_info(11, "Alice", 0, 0));
+    registry.set_basic_info(alice, basic_info_for_test(34, "Alice"));
+
+    let mut body = vec![0u8; gz_proto::friends::REQUEST_FRIENDADD_SIZE];
+    body[1..4].copy_from_slice(b"Bob");
+    handle_friend_add(&registry, alice, &body).unwrap();
+
+    let frame = ra.try_recv().expect("Alice gets the notice");
+    assert_eq!(frame.cmd, GameMsg::ResponseServerrtn as u16);
+    assert_eq!(frame.payload.len(), 8);
+    assert_eq!(
+        u16::from_le_bytes([frame.payload[2], frame.payload[3]]),
+        7500
+    );
+}
+
+/// Adding yourself or an existing friend sends nothing (`Server-Friend.cpp:43`,
+/// `:52-64`).
+#[test]
+fn friend_add_ignores_self_and_already_friends() {
+    let registry = Registry::new();
+    let (alice, mut ra) = chat_join(&registry, chat_info(11, "Alice", 0, 0));
+    registry.set_basic_info(alice, basic_info_for_test(34, "Alice"));
+
+    let mut body = vec![0u8; gz_proto::friends::REQUEST_FRIENDADD_SIZE];
+    body[1..6].copy_from_slice(b"Alice");
+    handle_friend_add(&registry, alice, &body).unwrap();
+    assert_chat_silent(&mut ra, "self-add sends nothing");
+
+    // After the friendship is recorded the duplicate guard blocks a re-ping
+    // even though Bob is offline.
+    body[1..6].fill(0);
+    body[1..4].copy_from_slice(b"Bob");
+    handle_friend_add(&registry, alice, &body).unwrap();
+    let _ = ra.try_recv().expect("the offline notice");
+    registry.friend_add(
+        alice,
+        crate::registry::FriendEntry {
+            char_unique: 12,
+            name: "Bob".into(),
+        },
+    );
+    handle_friend_add(&registry, alice, &body).unwrap();
+    assert_chat_silent(&mut ra, "already-friends sends nothing");
+}
+
+/// The acceptor's 6202 records the friendship on both sides and appends the
+/// accepted friend to the requester's "New Friend" list with a 6203 carrying
+/// the *friend's* identity (`Client-Friend.cpp:47-59`).
+#[test]
+fn friend_add_accept_appends_to_the_requester() {
+    let registry = Registry::new();
+    let (alice_key, mut ra) = chat_join(&registry, chat_info(11, "Alice", 0, 0));
+    let (bob_key, mut rb) = chat_join(&registry, chat_info(12, "Bob", 0, 0));
+    registry.set_basic_info(alice_key, basic_info_for_test(34, "Alice"));
+    registry.set_basic_info(bob_key, basic_info_for_test(75, "Bob"));
+
+    let mut body = vec![0u8; gz_proto::friends::REQUEST_FRIENDADDACCEPT_SIZE];
+    body[0] = 9;
+    body[4..8].copy_from_slice(&42i32.to_le_bytes());
+    body[8..12].copy_from_slice(&11i32.to_le_bytes());
+    body[12..17].copy_from_slice(b"Alice");
+    handle_friend_add_accept(&registry, bob_key, &body).unwrap();
+
+    let frame = ra.try_recv().expect("Alice gets the 6203");
+    assert_eq!(frame.cmd, GameMsg::ResponseFriendaddaccept as u16);
+    let body = &frame.payload;
+    assert_eq!(body.len(), gz_proto::friends::RESPONSE_FRIENDADDACCEPT_SIZE);
+    assert_eq!(i16::from_le_bytes([body[0], body[1]]), 0, "first slot");
+    assert_eq!(body[2], 9, "the group");
+    assert_eq!(i32::from_le_bytes(body[4..8].try_into().unwrap()), 42);
+    assert_eq!(
+        i32::from_le_bytes(body[8..12].try_into().unwrap()),
+        12,
+        "the friend's (Bob's) char id"
+    );
+    assert_eq!(&body[12..15], b"Bob");
+    assert_eq!(&body[32..38], b"tester", "the friend's account id");
+
+    // Both sides now list each other; the acceptor gets no reply, its dialog
+    // simply closes.
+    assert!(registry.is_friend(alice_key, "Bob"));
+    assert!(registry.is_friend(bob_key, "Alice"));
+    assert_chat_silent(&mut rb, "Bob gets no reply");
+
+    // A duplicated accept — Bob clicking accept again after the friendship is
+    // on his list — is dropped before any push (`Server-Friend.cpp:193-205`),
+    // so Alice must not get a second 6203.
+    handle_friend_add_accept(&registry, bob_key, body).unwrap();
+    assert_chat_silent(&mut ra, "duplicate accept sends no second 6203");
+}

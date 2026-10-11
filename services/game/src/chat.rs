@@ -9,8 +9,9 @@
 pub(crate) use gz_proto::chat::{
     CHATMODE_GUILD, CHATMODE_HEAD, CHATMODE_HOME, CHATMODE_KING, CHATMODE_NEWSITEM, CHATMODE_PARTY,
     CHATMODE_SECRET, CHATMODE_TOWN, CHATMODE_VILLAGER, ChatRequest, MAX_HEAD_CHAT_TEXT_SIZE,
-    MAX_PLAYER_NAME, SECRETCHAT_FAIL_INVALIDNAME, SECRETCHAT_FAIL_NOTUSER, SECRETCHAT_SUCCESS,
-    SecretChatRequest, cut, encode_chat_response, encode_head_chat_response, encode_notice,
+    MAX_PLAYER_NAME, MakeSecretChatChannelRequest, SECRETCHAT_FAIL_INVALIDNAME,
+    SECRETCHAT_FAIL_NOTUSER, SECRETCHAT_SUCCESS, SecretChatRequest, cut, encode_chat_response,
+    encode_head_chat_response, encode_makesecret_chat_channel_response, encode_notice,
     encode_secret_chat_result,
 };
 use gz_proto::opcodes_game::GameMsg;
@@ -344,5 +345,92 @@ pub(crate) fn handle_head_chat_request(registry: &Registry, session_key: Session
         session_key,
         GameMsg::ResponseHeadchat as u16,
         encode_head_chat_response(subject, &text),
+    );
+}
+
+/// `BASIC_GAMEMASTER_LEVEL` (`Char-Common.h:219`) — the `>=` gate for the
+/// 124 reply's `bGameMaster`.
+const BASIC_GAMEMASTER_LEVEL: u8 = 100;
+
+/// Handles 123 `REQUEST_MAKESECRETCHATCHANNEL` (`Server-System.cpp:603-661`).
+///
+/// The reply goes to the **requester only**: `DoMsg_GAMEMSG_RESPONSE_
+/// MAKESECRETCHATCHANNEL` pushes the request into its own private-chat manager
+/// (`Client-System.cpp:1424-1429`). The *target's* window opens when the first
+/// 119 text reaches it — the 118 handler pushes mode `CHATMODE_SECRET` into the
+/// same manager (`Client-System.cpp:1494-1500`) — so there is no 124 echo to
+/// both sides in the legacy, and none here.
+///
+/// The target is resolved by `siCharUnique`, then `siPersonID`, then
+/// `szCharName` (`:617-624`); the reply carries `bGameMaster` (level gate only —
+/// `uiGMMode` is unmodelled and treated as always showing), the target's level
+/// and name, its account id, and the request's own buffer echoed. A miss, or a
+/// level outside the legacy's `1..MAX_CHARACTER_LEVEL` (> 0 only here: nothing
+/// in this port's data can exceed the cap), answers the `NONAME`/`NONMAE`
+/// failure (`:653-658`), which the client pops as its 900/901 notice.
+pub(crate) fn handle_makesecret_chat_channel(
+    registry: &Registry,
+    session_key: SessionKey,
+    request: MakeSecretChatChannelRequest,
+) {
+    let Some(target_key) = resolve_secret_chat_target(registry, &request) else {
+        send_secret_chat_failure(registry, session_key);
+        return;
+    };
+    let Some(target) = registry.info(target_key) else {
+        return;
+    };
+    if !(1..).contains(&target.level) {
+        send_secret_chat_failure(registry, session_key);
+        return;
+    }
+    let Some(basic) = registry.basic_info(target_key) else {
+        return;
+    };
+    send_secret_chat_channel(
+        registry,
+        session_key,
+        encode_makesecret_chat_channel_response(
+            target.gm_level >= BASIC_GAMEMASTER_LEVEL,
+            target.char_unique,
+            target.level,
+            &target.name,
+            &basic.account_id,
+            &request.chat_buffer,
+        ),
+    );
+}
+
+/// The legacy's three-way target resolution for 123 (`Server-System.cpp:617-624`).
+fn resolve_secret_chat_target(
+    registry: &Registry,
+    request: &MakeSecretChatChannelRequest,
+) -> Option<SessionKey> {
+    if request.char_unique > 0 {
+        return registry.find_by_charunique(request.char_unique);
+    }
+    if request.person_id > 0
+        && let Some(key) = registry.find_by_character_id(request.person_id)
+    {
+        return Some(key);
+    }
+    if !request.name.is_empty() {
+        return registry.find_by_name(&request.name);
+    }
+    None
+}
+
+/// Queues one 124 to `key`.
+fn send_secret_chat_channel(registry: &Registry, key: SessionKey, body: Vec<u8>) {
+    registry.send_to(key, GameMsg::ResponseMakesecretchatchannel as u16, body);
+}
+
+/// The legacy's `NONAME`/`NONMAE` failure body (`Server-System.cpp:653-658`) —
+/// level 0, no char, no GM, the account field carrying the legacy's typo.
+fn send_secret_chat_failure(registry: &Registry, key: SessionKey) {
+    send_secret_chat_channel(
+        registry,
+        key,
+        encode_makesecret_chat_channel_response(false, 0, 0, "NONAME", "NONMAE", ""),
     );
 }

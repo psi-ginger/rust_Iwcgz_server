@@ -39,7 +39,10 @@ use gz_cipher::Cipher;
 use gz_db::{DropLocation, PgAccountRepository, PgCharacterRepository, PgItemRepository};
 use gz_net::session::{Rejection, Session};
 use gz_net::{COMPRESSION_FLAG, Frame, FrameParser, HEADER_SIZE, MAX_FRAME_SIZE, Tick};
-use gz_proto::chat::{decode_chat_request, decode_head_chat_request, decode_secret_chat_request};
+use gz_proto::chat::{
+    decode_chat_request, decode_head_chat_request, decode_makesecret_chat_channel_request,
+    decode_secret_chat_request,
+};
 use gz_proto::game::{
     CharUnique, GameLogin, decode_select_char, decode_village_struct_request, encode_person_ip,
     encode_person_private_info, encode_response_name,
@@ -54,6 +57,7 @@ type AnyError = Box<dyn std::error::Error + Send + Sync>;
 mod auth;
 mod chat;
 mod config;
+mod friends;
 mod items;
 mod movement;
 mod registry;
@@ -83,9 +87,16 @@ pub(crate) use auth::{
 pub(crate) use chat::{
     CHATMODE_GUILD, CHATMODE_HEAD, CHATMODE_HOME, CHATMODE_KING, CHATMODE_NEWSITEM, CHATMODE_PARTY,
     CHATMODE_SECRET, CHATMODE_TOWN, CHATMODE_VILLAGER, ChatRequest, ChatRoute,
-    SECRETCHAT_FAIL_INVALIDNAME, SECRETCHAT_FAIL_NOTUSER, SECRETCHAT_SUCCESS, SecretChatRequest,
-    handle_chat, handle_head_chat_request, handle_secret_chat, route_chat, whisper_parts,
+    MakeSecretChatChannelRequest, SECRETCHAT_FAIL_INVALIDNAME, SECRETCHAT_FAIL_NOTUSER,
+    SECRETCHAT_SUCCESS, SecretChatRequest, handle_chat, handle_head_chat_request,
+    handle_makesecret_chat_channel, handle_secret_chat, route_chat, whisper_parts,
 };
+
+// The friend family lives in `friends.rs`; the crate root re-exports the
+// handlers the 6200/6202 dispatch arms call so the `mod tests` below can reach
+// them through `super::*`.
+#[allow(unused_imports)]
+pub(crate) use friends::{handle_friend_add, handle_friend_add_accept};
 
 // The movement family lives in `movement.rs`. The dispatcher calls the request
 // handlers and `next_move_deadline`; the `mod tests` below reach `Movement` and
@@ -983,6 +994,18 @@ async fn handle_client(
                 c if c == GameMsg::RequestHeadchat as u16 => {
                     let subject = decode_head_chat_request(payload.as_ref())?;
                     handle_head_chat_request(&registry, session_key, subject);
+                }
+                // ---- the whisper channel: 123 -> 124 (right-click Whisper) ----
+                c if c == GameMsg::RequestMakesecretchatchannel as u16 => {
+                    let request = decode_makesecret_chat_channel_request(payload.as_ref())?;
+                    handle_makesecret_chat_channel(&registry, session_key, request);
+                }
+                // ---- the friend family: 6200 -> 6201, 6202 -> 6203 ----
+                c if c == GameMsg::RequestFriendadd as u16 => {
+                    handle_friend_add(&registry, session_key, payload.as_ref())?;
+                }
+                c if c == GameMsg::RequestFriendaddaccept as u16 => {
+                    handle_friend_add_accept(&registry, session_key, payload.as_ref())?;
                 }
                 other => logln!("game: {peer}: unhandled opcode {other}"),
             }

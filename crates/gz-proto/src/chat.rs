@@ -370,6 +370,97 @@ pub fn encode_notice(name: &str, text: &str, use_chat_bar: bool) -> Vec<u8> {
     w.finish()
 }
 
+// ---------------------------------------------------------------------------
+// 123 whisper-channel creation -> 124 reply (`MsgType-System.h:33-86`,
+// `Server-System.cpp:603-661`).
+// ---------------------------------------------------------------------------
+
+/// `sizeof(cltGameMsgRequest_MakeSecretChatChannel)` — the 123 body
+/// (`MsgType-System.h:33-51`): `SI32 + SI16 + 20 + 256` = 282, padded to the
+/// `SI32`'s 4-alignment.
+pub const REQUEST_MAKESECRETCHATCHANNEL_SIZE: usize = 284;
+
+/// `sizeof(cltGameMsgResponse_MakeSecretChatChannel)` — the 124 body
+/// (`MsgType-System.h:55-86`): 305 bytes of fields padded to the `SI32`'s
+/// 4-alignment.
+pub const RESPONSE_MAKESECRETCHATCHANNEL_SIZE: usize = 308;
+
+/// `cltGameMsgRequest_MakeSecretChatChannel`, decoded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MakeSecretChatChannelRequest {
+    /// `siPersonID` — the legacy falls back to it when `siCharUnique` is 0.
+    pub person_id: i32,
+    /// `siCharUnique` — the target the right-click whisper names.
+    pub char_unique: i16,
+    /// `szCharName` — the last-resort target name; empty on the right-click path.
+    pub name: String,
+    /// `szChatBuffer` — echoed back; empty on the right-click path.
+    pub chat_buffer: String,
+}
+
+/// Decodes the 123 body.
+///
+/// The declared `szChatBuffer[256]` is required like every other fixed field;
+/// the client sends `sizeof` = 284 with 2 trailing pad bytes that the reader
+/// simply leaves alone.
+///
+/// # Errors
+///
+/// [`WireError::Truncated`] if fewer than the declared 282 bytes are supplied.
+pub fn decode_makesecret_chat_channel_request(
+    payload: &[u8],
+) -> Result<MakeSecretChatChannelRequest, WireError> {
+    let mut r = Reader::new(payload);
+    let person_id = r.i32()?;
+    let char_unique = r.i16()?;
+    let mut name = r.fixed_str(MAX_PLAYER_NAME)?;
+    cut(&mut name, MAX_PLAYER_NAME - 1);
+    let mut chat_buffer = r.fixed_str(256)?;
+    cut(&mut chat_buffer, 255);
+    Ok(MakeSecretChatChannelRequest {
+        person_id,
+        char_unique,
+        name,
+        chat_buffer,
+    })
+}
+
+/// Encodes the 124 body — the channel-creation reply.
+///
+/// The body opens the client's **own** whisper window when `siCharUnique > 0`
+/// and shows the 900/901 notice otherwise (`Client-System.cpp:1424-1436`), so
+/// the `NONAME`/`NONMAE` failure for an offline target is the same struct with
+/// zeros. `chat_buffer` rides along so a whisper carrying a pre-filled message
+/// (the ctor's `buf` argument) can open the window with text already typed.
+/// `bHelp` is always false here, like the legacy's calls.
+#[must_use]
+pub fn encode_makesecret_chat_channel_response(
+    game_master: bool,
+    char_unique: i16,
+    level: i32,
+    name: &str,
+    account_id: &str,
+    chat_buffer: &str,
+) -> Vec<u8> {
+    let mut name = name.to_owned();
+    cut(&mut name, MAX_PLAYER_NAME - 1);
+    let mut account_id = account_id.to_owned();
+    cut(&mut account_id, MAX_PLAYER_NAME - 1);
+    let mut chat_buffer = chat_buffer.to_owned();
+    cut(&mut chat_buffer, 255);
+    let mut w = Writer::with_capacity(RESPONSE_MAKESECRETCHATCHANNEL_SIZE);
+    w.u8(u8::from(game_master)); // bGameMaster @ 0
+    w.pad(1); // SI16 alignment
+    w.i16(char_unique); // @ 2
+    w.i32(level); // @ 4
+    w.fixed_str(&name, MAX_PLAYER_NAME); // @ 8
+    w.fixed_str(&account_id, MAX_PLAYER_NAME); // @ 28
+    w.fixed_str(&chat_buffer, 256); // @ 48
+    w.u8(0); // bHelp @ 304
+    w.pad(3); // trailing padding to the struct's 4-alignment, sent as zeros
+    w.finish()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -552,5 +643,48 @@ mod tests {
             19,
             "name only, not name + text"
         );
+    }
+
+    #[test]
+    fn the_chat_channel_request_reads_its_four_fields() {
+        let mut body = vec![0u8; REQUEST_MAKESECRETCHATCHANNEL_SIZE];
+        body[0..4].copy_from_slice(&7i32.to_le_bytes());
+        body[4..6].copy_from_slice(&11i16.to_le_bytes());
+        body[6..13].copy_from_slice(b"Target\0");
+        body[26..32].copy_from_slice(b"later\0");
+
+        assert_eq!(
+            decode_makesecret_chat_channel_request(&body).unwrap(),
+            MakeSecretChatChannelRequest {
+                person_id: 7,
+                char_unique: 11,
+                name: "Target".into(),
+                chat_buffer: "later".into(),
+            }
+        );
+
+        // The 2 trailing pad bytes of sizeof (284) are ignored by the reader.
+        assert!(matches!(
+            decode_makesecret_chat_channel_request(&body[..281]),
+            Err(WireError::Truncated { .. })
+        ));
+    }
+
+    #[test]
+    fn the_chat_channel_response_places_its_fields_at_the_zp8_offsets() {
+        let body = encode_makesecret_chat_channel_response(false, 7, 34, "Target", "tester", "hi");
+        assert_eq!(body.len(), RESPONSE_MAKESECRETCHATCHANNEL_SIZE);
+        assert_eq!(body[0], 0, "bGameMaster");
+        assert_eq!(body[1], 0, "pad to the SI16");
+        assert_eq!(i16::from_le_bytes([body[2], body[3]]), 7);
+        assert_eq!(i32::from_le_bytes(body[4..8].try_into().unwrap()), 34);
+        assert_eq!(&body[8..14], b"Target");
+        assert_eq!(body[14], 0, "NUL-padded name");
+        assert_eq!(&body[28..34], b"tester", "szAccountID at 28");
+        assert_eq!(body[34], 0);
+        assert_eq!(&body[48..50], b"hi", "szChatBuffer at 48");
+        assert_eq!(body[50], 0);
+        assert_eq!(body[304], 0, "bHelp");
+        assert_eq!(&body[305..308], &[0, 0, 0], "trailing struct pad");
     }
 }

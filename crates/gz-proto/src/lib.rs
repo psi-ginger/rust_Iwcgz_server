@@ -5,6 +5,7 @@
 
 pub mod captured_lengths;
 pub mod chat;
+pub mod friends;
 pub mod front;
 pub mod game;
 pub mod item;

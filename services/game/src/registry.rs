@@ -143,7 +143,19 @@ pub struct OnlineSession {
     /// database round trip (`Server-Person.cpp:83`). Refreshed on every 250
     /// stat spend; `None` until `REQUEST_SELECTCHAR`.
     basic_info: Option<BasicInfo>,
+    /// Accepted friendships, in memory only — the 6200 duplicate guard's
+    /// `clFriend[i]` scan (`Server-Friend.cpp:52-64`).
+    friends: Vec<FriendEntry>,
     tx: UnboundedSender<Outbound>,
+}
+
+/// One accepted friendship, stored per owner session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FriendEntry {
+    /// The friend's `siCharUnique`.
+    pub char_unique: i16,
+    /// The friend's character name — the duplicate-check key.
+    pub name: String,
 }
 
 /// The table of world-entered connections, shared by every connection task.
@@ -202,6 +214,7 @@ impl Registry {
                 info,
                 head_chat: None,
                 basic_info: None,
+                friends: Vec::new(),
                 tx,
             },
         );
@@ -317,6 +330,45 @@ impl Registry {
             .filter(|(_, s)| s.info.char_unique == char_unique)
             .map(|(key, _)| *key)
             .min()
+    }
+
+    /// The session whose captured stat block carries `person_id` — the 123
+    /// whisper-channel fallback when the request names no `char_unique`
+    /// (`GetIDFromPersonID`, `Server-System.cpp:621`). A session that never
+    /// finished world entry has no basic info and cannot be named by person id.
+    #[must_use]
+    pub fn find_by_character_id(&self, person_id: i32) -> Option<SessionKey> {
+        self.lock()
+            .iter()
+            .filter(|(_, s)| {
+                s.basic_info
+                    .as_ref()
+                    .is_some_and(|b| b.character_id == person_id)
+            })
+            .map(|(key, _)| *key)
+            .min()
+    }
+
+    /// Records an accepted friendship for `key`; `Some(i)` is the 0-based slot
+    /// the entry landed in, `None` means nothing was added — the friend's name
+    /// was already listed (the 6200 duplicate guard mirroring the legacy's
+    /// `clFriend[i]` name scan, `Server-Friend.cpp:52-64`) or the session is gone.
+    pub fn friend_add(&self, key: SessionKey, entry: FriendEntry) -> Option<usize> {
+        let mut sessions = self.lock();
+        let session = sessions.get_mut(&key)?;
+        if session.friends.iter().any(|f| f.name == entry.name) {
+            return None;
+        }
+        session.friends.push(entry);
+        Some(session.friends.len() - 1)
+    }
+
+    /// Whether `key` already lists a friend named `name`.
+    #[must_use]
+    pub fn is_friend(&self, key: SessionKey, name: &str) -> bool {
+        self.lock()
+            .get(&key)
+            .is_some_and(|s| s.friends.iter().any(|f| f.name == name))
     }
 
     /// Queues one frame for one connection; `false` when it is gone.
