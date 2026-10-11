@@ -10,15 +10,17 @@
 //! character name; the legacy server resolves it against the online hash table
 //! and forwards the request so the *target* decides
 //! (`Server-Client\Server-Friend.cpp:19-107`). Friendships live in memory only —
-//! there is no friend table in the port's database — and the friend-list family
-//! (6205+ delete, 6209/6210 list, memos, groups) is deliberately not modelled:
-//! the friend dialog shows an empty list, and the accept dialog's reject button
-//! (6204) is dropped unhandled because telling the requester off needs the
-//! letter system, which is also not modelled.
+//! there is no friend table in the port's database — and the friend dialog
+//! shows them: 6209 is answered with a 6210 list
+//! (`Server-Friend.cpp:228-275`), while the rest of the family (6205+ delete,
+//! memos, groups) stays unmodelled. The accept dialog's reject button (6204)
+//! is dropped unhandled because telling the requester off needs the letter
+//! system, which is also not modelled.
 
 use gz_proto::friends::{
-    SRVAL_FRIEND_NOTCONNECTED, decode_friend_add_accept_request, decode_friend_add_request,
-    encode_friend_add_accept_response, encode_friend_add_response, encode_server_return,
+    FriendListEntry, SRVAL_FRIEND_NOTCONNECTED, decode_friend_add_accept_request,
+    decode_friend_add_request, encode_friend_add_accept_response, encode_friend_add_response,
+    encode_friend_list_response, encode_server_return,
 };
 use gz_proto::opcodes_game::GameMsg;
 use gz_proto::wire::WireError;
@@ -133,16 +135,22 @@ pub(crate) fn handle_friend_add_accept(
             requester_key,
             FriendEntry {
                 char_unique: acceptor.char_unique,
+                person_id: acceptor_basic.character_id,
+                group: request.group,
                 name: acceptor.name.clone(),
             },
         )
         .unwrap_or(0);
-    let requester_info = registry.info(requester_key);
-    if let Some(requester) = requester_info {
+    if let (Some(requester), Some(requester_basic)) = (
+        registry.info(requester_key),
+        registry.basic_info(requester_key),
+    ) {
         registry.friend_add(
             session_key,
             FriendEntry {
                 char_unique: requester.char_unique,
+                person_id: requester_basic.character_id,
+                group: request.group,
                 name: requester.name.clone(),
             },
         );
@@ -157,4 +165,37 @@ pub(crate) fn handle_friend_add_accept(
     );
     registry.send_to(requester_key, GameMsg::ResponseFriendaddaccept as u16, body);
     Ok(())
+}
+
+/// Handles 6209 `REQUEST_FRIENDLIST` — the friend dialog's (re)load
+/// (`NNewFriendDlg.cpp:819-829`) asking for the list it renders. The request
+/// body is an empty 1-byte struct, so it is ignored. The 6210 answer
+/// (`Server-Friend.cpp:228-275`) echoes the friends at their 6203-reported
+/// slots, with live map/level/kind for whoever is online right now and zeros
+/// for the offline; the client only renders slots whose person id is non-zero,
+/// so the empty tail stays invisible.
+pub(crate) fn handle_friend_list(registry: &Registry, session_key: SessionKey) {
+    let friends = registry.friends_of(session_key);
+    let mut entries = Vec::with_capacity(friends.len());
+    for friend in friends {
+        let (map_index, level, char_kind) = registry
+            .find_by_character_id(friend.person_id)
+            .and_then(|key| registry.info(key))
+            .map_or((0, 0, 0), |info| {
+                (info.map_id, info.level, i32::from(info.class_kind))
+            });
+        entries.push(FriendListEntry {
+            group: friend.group,
+            person_id: friend.person_id,
+            name: friend.name,
+            map_index,
+            level,
+            char_kind,
+        });
+    }
+    registry.send_to(
+        session_key,
+        GameMsg::ResponseFriendlist as u16,
+        encode_friend_list_response(&entries),
+    );
 }

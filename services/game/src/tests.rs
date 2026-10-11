@@ -2496,6 +2496,8 @@ fn friend_add_ignores_self_and_already_friends() {
         alice,
         crate::registry::FriendEntry {
             char_unique: 12,
+            person_id: 42,
+            group: 0,
             name: "Bob".into(),
         },
     );
@@ -2547,4 +2549,61 @@ fn friend_add_accept_appends_to_the_requester() {
     // so Alice must not get a second 6203.
     handle_friend_add_accept(&registry, bob_key, body).unwrap();
     assert_chat_silent(&mut ra, "duplicate accept sends no second 6203");
+}
+
+/// The 6209 friend-list request is answered with a 6210 whose slots echo the
+/// 6203-reported positions, so the requester's accepted friend shows up in its
+/// tab under its group, with live map/level/kind while the friend is online
+/// (`Client-Friend.cpp:107-205`).
+#[test]
+fn friend_list_replies_with_requester_s_friends_at_their_slots() {
+    let registry = Registry::new();
+    let (alice_key, mut ra) = chat_join(&registry, chat_info(11, "Alice", 0, 0));
+    let (bob_key, mut rb) = chat_join(&registry, chat_info(12, "Bob", 0, 0));
+    registry.set_basic_info(alice_key, basic_info_for_test(34, "Alice"));
+    registry.set_basic_info(bob_key, basic_info_for_test(75, "Bob"));
+
+    let mut body = vec![0u8; gz_proto::friends::REQUEST_FRIENDADDACCEPT_SIZE];
+    body[0] = 9;
+    body[4..8].copy_from_slice(&42i32.to_le_bytes());
+    body[8..12].copy_from_slice(&11i32.to_le_bytes());
+    body[12..17].copy_from_slice(b"Alice");
+    handle_friend_add_accept(&registry, bob_key, &body).unwrap();
+    let _ = ra.try_recv().expect("the 6203");
+
+    // The empty 1-byte request body is ignored, so handle it as the client does.
+    handle_friend_list(&registry, alice_key);
+
+    let frame = ra.try_recv().expect("Alice gets the 6210");
+    assert_eq!(frame.cmd, GameMsg::ResponseFriendlist as u16);
+    let body = &frame.payload;
+    assert_eq!(body.len(), gz_proto::friends::RESPONSE_FRIENDLIST_SIZE);
+    assert_eq!(body[0], 9, "slot 0's group echoes the 6203's");
+    assert_eq!(
+        i32::from_le_bytes(body[100..104].try_into().unwrap()),
+        42,
+        "slot 0's person id (Bob)"
+    );
+    assert_eq!(&body[104..107], b"Bob");
+    assert_eq!(
+        i32::from_le_bytes(body[124..128].try_into().unwrap()),
+        0,
+        "slot 1 is empty"
+    );
+    assert_eq!(
+        i32::from_le_bytes(body[2500..2504].try_into().unwrap()),
+        7,
+        "siMapIndex[0] from Bob's live session"
+    );
+    assert_eq!(
+        i32::from_le_bytes(body[2900..2904].try_into().unwrap()),
+        34,
+        "siLevel[0] from the chat_join fixture"
+    );
+    assert_eq!(
+        i32::from_le_bytes(body[3700..3704].try_into().unwrap()),
+        1,
+        "siCharKind[0]"
+    );
+    assert_chat_silent(&mut rb, "Bob gets nothing from Alice's list request");
 }

@@ -96,7 +96,7 @@ pub(crate) use chat::{
 // handlers the 6200/6202 dispatch arms call so the `mod tests` below can reach
 // them through `super::*`.
 #[allow(unused_imports)]
-pub(crate) use friends::{handle_friend_add, handle_friend_add_accept};
+pub(crate) use friends::{handle_friend_add, handle_friend_add_accept, handle_friend_list};
 
 // The movement family lives in `movement.rs`. The dispatcher calls the request
 // handlers and `next_move_deadline`; the `mod tests` below reach `Movement` and
@@ -1006,6 +1006,9 @@ async fn handle_client(
                 }
                 c if c == GameMsg::RequestFriendaddaccept as u16 => {
                     handle_friend_add_accept(&registry, session_key, payload.as_ref())?;
+                }
+                c if c == GameMsg::RequestFriendlist as u16 => {
+                    handle_friend_list(&registry, session_key);
                 }
                 other => logln!("game: {peer}: unhandled opcode {other}"),
             }

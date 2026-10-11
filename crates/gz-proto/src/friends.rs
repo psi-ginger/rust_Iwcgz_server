@@ -8,9 +8,9 @@
 //!
 //! The port answers 6201 to the *target* (opening its accept dialog) and 6203
 //! to the *requester* (adding the accepted friend to its "New Friend" list);
-//! the 1108 offline notice goes to the requester. The full list family (6205+
-//! delete, 6209/6210 list, memos, groups) is not modelled — the friend dialog
-//! simply shows an empty list.
+//! the 1108 offline notice goes to the requester, and 6209/6210 serve the
+//! friend dialog's list. The rest of the family (6205+ delete, memos, groups)
+//! is not modelled — the tab shows whatever the in-memory list holds.
 
 use crate::chat::{MAX_PLAYER_NAME, cut};
 use crate::wire::{Reader, WireError, Writer};
@@ -38,6 +38,23 @@ pub const SERVER_RESPONSE_VALUE_SIZE: usize = 8;
 /// `SRVAL_FRIEND_NOTCONNECTED` (`MsgRval-Define.h:674`) — "the player you are
 /// trying to add is not online".
 pub const SRVAL_FRIEND_NOTCONNECTED: u16 = 7500;
+
+/// `sizeof(cltGameMsgRequest_FriendList)` — the 6209 body: an empty class, so
+/// MSVC sizes it 1 byte (`MsgType-Friend.h:72-78`).
+pub const REQUEST_FRIENDLIST_SIZE: usize = 1;
+
+/// `MAX_FRIEND_NUMBER` (`CommonHeader.h:3501`) — the friend tables' fixed
+/// record count; the client copies every record unconditionally
+/// (`Client-Friend.cpp:117-120`).
+pub const MAX_FRIEND_NUMBER: usize = 100;
+
+/// `sizeof(cltGameMsgResponse_FriendList)` — the 6210 body. It is the
+/// fixed-`MAX_FRIEND_NUMBER` record arrays `SI08` group, `cltSimplePerson`
+/// (`SI32` + `TCHAR[20]`), the four `SI32` detail arrays, `cltSimpleRank`
+/// (2 B) and `UI08`, so it never changes with the list size
+/// (`MsgType-Friend.h:80-123`, `Server-Friend.cpp:269-273`).
+pub const RESPONSE_FRIENDLIST_SIZE: usize =
+    MAX_FRIEND_NUMBER * (1 + (4 + MAX_PLAYER_NAME) + 4 + 4 + 4 + 4 + 2 + 1);
 
 /// `cltGameMsgRequest_FriendAdd`, decoded.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -158,6 +175,74 @@ pub fn encode_server_return(receiver: i16, value: u16, para1: i16, para2: i16) -
     w.finish()
 }
 
+/// One non-zero slot of the 6210 body — index `i` in the entries slice is list
+/// slot `i`, the position the 6203 already told the client (`friend_add`
+/// appends in order, so they match).
+pub struct FriendListEntry {
+    /// `siGroupID` — the group the friend is stored under.
+    pub group: u8,
+    /// `siPersonID` — the friend's person id; the client hides a slot with a 0.
+    pub person_id: i32,
+    /// `szName`.
+    pub name: String,
+    /// `siMapIndex`, `siLevel`, `siCharKind` — online-only details; the client
+    /// shows them only for connected friends (`Client-Friend.cpp:151`).
+    pub map_index: i32,
+    pub level: i32,
+    pub char_kind: i32,
+}
+
+/// Encodes the 6210 body — `cltGameMsgResponse_FriendList`
+/// (`MsgType-Friend.h:80-123`), the answer to the friend tab's 6209 request
+/// (`Server-Friend.cpp:228-275`). The record arrays are fixed-size, so the
+/// reply is always [`RESPONSE_FRIENDLIST_SIZE`]; empty slots and the
+/// `siHomeMapIndex` and rank arrays stay zero (the port has no home maps or
+/// guild ranks, and the client renders neither for 0).
+#[must_use]
+pub fn encode_friend_list_response(entries: &[FriendListEntry]) -> Vec<u8> {
+    debug_assert!(entries.len() <= MAX_FRIEND_NUMBER);
+    let zero = FriendListEntry {
+        group: 0,
+        person_id: 0,
+        name: String::new(),
+        map_index: 0,
+        level: 0,
+        char_kind: 0,
+    };
+    let at = |i: usize| entries.get(i).unwrap_or(&zero);
+    let mut w = Writer::with_capacity(RESPONSE_FRIENDLIST_SIZE);
+    // Column-major like the struct: one array per field.
+    for i in 0..MAX_FRIEND_NUMBER {
+        w.u8(at(i).group);
+    }
+    for i in 0..MAX_FRIEND_NUMBER {
+        let e = at(i);
+        let mut name = e.name.clone();
+        cut(&mut name, MAX_PLAYER_NAME - 1);
+        w.i32(e.person_id);
+        w.fixed_str(&name, MAX_PLAYER_NAME);
+    }
+    for i in 0..MAX_FRIEND_NUMBER {
+        w.i32(at(i).map_index);
+    }
+    for i in 0..MAX_FRIEND_NUMBER {
+        w.i32(at(i).level);
+    }
+    for _ in 0..MAX_FRIEND_NUMBER {
+        w.i32(0); // siHomeMapIndex
+    }
+    for i in 0..MAX_FRIEND_NUMBER {
+        w.i32(at(i).char_kind);
+    }
+    for _ in 0..MAX_FRIEND_NUMBER {
+        w.pad(2); // clCharRank: siType + siVillageUnique
+    }
+    for _ in 0..MAX_FRIEND_NUMBER {
+        w.u8(0); // uiGRank
+    }
+    w.finish()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -236,5 +321,55 @@ mod tests {
         assert_eq!(i16::from_le_bytes([body[0], body[1]]), 0);
         assert_eq!(u16::from_le_bytes([body[2], body[3]]), 7500);
         assert_eq!(&body[4..8], &[0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn the_friend_list_response_is_fixed_with_slots_and_online_details() {
+        let body = encode_friend_list_response(&[FriendListEntry {
+            group: 3,
+            person_id: 42,
+            name: "Comrade".into(),
+            map_index: 158,
+            level: 7,
+            char_kind: 2,
+        }]);
+        assert_eq!(body.len(), RESPONSE_FRIENDLIST_SIZE);
+        assert_eq!(body[0], 3, "slot 0 group");
+        assert_eq!(body[1], 0, "slot 1 group is empty");
+        // clSimplePerson[0] at offset 100, clSimplePerson[1] at 124.
+        assert_eq!(
+            i32::from_le_bytes(body[100..104].try_into().unwrap()),
+            42,
+            "clSimplePerson[0].siPersonID"
+        );
+        assert_eq!(&body[104..111], b"Comrade");
+        assert_eq!(body[123], 0, "the name's NUL pad");
+        assert_eq!(
+            i32::from_le_bytes(body[124..128].try_into().unwrap()),
+            0,
+            "slot 1's empty person hides it from the render"
+        );
+        // The detail arrays follow the 100 simple persons (offset 2500).
+        assert_eq!(
+            i32::from_le_bytes(body[2500..2504].try_into().unwrap()),
+            158,
+            "siMapIndex[0]"
+        );
+        assert_eq!(
+            i32::from_le_bytes(body[2900..2904].try_into().unwrap()),
+            7,
+            "siLevel[0]"
+        );
+        assert_eq!(
+            i32::from_le_bytes(body[3700..3704].try_into().unwrap()),
+            2,
+            "siCharKind[0]"
+        );
+        assert_eq!(
+            &body[3300..3700],
+            vec![0u8; 400],
+            "siHomeMapIndex stays 0 — no home maps in the port"
+        );
+        assert_eq!(&body[4100..4400], vec![0u8; 300], "the rank arrays stay 0");
     }
 }

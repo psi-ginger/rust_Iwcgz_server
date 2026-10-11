@@ -149,11 +149,17 @@ pub struct OnlineSession {
     tx: UnboundedSender<Outbound>,
 }
 
-/// One accepted friendship, stored per owner session.
+/// One accepted friendship, stored per owner session. The field set the 6210
+/// friend-list needs: the client renders a slot only when its person id is > 0
+/// (`Client-Friend.cpp:136`) and shows the group the 6203 already reported.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FriendEntry {
     /// The friend's `siCharUnique`.
     pub char_unique: i16,
+    /// The friend's person id — `cltSimplePerson.siPersonID`.
+    pub person_id: i32,
+    /// The group the friendship is stored under (`siGroupID`).
+    pub group: u8,
     /// The friend's character name — the duplicate-check key.
     pub name: String,
 }
@@ -369,6 +375,16 @@ impl Registry {
         self.lock()
             .get(&key)
             .is_some_and(|s| s.friends.iter().any(|f| f.name == name))
+    }
+
+    /// The session's accepted friendships, vec index = list slot — the order
+    /// 6203 reported, which the 6210 answer must echo back.
+    #[must_use]
+    pub fn friends_of(&self, key: SessionKey) -> Vec<FriendEntry> {
+        self.lock()
+            .get(&key)
+            .map(|s| s.friends.clone())
+            .unwrap_or_default()
     }
 
     /// Queues one frame for one connection; `false` when it is gone.
