@@ -54,6 +54,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use gz_proto::chat::{MAX_PLAYER_NAME, cut};
+use gz_proto::game::BasicInfo;
 use gz_proto::map_geometry::{cell_of, cells_adjacent};
 use gz_proto::opcodes_game::GameMsg;
 use tokio::sync::mpsc::UnboundedSender;
@@ -137,6 +138,11 @@ pub struct OnlineSession {
     /// (`SetHeadChat`, `char.cpp:6623-6630`), `None` is the switch being off —
     /// which is what 121 tests before answering (`Server-System.cpp:712`).
     pub head_chat: Option<String>,
+    /// The character's full stat block, captured at world entry so the 214
+    /// `REQUEST_PERSON_IP` inspect answers with the target's `clIP` without a
+    /// database round trip (`Server-Person.cpp:83`). Refreshed on every 250
+    /// stat spend; `None` until `REQUEST_SELECTCHAR`.
+    basic_info: Option<BasicInfo>,
     tx: UnboundedSender<Outbound>,
 }
 
@@ -195,6 +201,7 @@ impl Registry {
             OnlineSession {
                 info,
                 head_chat: None,
+                basic_info: None,
                 tx,
             },
         );
@@ -259,6 +266,23 @@ impl Registry {
     #[must_use]
     pub fn head_chat(&self, key: SessionKey) -> Option<String> {
         self.lock().get(&key).and_then(|s| s.head_chat.clone())
+    }
+
+    /// Records a character's full stat block, captured at world entry and
+    /// refreshed on every stat spend, so the 214 inspect answers with the
+    /// target's current `clIP`.
+    pub fn set_basic_info(&self, key: SessionKey, basic: BasicInfo) {
+        if let Some(session) = self.lock().get_mut(&key) {
+            session.basic_info = Some(basic);
+        }
+    }
+
+    /// A copy of one session's stored stat block, or `None` if it is not
+    /// registered or none was captured yet. The 214 `REQUEST_PERSON_IP` pull
+    /// reads this (via [`Self::find_by_charunique`]) instead of the database.
+    #[must_use]
+    pub fn basic_info(&self, key: SessionKey) -> Option<BasicInfo> {
+        self.lock().get(&key).and_then(|s| s.basic_info.clone())
     }
 
     /// The session whose character is named `name` — `GetIDFromName`
@@ -1037,5 +1061,67 @@ mod tests {
         // behind, which is invisible because 121 tests the switch.
         registry.set_head_chat(key, None);
         assert_eq!(registry.head_chat(key), None);
+    }
+
+    /// A stat block for the inspect test — the fields 215's `clIP` reads, with
+    /// distinctive values so a wrong lookup would show.
+    fn basic_info_fixture(level: i16) -> BasicInfo {
+        BasicInfo {
+            account_idnum: 7,
+            account_id: "tester".into(),
+            slot: 1,
+            sex: 1,
+            class_kind: 2,
+            home_village: 3,
+            map_index: 7,
+            x: 15,
+            y: 20,
+            character_id: 42,
+            name: "Target".into(),
+            str_: 10,
+            dex: 11,
+            vit: 12,
+            mag: 13,
+            hnd: 14,
+            luk: 15,
+            wis: 16,
+            level,
+            bonus: 2,
+            life: 200,
+            mana: 100,
+            exp: 1234,
+            money: 5000,
+        }
+    }
+
+    /// The 214 inspect reads the target's block out of the registry, so it has
+    /// to be stored at world entry, findable by `char_unique`, refreshable on a
+    /// stat spend, and gone once the session leaves.
+    #[test]
+    fn basic_info_is_stored_read_back_and_refreshed_for_the_inspect() {
+        let registry = Registry::new();
+        let (key, _rx) = join(&registry, info(1471, "Target", 15, 20));
+        assert_eq!(registry.basic_info(key), None, "nothing captured yet");
+
+        // The handler's path: char_unique -> key -> block.
+        let lookup = |cu: i16| {
+            registry
+                .find_by_charunique(cu)
+                .and_then(|k| registry.basic_info(k))
+        };
+        assert_eq!(lookup(1471), None);
+
+        registry.set_basic_info(key, basic_info_fixture(20));
+        assert_eq!(lookup(1471).unwrap().level, 20);
+
+        // A 250 spend re-captures the block, so the next inspect is not stale.
+        registry.set_basic_info(key, basic_info_fixture(21));
+        assert_eq!(lookup(1471).unwrap().level, 21);
+
+        assert_eq!(lookup(0), None, "the id bound still applies");
+        assert_eq!(lookup(1470), None, "an unseen character has no block");
+
+        registry.remove(key);
+        assert_eq!(lookup(1471), None, "the block goes with the session");
     }
 }

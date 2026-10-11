@@ -431,6 +431,53 @@ pub fn encode_person_ip(char_unique: i16, basic: &BasicInfo) -> Vec<u8> {
     w.finish()
 }
 
+/// `sizeof(cltGameMsgResponse_PersonPrivateInfo)` — opcode 274's body.
+///
+/// `MsgType-Person.h:216-274`: `SI16 siCharUnique`, `TCHAR szAccountID[20]`, two
+/// `cltSimplePerson` (`:1071-1090`), then the flat tail. One byte per `TCHAR`
+/// (MBCS client), `MAX_PLAYER_NAME` 20 (`CommonHeader.h:575`), `MAX_GUILD_NAME`
+/// 13 (`Guild.h:16`), `cltMoney` a bare `GMONEY = SI64`. Under the default
+/// `/Zp8` `clPerson` is 4-aligned and `clMoney` 8-aligned; the `SI64` makes the
+/// struct 8-aligned, so 276 rounds to 280.
+pub const PERSON_PRIVATE_INFO_LEN: usize = 280;
+
+/// Builds `GAMEMSG_RESPONSE_PERSONPRIVATEINFO` (274), the right-click "person
+/// info" dialog (`Client-Person.cpp:236-276`).
+///
+/// Only the modelled fields are filled — account id, the person's id/name, level
+/// and the purse. The client draws blanks for the rest (`siFameLevel`,
+/// `siCountry`, `siWealthRank`, `szGreeting`, the PVP pair, `szGuildName`,
+/// `siVillageUnique`), which the port has no source for yet.
+#[must_use]
+pub fn encode_person_private_info(char_unique: i16, basic: &BasicInfo) -> Vec<u8> {
+    let mut w = Writer::with_capacity(PERSON_PRIVATE_INFO_LEN);
+    w.i16(char_unique); // +0   siCharUnique
+    w.fixed_str(&basic.account_id, 20); // +2..22  szAccountID
+    w.pad(2); // +22..24 align clPerson to 4
+    w.i32(basic.character_id); // +24 clPerson.siPersonID
+    w.fixed_str(&basic.name, 20); // +28..48 clPerson.szName
+    w.pad(24); // +48..72 clFather (no father link modelled)
+    w.i16(basic.level); // +72 siLevel
+    w.i16(0); // +74 siFameLevel
+    w.i32(0); // +76 siCountry
+    w.u8(0); // +80 bShowCountry
+    w.pad(1); // +81 align siChangeFatherNumber to 2
+    w.i16(0); // +82 siChangeFatherNumber
+    w.i32(0); // +84 siWealthRank
+    w.i64(basic.money); // +88 clMoney.itMoney
+    w.pad(128); // +96..224 szGreeting
+    w.i32(0); // +224 siPVPWinNumber
+    w.i32(0); // +228 siPVPLoseNumber
+    w.pad(20); // +232..252 szPVPWinHighLevelUserName
+    w.i32(0); // +252 siNameLevel
+    w.pad(13); // +256..269 szGuildName
+    w.pad(3); // +269..272 align siVillageUnique to 4
+    w.i32(0); // +272 siVillageUnique
+    w.pad(4); // +276..280 trailing pad to the 8-byte alignment
+    debug_assert_eq!(w.len(), PERSON_PRIVATE_INFO_LEN);
+    w.finish()
+}
+
 /// `sizeof(cltGameMsgResponse_UseBonus)` — opcode 250's request body.
 ///
 /// The legacy reuses the `...Response_UseBonus` class for the client's request
@@ -1423,6 +1470,61 @@ mod tests {
         // clIP band: one writer produces them both.
         let one = basic.encode();
         assert_eq!(&one[904..968], &body[8..72]);
+    }
+
+    /// 274 lays its fields on the offsets the client's `set(...)` reads
+    /// (`Client-Person.cpp:271-274`), with the `/Zp8` padding between them.
+    #[test]
+    fn person_private_info_lands_its_fields_at_the_compiler_offsets() {
+        let basic = BasicInfo {
+            account_idnum: 7,
+            account_id: "tester".into(),
+            slot: 0,
+            sex: 1,
+            class_kind: 1,
+            home_village: 0,
+            map_index: 158,
+            x: 27,
+            y: 87,
+            character_id: 4242,
+            name: "Tester".into(),
+            str_: 20,
+            dex: 15,
+            vit: 20,
+            mag: 10,
+            hnd: 10,
+            luk: 10,
+            wis: 10,
+            level: 13,
+            bonus: 5,
+            life: 161,
+            mana: 40,
+            exp: 0,
+            money: 1000,
+        };
+        let body = encode_person_private_info(1471, &basic);
+
+        assert_eq!(body.len(), PERSON_PRIVATE_INFO_LEN);
+        assert_eq!(i16::from_le_bytes([body[0], body[1]]), 1471, "siCharUnique");
+        assert_eq!(&body[2..8], b"tester", "szAccountID @ 2");
+        assert_eq!(
+            i32::from_le_bytes(body[24..28].try_into().unwrap()),
+            4242,
+            "clPerson.siPersonID @ 24"
+        );
+        assert_eq!(&body[28..34], b"Tester", "clPerson.szName @ 28");
+        // clFather @ 48 is zeroed for an absent father link.
+        assert!(body[48..72].iter().all(|&b| b == 0), "clFather @ 48");
+        assert_eq!(
+            i16::from_le_bytes(body[72..74].try_into().unwrap()),
+            13,
+            "siLevel @ 72"
+        );
+        assert_eq!(
+            i64::from_le_bytes(body[88..96].try_into().unwrap()),
+            1000,
+            "clMoney @ 88"
+        );
     }
 
     #[test]

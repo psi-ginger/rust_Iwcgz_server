@@ -13,7 +13,7 @@ use gz_db::{CharacterFull, CharacterRepository, DropLocation, PgCharacterReposit
 use gz_proto::game::encode_logout;
 use gz_proto::map_geometry::cell_of;
 use gz_proto::opcodes_game::GameMsg;
-use gz_proto::order::{BasicCharUpdate, ORDER_MOVE, OrderData};
+use gz_proto::order::{BasicCharUpdate, ORDER_MOVE, ORDER_SITDOWN, OrderData, SitDown};
 use tokio::net::TcpStream;
 
 use crate::registry::{Registry, SessionInfo, SessionKey};
@@ -30,6 +30,29 @@ const MOVE_PERCENT_COST: i32 = 100;
 /// time, so a long stall cannot bank more than one tile (`char-move.cpp:145`;
 /// `CHAR_ACTION_INTERVAL_FRAME` is 6 at `Char-Common.h`).
 const MOVE_DELAY_CAP_MS: u32 = 350;
+
+/// The direction bits the 7231 sit request carries (`CommonHeader.h:388-394`).
+const NORTH: i32 = 16;
+/// See [`NORTH`].
+const EAST: i32 = 64;
+/// See [`NORTH`].
+const SOUTH: i32 = 1;
+/// See [`NORTH`].
+const WEST: i32 = 4;
+
+/// The 8-way facings `DoMsg_GAMEMSG_REQUEST_SITDOWN` accepts
+/// (`Server-Person.cpp:3299-3319`) — the `SOUTH|EAST`..`EAST` cases. Any other
+/// value (0 included) is dropped rather than guessed at.
+const SIT_DIRECTIONS: [i32; 8] = [
+    SOUTH | EAST,
+    SOUTH,
+    SOUTH | WEST,
+    WEST,
+    WEST | NORTH,
+    NORTH,
+    NORTH | EAST,
+    EAST,
+];
 
 /// The exact `Instant` when the next movement step will be ready.
 ///
@@ -520,36 +543,7 @@ pub(crate) async fn handle_userorder(
     // per-tile 200s and animates each tile as a discrete jump.
     //
     // Build a temporary SessionInfo for the mover to fan the 241.
-    let mover_session_info = SessionInfo {
-        char_unique: live.char_unique as i16,
-        name: live
-            .character
-            .as_ref()
-            .map(|c| c.name.clone())
-            .unwrap_or_default(),
-        level: live.character.as_ref().map(|c| c.level as i32).unwrap_or(1),
-        map_id: live.character.as_ref().map(|c| c.map_id).unwrap_or(0),
-        x: start.0,
-        y: start.1,
-        school_id: live.character.as_ref().map(|c| c.school_id).unwrap_or(0),
-        class_kind: live
-            .character
-            .as_ref()
-            .map(|c| c.class_kind as u16)
-            .unwrap_or(1),
-        life: live
-            .character
-            .as_ref()
-            .map(|c| c.max_life as u32)
-            .unwrap_or(161),
-        move_speed: live
-            .character
-            .as_ref()
-            .map(|c| c.move_speed.clamp(0, 63) as u8)
-            .unwrap_or(12),
-        sex: live.character.as_ref().map(|c| c.gender as u8).unwrap_or(1),
-        gm_level: 0,
-    };
+    let mover_session_info = session_info_for(live);
     let fanned_241 = registry.broadcast_near_others(
         &mover_session_info,
         session_key,
@@ -598,6 +592,94 @@ pub(crate) async fn handle_userorder(
         return Ok(None);
     }
     Ok(Some(Movement::new(dest, start, map_id, move_speed)))
+}
+
+/// The [`SessionInfo`] the near fan keys off, built from the connection's live
+/// row. Shared by the move 241 fan and the sit/stand 241 fan so both compute the
+/// observer set from the one character state.
+fn session_info_for(live: &LiveFrames<'_>) -> SessionInfo {
+    let character = live.character.as_ref();
+    SessionInfo {
+        char_unique: live.char_unique as i16,
+        name: character.map(|c| c.name.clone()).unwrap_or_default(),
+        level: character.map(|c| c.level as i32).unwrap_or(1),
+        map_id: character.map(|c| c.map_id).unwrap_or(0),
+        x: character.map(|c| c.pos_x).unwrap_or(0),
+        y: character.map(|c| c.pos_y).unwrap_or(0),
+        school_id: character.map(|c| c.school_id).unwrap_or(0),
+        class_kind: character.map(|c| c.class_kind as u16).unwrap_or(1),
+        life: character.map(|c| c.max_life as u32).unwrap_or(161),
+        move_speed: character
+            .map(|c| c.move_speed.clamp(0, 63) as u8)
+            .unwrap_or(12),
+        sex: character.map(|c| c.gender as u8).unwrap_or(1),
+        gm_level: 0,
+    }
+}
+
+/// Applies `GAMEMSG_REQUEST_SITDOWN` (7231) — the sit/stand toggle, T-018
+/// slice 6 B4's sit/stand leg.
+///
+/// The client sends this opcode, **not** a 240 `ORDER_SITDOWN`
+/// (`MouseOperation.cpp:4132`): the 240/241 order in [`handle_userorder`] is a
+/// different flow. Here the server's answer is the 241 `RESPONSE_USERORDER` that
+/// tells the sitter's own client and every observer which stance to draw.
+///
+/// `bSitDown` picks `ORDER_SITDOWN` (the 8-way facing rides in `siPara1`) or
+/// `ORDER_FORCESTOP` (`Server-Person.cpp:3297-3324`). A sit whose facing is not
+/// one of the eight the legacy accepts is dropped, as the legacy's `default:`
+/// returns (`:3317`). The combat leg of B4 (the 268 hit fan) is deliberately not
+/// here.
+///
+/// # Errors
+///
+/// A malformed body, or a socket/cipher failure.
+pub(crate) async fn handle_sit_down(
+    stream: &mut TcpStream,
+    outbound: &mut Cipher,
+    registry: &Registry,
+    session_key: SessionKey,
+    live: &LiveFrames<'_>,
+    payload: &[u8],
+) -> Result<(), AnyError> {
+    let request = SitDown::decode(payload)?;
+    let order = if request.b_sit_down {
+        if !SIT_DIRECTIONS.contains(&request.direction) {
+            logln!(
+                "game: sitdown facing {} -> no reply (legacy drops a non-8-way \
+                 direction; Server-Person.cpp:3317)",
+                request.direction
+            );
+            return Ok(());
+        }
+        OrderData::sit_order(live.char_unique, request.direction)
+    } else {
+        OrderData::force_stop_order(live.char_unique)
+    };
+    let body = order.encode().to_vec();
+    // Self gets the frame directly — its client only adopts the stance once the
+    // 241 lands, since `OperateAutoLeftOrder` just sends the request — then the
+    // same bytes fan to the near block, self excluded, exactly as the move 241
+    // does (`char-order.cpp:526` `SendNeighbourMsg(..., true)`).
+    send_encoded(stream, outbound, GameMsg::ResponseUserorder, &body).await?;
+    let origin = session_info_for(live);
+    let fanned = registry.broadcast_near_others(
+        &origin,
+        session_key,
+        GameMsg::ResponseUserorder as u16,
+        body,
+    );
+    logln!(
+        "game: sitdown char {} {} (order {}) fanned 241 to {fanned} observer(s)",
+        live.char_unique,
+        if order.si_order == ORDER_SITDOWN {
+            "sit"
+        } else {
+            "stand"
+        },
+        order.si_order
+    );
+    Ok(())
 }
 
 /// Persists the character and acknowledges a client leave request (107 quit or

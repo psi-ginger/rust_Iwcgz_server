@@ -50,8 +50,19 @@ use crate::wire::{Reader, WireError};
 /// `ORDER_MOVE` (`CommonHeader.h:174`).
 pub const ORDER_MOVE: i8 = 4;
 
+/// `ORDER_SITDOWN` (`CommonHeader.h:533`) — the sit leg of the 7231 toggle.
+pub const ORDER_SITDOWN: i8 = 17;
+
+/// `ORDER_FORCESTOP` (`CommonHeader.h:519`) — the stand leg of the 7231 toggle.
+pub const ORDER_FORCESTOP: i8 = 3;
+
 /// `BY_PLAYER` (`CommonHeader.h:660`).
 pub const BY_PLAYER: i8 = 0;
+
+/// `sizeof(cltGameMsgRequest_SitDown)` (`MsgType-Person.h:1418-1428`):
+/// `bool bSitDown; SI32 siDirection;` under the default `/Zp8`, so the bool is
+/// padded out to the 4-aligned `SI32` — 8 bytes.
+pub const SITDOWN_REQUEST_LEN: usize = 8;
 
 /// `sizeof(cltOrderData)`: 20-byte `cltOrderDataInfo` + 4-byte `CharUnique`.
 pub const ORDER_DATA_LEN: usize = 24;
@@ -151,6 +162,76 @@ impl OrderData {
             dw_pushed_time: 0,
             char_unique,
         }
+    }
+
+    /// The server's canonical `ORDER_SITDOWN` (`MakeOrder_SITDOWN`,
+    /// `order.cpp:284-290`): `siPara1` carries the 8-way facing the client sent
+    /// with the request, and `siPara2` is zero (the legacy puts the cushion item
+    /// there, which this port has no items for). The observer's 241
+    /// (`char-order.cpp:522-526`, `SendNeighbourMsg(..., true)`).
+    #[must_use]
+    pub fn sit_order(char_unique: i32, direction: i32) -> Self {
+        Self {
+            si_order: ORDER_SITDOWN,
+            si_host_mode: BY_PLAYER,
+            si_para1: direction,
+            si_para2: 0,
+            si_para3: 0,
+            si_para4: 0,
+            dw_pushed_time: 0,
+            char_unique,
+        }
+    }
+
+    /// The server's canonical `ORDER_FORCESTOP` (`MakeOrder_FORCESTOP`,
+    /// `order.cpp:250-253`) — the stand half of the toggle, everything zero but
+    /// the order and the subject (`char-order.cpp:112-119`).
+    #[must_use]
+    pub fn force_stop_order(char_unique: i32) -> Self {
+        Self {
+            si_order: ORDER_FORCESTOP,
+            si_host_mode: BY_PLAYER,
+            si_para1: 0,
+            si_para2: 0,
+            si_para3: 0,
+            si_para4: 0,
+            dw_pushed_time: 0,
+            char_unique,
+        }
+    }
+}
+
+/// `cltGameMsgRequest_SitDown` (`MsgType-Person.h:1418-1428`) — opcode 7231's
+/// body, the client's sit/stand toggle.
+///
+/// The client computes the 8-way facing from the click (`MouseOperation.cpp:4127`,
+/// `DecideDirection8`) and sends `GAMEMSG_REQUEST_SITDOWN` here, **not** a 240
+/// `ORDER_SITDOWN`; the 240/241 order is only what the server broadcasts to the
+/// neighbours afterwards (`Server-Person.cpp:3297-3324`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SitDown {
+    /// `bSitDown`: `true` sits, `false` stands back up.
+    pub b_sit_down: bool,
+    /// `siDirection`: the 8-way facing (`SOUTH`..`EAST`, `CommonHeader.h:388-394`).
+    pub direction: i32,
+}
+
+impl SitDown {
+    /// Decodes a `cltGameMsgRequest_SitDown` body.
+    ///
+    /// # Errors
+    ///
+    /// [`WireError::Truncated`] if fewer than [`SITDOWN_REQUEST_LEN`] bytes are
+    /// left.
+    pub fn decode(bytes: &[u8]) -> Result<Self, WireError> {
+        let mut r = Reader::new(bytes);
+        let b_sit_down = r.i8()? != 0;
+        r.skip(3)?; // pad to the 4-aligned SI32 siDirection
+        let direction = r.i32()?;
+        Ok(Self {
+            b_sit_down,
+            direction,
+        })
     }
 }
 
@@ -367,5 +448,53 @@ mod tests {
                 have: BASIC_CHAR_UPDATE_LEN - 1,
             })
         );
+    }
+
+    /// The 7231 sit request is `bool bSitDown; SI32 siDirection;` padded to the
+    /// 4-aligned SI32 under `/Zp8` (`MsgType-Person.h:1418-1428`), i.e. 8 bytes:
+    /// the bool at 0, three pad bytes, the facing at 4.
+    #[test]
+    fn sit_down_request_decodes_the_padded_bool_and_facing() {
+        // bSitDown = true, pad 0 0 0, siDirection = SOUTH|EAST (65, = 0x41).
+        let sit = SitDown::decode(&[0x01, 0x00, 0x00, 0x00, 0x41, 0x00, 0x00, 0x00]).unwrap();
+        assert!(sit.b_sit_down);
+        assert_eq!(sit.direction, 65);
+
+        // bSitDown = false (stand), facing WEST (4).
+        let stand = SitDown::decode(&[0x00, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00]).unwrap();
+        assert!(!stand.b_sit_down);
+        assert_eq!(stand.direction, 4);
+    }
+
+    #[test]
+    fn sit_down_request_reports_truncation() {
+        let short = [0u8; SITDOWN_REQUEST_LEN - 1];
+        assert_eq!(
+            SitDown::decode(&short),
+            Err(WireError::Truncated { needed: 4, have: 3 })
+        );
+    }
+
+    /// The observer's 241 for a sit carries the facing in `siPara1` and nothing
+    /// else; the stand 241 is all zero but the order and the subject
+    /// (`order.cpp:252`, `:288`).
+    #[test]
+    fn sit_and_force_stop_orders_encode_the_legacy_fields() {
+        let sit = OrderData::sit_order(1471, 4);
+        assert_eq!(sit.si_order, ORDER_SITDOWN);
+        assert_eq!(sit.si_host_mode, BY_PLAYER);
+        assert_eq!(sit.si_para1, 4);
+        assert_eq!(sit.si_para2, 0);
+        assert_eq!(sit.char_unique, 1471);
+        // Offsets: order@0, host@1, para1@4, char_unique@20.
+        let bytes = sit.encode();
+        assert_eq!(bytes[0], ORDER_SITDOWN as u8);
+        assert_eq!(&bytes[4..8], &4i32.to_le_bytes());
+        assert_eq!(&bytes[20..24], &1471i32.to_le_bytes());
+
+        let stand = OrderData::force_stop_order(1471);
+        assert_eq!(stand.si_order, ORDER_FORCESTOP);
+        assert_eq!(stand.si_para1, 0);
+        assert_eq!(stand.char_unique, 1471);
     }
 }

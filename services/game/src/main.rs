@@ -40,7 +40,10 @@ use gz_db::{DropLocation, PgAccountRepository, PgCharacterRepository, PgItemRepo
 use gz_net::session::{Rejection, Session};
 use gz_net::{COMPRESSION_FLAG, Frame, FrameParser, HEADER_SIZE, MAX_FRAME_SIZE, Tick};
 use gz_proto::chat::{decode_chat_request, decode_head_chat_request, decode_secret_chat_request};
-use gz_proto::game::{CharUnique, GameLogin, decode_select_char, decode_village_struct_request};
+use gz_proto::game::{
+    CharUnique, GameLogin, decode_select_char, decode_village_struct_request, encode_person_ip,
+    encode_person_private_info, encode_response_name,
+};
 use gz_proto::opcodes_game::GameMsg;
 use gz_proto::order::OrderData;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -59,7 +62,7 @@ mod world;
 mod world_entry;
 
 use config::GameConfig;
-use registry::{Outbound, Registered, Registry, SessionInfo};
+use registry::{MAX_CHAR_NUMBER, Outbound, Registered, Registry, SessionInfo};
 
 // The auth/character-lifecycle family lives in `auth.rs`. The dispatcher calls
 // the login/selectchar/make-new-char/delete handlers; `send_char_list`,
@@ -89,8 +92,8 @@ pub(crate) use chat::{
 // the frame builders through `super::*`, hence the allow.
 #[allow(unused_imports)]
 pub(crate) use movement::{
-    Movement, char_update_body, fan_char_update, handle_leave_request, handle_userorder,
-    logout_departed, next_move_deadline, send_char_update, step_movement,
+    Movement, char_update_body, fan_char_update, handle_leave_request, handle_sit_down,
+    handle_userorder, logout_departed, next_move_deadline, send_char_update, step_movement,
 };
 
 // The stats family lives in `stats.rs`. The dispatcher calls the 230 and 250
@@ -609,6 +612,15 @@ async fn handle_client(
                                 .unwrap_or(0),
                         },
                     );
+                    // Capture the full stat block for the 214 inspect: another
+                    // player's pull reads it out of the registry rather than the
+                    // database (`Server-Person.cpp:83`).
+                    if let Some(session) = login.as_ref()
+                        && let Ok(basic) =
+                            basic_info_for(session.account_id, &session.username, &character_id)
+                    {
+                        registry.set_basic_info(session_key, basic);
+                    }
                     // Make the newcomer visible, and make it visible to everyone
                     // already here — both halves of
                     // `cltServerMap::SendNewOthersInfoToPerson` (`ServerMap.cpp:73-150`).
@@ -792,6 +804,8 @@ async fn handle_client(
                         &mut stream,
                         &mut outbound,
                         &characters,
+                        &registry,
+                        session_key,
                         &mut live,
                         payload.as_ref(),
                     )
@@ -842,6 +856,49 @@ async fn handle_client(
                             movement = None;
                         }
                     }
+                }
+                c if c == GameMsg::RequestSitdown as u16 => {
+                    // 7231: the sit/stand toggle (T-018 slice 6 B4, sit/stand
+                    // leg). The client sends this, not a 240 ORDER_SITDOWN; the
+                    // 241 that observers see is this handler's output.
+                    handle_sit_down(
+                        &mut stream,
+                        &mut outbound,
+                        &registry,
+                        session_key,
+                        &live,
+                        payload.as_ref(),
+                    )
+                    .await?;
+                }
+                c if c == GameMsg::RequestPersonIp as u16 => {
+                    // 214 -> 215: the on-demand inspect of another character's
+                    // stat block (T-018 slice 6 B3).
+                    handle_person_ip(&mut stream, &mut outbound, &registry, payload.as_ref())
+                        .await?;
+                }
+                c if c == GameMsg::RequestPersonprivateinfo as u16 => {
+                    // 272 -> 274: the right-click "person info" dialog. The menu
+                    // item sends the target's `SI16 siCharUnique`
+                    // (`RightMouseMenu.cpp:481-487`).
+                    handle_person_private_info(
+                        &mut stream,
+                        &mut outbound,
+                        &registry,
+                        payload.as_ref(),
+                    )
+                    .await?;
+                }
+                c if c == GameMsg::RequestRightmouseUserlistName as u16 => {
+                    // 297 -> 298: the right-click menu's header banner name. The
+                    // 6 record carries no name, so the client asks on demand.
+                    handle_rightmouse_userlist_name(
+                        &mut stream,
+                        &mut outbound,
+                        &registry,
+                        payload.as_ref(),
+                    )
+                    .await?;
                 }
                 c if c == GameMsg::RequestHopetoquit as u16
                     || c == GameMsg::RequestHopetofront as u16 =>
@@ -1006,6 +1063,169 @@ async fn send_raw(
     let enciphered = cipher.encode(&wire)?;
     stream.write_all(&enciphered).await?;
     stream.flush().await?;
+    Ok(())
+}
+
+/// Answers `GAMEMSG_REQUEST_PERSON_IP` (214) with `GAMEMSG_RESPONSE_PERSON_IP`
+/// (215): the on-demand inspect of another character's stat block (T-018 slice 6
+/// B3).
+///
+/// The client sends the target's `char_unique` as one `SI32`
+/// (`cltMsg(GAMEMSG_REQUEST_PERSON_IP, GetCharUnique())`, `Client-SetChar.cpp:304`);
+/// the legacy resolves it to a session and replies with that session's `clIP`
+/// (`Server-Person.cpp:76-92`). The port reads the target's block out of the
+/// registry — captured at world entry, refreshed on a stat spend — so the pull
+/// needs no database round trip. An unknown or out-of-range id is answered with
+/// nothing, as the legacy's `IsValidID` guard does (`:81`).
+///
+/// # Errors
+///
+/// A body shorter than the 4-byte id, or a socket/cipher failure.
+async fn handle_person_ip(
+    stream: &mut TcpStream,
+    outbound: &mut Cipher,
+    registry: &Registry,
+    payload: &[u8],
+) -> Result<(), AnyError> {
+    if payload.len() < 4 {
+        return Err(format!(
+            "person ip request is {} bytes, need the 4-byte char_unique",
+            payload.len()
+        )
+        .into());
+    }
+    let target = i32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
+    let Some(char_unique) = i16::try_from(target).ok() else {
+        logln!("game: person ip target {target} does not fit the SI16 char_unique -> no reply");
+        return Ok(());
+    };
+    let Some(basic) = registry
+        .find_by_charunique(char_unique)
+        .and_then(|key| registry.basic_info(key))
+    else {
+        logln!("game: person ip for unseen char_unique {target} -> no reply");
+        return Ok(());
+    };
+    let body = encode_person_ip(char_unique, &basic);
+    send_raw(stream, outbound, GameMsg::ResponsePersonIp as u16, &body).await?;
+    logln!(
+        "game: person ip for char_unique {target} -> 215 ({} bytes)",
+        body.len()
+    );
+    Ok(())
+}
+
+/// Answers `GAMEMSG_REQUEST_PERSONPRIVATEINFO` (272) with
+/// `GAMEMSG_RESPONSE_PERSONPRIVATEINFO` (274): the right-click "person info"
+/// dialog.
+///
+/// The client sends the target's character id as one `SI16`
+/// (`cltGameMsgRequest_PersonPrivateInfo`, `MsgType-Person.h:196-204`, sent from
+/// `RightMouseMenu.cpp:484-486`); the legacy resolves it to a session and fills
+/// `cltGameMsgResponse_PersonPrivateInfo` from that character
+/// (`Server-Person.cpp:213-265`). The port reads the target's block out of the
+/// registry — captured at world entry — so no database round trip is needed.
+/// An unseen id is answered with nothing, as the legacy's `IsValidID` guard
+/// does (`:225`).
+///
+/// # Errors
+///
+/// A body shorter than the 2-byte id, or a socket/cipher failure.
+async fn handle_person_private_info(
+    stream: &mut TcpStream,
+    outbound: &mut Cipher,
+    registry: &Registry,
+    payload: &[u8],
+) -> Result<(), AnyError> {
+    if payload.len() < 2 {
+        return Err(format!(
+            "person info request is {} bytes, need the 2-byte char_unique",
+            payload.len()
+        )
+        .into());
+    }
+    let char_unique = i16::from_le_bytes([payload[0], payload[1]]);
+    let Some(basic) = registry
+        .find_by_charunique(char_unique)
+        .and_then(|key| registry.basic_info(key))
+    else {
+        logln!("game: person info for unseen char_unique {char_unique} -> no reply");
+        return Ok(());
+    };
+    let body = encode_person_private_info(char_unique, &basic);
+    send_raw(
+        stream,
+        outbound,
+        GameMsg::ResponsePersonprivateinfo as u16,
+        &body,
+    )
+    .await?;
+    logln!(
+        "game: person info for char_unique {char_unique} -> 274 ({} bytes)",
+        body.len()
+    );
+    Ok(())
+}
+
+/// Answers `GAMEMSG_REQUEST_RIGHTMOUSE_USERLIST_NAME` (297) with
+/// `GAMEMSG_RESPONSE_RIGHTMOUSE_USERLIST_NAME` (298): the name for the right-click
+/// menu's header banner.
+///
+/// The legacy `cltMakeCharInfo` record (LOGINMANY, 6) does not carry a character
+/// name — `cltCommonLogic::SetChar` never calls `SetName`
+/// (`CommonLogic-SetChar.cpp:44-127`) — so the client asks on demand with
+/// `cltGameMsgRequest_GetName` (one `SI32 siCharUnique`, `MsgType.h:3188-3195`, sent
+/// from `NRightMouseMenuDlg.cpp:463`) and the server answers with
+/// `cltGameMsgResponse_GetName` (`MsgType.h:3197-3208`), whose 24-byte body is the
+/// same one [`encode_response_name`] builds for opcode 244. The client handler
+/// `SetName`s the slot by char id (`Client-Person.cpp:3032-3046`);
+/// unanswered, the banner stays blank.
+///
+/// Mirror the legacy lookup (`Server-Person.cpp:2673-2696`): an out-of-range or
+/// unseen id gets nothing, like the `IsValidID` guard.
+///
+/// # Errors
+///
+/// A body shorter than the 4-byte id, or a socket/cipher failure.
+async fn handle_rightmouse_userlist_name(
+    stream: &mut TcpStream,
+    outbound: &mut Cipher,
+    registry: &Registry,
+    payload: &[u8],
+) -> Result<(), AnyError> {
+    if payload.len() < 4 {
+        return Err(format!(
+            "right-mouse name request is {} bytes, need the 4-byte char_unique",
+            payload.len()
+        )
+        .into());
+    }
+    let char_unique = i32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
+    // The legacy rejects ids outside the CharUnique array (`Server-Person.cpp:2677`);
+    // that bound also guarantees the cast to the registry's SI16 key is lossless.
+    if !(0..i32::from(MAX_CHAR_NUMBER)).contains(&char_unique) {
+        logln!("game: right-mouse name for out-of-range char_unique {char_unique} -> no reply");
+        return Ok(());
+    }
+    let Some(basic) = registry
+        .find_by_charunique(char_unique as i16)
+        .and_then(|key| registry.basic_info(key))
+    else {
+        logln!("game: right-mouse name for unseen char_unique {char_unique} -> no reply");
+        return Ok(());
+    };
+    let body = encode_response_name(char_unique, &basic.name);
+    send_raw(
+        stream,
+        outbound,
+        GameMsg::ResponseRightmouseUserlistName as u16,
+        &body,
+    )
+    .await?;
+    logln!(
+        "game: right-mouse name for char_unique {char_unique} -> 298 ({} bytes)",
+        body.len()
+    );
     Ok(())
 }
 

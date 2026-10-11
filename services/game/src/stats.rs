@@ -11,6 +11,7 @@ use gz_proto::opcodes_game::GameMsg;
 use gz_proto::statusinfo::{CHANGETYPE_AUTOFOOD, ChangeStatusInfo, decode_change_status_info};
 use tokio::net::TcpStream;
 
+use crate::registry::{Registry, SessionKey};
 use crate::{AnyError, LiveFrames, logln, send_raw};
 /// Answers `GAMEMSG_REQUEST_CHANGESTATUSINFO` (230) with
 /// `GAMEMSG_RESPONSE_CHANGESTATUSINFO` (231) for the one change type the legacy
@@ -249,6 +250,8 @@ pub(crate) async fn handle_use_bonus(
     stream: &mut TcpStream,
     outbound: &mut Cipher,
     characters: &PgCharacterRepository,
+    registry: &Registry,
+    session_key: SessionKey,
     live: &mut LiveFrames<'_>,
     payload: &[u8],
 ) -> Result<(), AnyError> {
@@ -309,6 +312,10 @@ pub(crate) async fn handle_use_bonus(
             .character
             .as_ref()
             .ok_or("usebonus row disappeared after the write")?;
+        let basic = basic_info_for(live.account_id, &live.account_name, character)?;
+        // Re-capture the block the 214 inspect reads, so the next pull of this
+        // character's stats is not stale.
+        registry.set_basic_info(session_key, basic.clone());
         encode_person_ip(
             i16::try_from(live.char_unique).map_err(|_| {
                 format!(
@@ -316,7 +323,7 @@ pub(crate) async fn handle_use_bonus(
                     live.char_unique
                 )
             })?,
-            &basic_info_for(live.account_id, &live.account_name, character)?,
+            &basic,
         )
     };
     send_raw(stream, outbound, GameMsg::ResponsePersonIp as u16, &body).await?;
