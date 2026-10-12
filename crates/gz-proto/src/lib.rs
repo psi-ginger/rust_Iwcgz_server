@@ -16,5 +16,6 @@ pub mod opcodes_front;
 pub mod opcodes_game;
 pub mod order;
 pub mod personalshop;
+pub mod quest;
 pub mod statusinfo;
 pub mod wire;

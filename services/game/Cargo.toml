@@ -11,6 +11,10 @@ gz-lzf = { path = "../../crates/gz-lzf" }
 gz-net = { path = "../../crates/gz-net" }
 gz-proto = { path = "../../crates/gz-proto" }
 tokio = { version = "1", features = ["full"] }
+# `SlotOccupancy` (the one item question a quest condition asks) and the
+# repository seams the quest handlers take are `async_trait` objects, like the
+# ones in `gz-db`.
+async-trait = "0.1"
 
 [dev-dependencies]
 # `MemoryFriends` exercises the 6202 accept handler's persistence seam.

@@ -357,10 +357,8 @@ const SERVER_TIME_LEN: usize = 16;
 const PERSON_ITEM_INFO_LEN: usize = 104;
 
 /// `GAMEMSG_RESPONSE_PERSONQUEST` body length — `sizeof(cltPQuestInfo)` as the
-/// running client expects it (1536), which is wider than this source tree's
-/// current `Quest.h` implies (`MAX_QUEST_TYPE` drift). The captured frame is the
-/// only length the shipped client accepts, so it is pinned, not derived.
-pub const PERSON_QUEST_LEN: usize = 1536;
+/// running client expects it. The layout and the pinning evidence live with the
+/// encoder in [`gz_proto::quest`].
 /// `GAMEMSG_RESPONSE_SPACEBOXLIST` body length — `sizeof(cltGameMsgResponse_Space_Box_List)`
 /// as the running client expects it (16800). Same drift caveat as above: the
 /// source tree's `MAX_ITEM_SPACE_BOX` gives a smaller size, so the capture is
@@ -381,9 +379,14 @@ pub const OP_8464_LEN: usize = 14340;
 pub const OP_8470: u16 = 8470;
 pub const OP_8470_LEN: usize = 4168;
 
-/// 225, 349, 225 et al. as honest "nothing" bodies for a fresh character.
+/// 225 as an honest "nothing cleared, nothing running" body — the default
+/// [`gz_proto::quest::PersonQuest`]. The live burst sends the character's real
+/// block; this is the empty one the length tests pin.
+#[cfg(test)]
 pub fn person_quest_empty() -> Vec<u8> {
-    vec![0u8; PERSON_QUEST_LEN]
+    let body = gz_proto::quest::PersonQuest::new().encode();
+    debug_assert_eq!(body.len(), gz_proto::quest::PERSON_QUEST_LEN);
+    body
 }
 pub fn space_box_list_empty() -> Vec<u8> {
     vec![0u8; SPACE_BOX_LIST_LEN]

@@ -8,6 +8,7 @@ pub mod character;
 pub mod friend;
 pub mod item;
 pub mod password;
+pub mod quest;
 pub mod repository;
 
 pub use character::{
@@ -19,4 +20,5 @@ pub use item::{
     CharacterItem, DropLocation, DropOutcome, DropStatus, GroundClaim, ItemRepository, MoveOutcome,
     PgItemRepository, PickupOutcome, PickupStatus, SplitOutcome, SplitStatus, container_of,
 };
+pub use quest::{PgQuestRepository, QuestRepository, StoredQuestType};
 pub use repository::{Account, AccountRepository, PgAccountRepository, RepositoryError};

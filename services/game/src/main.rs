@@ -38,7 +38,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use gz_cipher::Cipher;
 use gz_db::{
     DropLocation, FriendRepository, PgAccountRepository, PgCharacterRepository, PgFriendRepository,
-    PgItemRepository,
+    PgItemRepository, PgQuestRepository, QuestRepository,
 };
 use gz_net::session::{Rejection, Session};
 use gz_net::{COMPRESSION_FLAG, Frame, FrameParser, HEADER_SIZE, MAX_FRAME_SIZE, Tick};
@@ -64,6 +64,7 @@ mod config;
 mod friends;
 mod items;
 mod movement;
+mod quest;
 mod registry;
 mod stats;
 mod world;
@@ -102,6 +103,13 @@ pub(crate) use chat::{
 #[allow(unused_imports)]
 pub(crate) use friends::{
     friend_all_list_body, handle_friend_add, handle_friend_add_accept, handle_friend_list,
+};
+
+#[allow(unused_imports)]
+pub(crate) use quest::{
+    BEGINNER2_CHAIN, ChainQuest, QuestActor, QuestOutcome, SlotOccupancy, apply_cancel_quest,
+    apply_quest_going, apply_quest_status, handle_cancel_quest, handle_quest_status,
+    handle_set_quest_going, push_quest_state,
 };
 
 // The movement family lives in `movement.rs`. The dispatcher calls the request
@@ -236,6 +244,7 @@ async fn serve(cfg: &GameConfig) -> Result<(), AnyError> {
     let characters = PgCharacterRepository::connect(&cfg.database_url).await?;
     let items = PgItemRepository::connect(&cfg.database_url).await?;
     let friends = PgFriendRepository::connect(&cfg.database_url).await?;
+    let quests = PgQuestRepository::connect(&cfg.database_url).await?;
     // One table for every connection: the chat family is the first code here
     // that addresses players other than the one asking.
     let registry = Arc::new(Registry::new());
@@ -258,12 +267,13 @@ async fn serve(cfg: &GameConfig) -> Result<(), AnyError> {
         let characters = characters.clone();
         let items = items.clone();
         let friends = friends.clone();
+        let quests = quests.clone();
         let registry = registry.clone();
         let peer = peer.to_string();
         let cfg = cfg.clone();
         tokio::spawn(async move {
             if let Err(e) = handle_client(
-                stream, &peer, &cfg, accounts, characters, items, friends, registry,
+                stream, &peer, &cfg, accounts, characters, items, friends, quests, registry,
             )
             .await
             {
@@ -325,6 +335,7 @@ async fn handle_client(
     characters: PgCharacterRepository,
     items: PgItemRepository,
     friends: PgFriendRepository,
+    quests: PgQuestRepository,
     registry: Arc<Registry>,
 ) -> Result<(), AnyError> {
     let mut session_state = Session::new(cfg.timeouts);
@@ -381,6 +392,7 @@ async fn handle_client(
         character: None,
         char_unique,
         friend_list: Vec::new(),
+        quest: gz_proto::quest::PersonQuest::new(),
     };
 
     // The registry key this connection answers under, plus the removal guard.
@@ -718,6 +730,49 @@ async fn handle_client(
                         }
                     };
                     live.friend_list = friend_all;
+                    // Hydrate the quest block the same way: the client's own copy of
+                    // it is what decides whether it will walk onto a gate at all
+                    // (`MouseOperation.cpp:5500-5511`), so it has to be real before
+                    // the player can move. A failed load degrades to the zero block
+                    // (nothing cleared, nothing running) rather than blocking world
+                    // entry.
+                    live.quest = match quests.load(character_id.character_id).await {
+                        Ok(rows) => {
+                            let mut state = gz_proto::quest::PersonQuest::new();
+                            for row in rows {
+                                if let Some(unit) = state.unit_mut(row.quest_type) {
+                                    *unit = row.unit;
+                                } else {
+                                    logln_err!(
+                                        "game: {}: stored quest type {} is outside the \
+                                         client's block — ignored",
+                                        character_id.name,
+                                        row.quest_type
+                                    );
+                                }
+                            }
+                            let cleared = (0..gz_proto::quest::QUEST_TYPES)
+                                .filter(|t| {
+                                    state
+                                        .unit(*t as i16)
+                                        .is_some_and(|u| u.state != 0 || u.cur_unique != 0)
+                                })
+                                .count();
+                            logln!(
+                                "game: {} loaded quest state ({cleared} type(s) non-empty)",
+                                character_id.name
+                            );
+                            state
+                        }
+                        Err(e) => {
+                            logln_err!(
+                                "game: quest load for {} failed: {e}; quest block empty for this \
+                                 session",
+                                character_id.name
+                            );
+                            gz_proto::quest::PersonQuest::new()
+                        }
+                    };
                     // Make the newcomer visible, and make it visible to everyone
                     // already here — both halves of
                     // `cltServerMap::SendNewOthersInfoToPerson` (`ServerMap.cpp:73-150`).
@@ -1096,6 +1151,61 @@ async fn handle_client(
                 }
                 c if c == GameMsg::RequestFriendlist as u16 => {
                     handle_friend_list(&registry, session_key);
+                }
+                // ---- the quest family: 5700 / 5701 / 5702, 225 back ----
+                //
+                // The acting character's three read-only values are copied out
+                // first, so the handlers can borrow the quest block mutably in
+                // the same call.
+                c if c == GameMsg::RequestSetquestgoing as u16 => {
+                    let actor = QuestActor::from_character(
+                        live.character
+                            .as_ref()
+                            .ok_or("quest going before a character was selected")?,
+                    );
+                    handle_set_quest_going(
+                        &mut stream,
+                        &mut outbound,
+                        &quests,
+                        &items,
+                        &actor,
+                        &mut live.quest,
+                        payload.as_ref(),
+                    )
+                    .await?;
+                }
+                c if c == GameMsg::RequestCancelquest as u16 => {
+                    let actor = QuestActor::from_character(
+                        live.character
+                            .as_ref()
+                            .ok_or("quest cancel before a character was selected")?,
+                    );
+                    handle_cancel_quest(
+                        &mut stream,
+                        &mut outbound,
+                        &quests,
+                        &actor,
+                        &mut live.quest,
+                        payload.as_ref(),
+                    )
+                    .await?;
+                }
+                c if c == GameMsg::RequestQueststatus as u16 => {
+                    let actor = QuestActor::from_character(
+                        live.character
+                            .as_ref()
+                            .ok_or("quest status before a character was selected")?,
+                    );
+                    handle_quest_status(
+                        &mut stream,
+                        &mut outbound,
+                        &quests,
+                        &items,
+                        &actor,
+                        &mut live.quest,
+                        payload.as_ref(),
+                    )
+                    .await?;
                 }
                 other => logln!("game: {peer}: unhandled opcode {other}"),
             }

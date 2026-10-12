@@ -15,6 +15,7 @@ use gz_proto::game::{
 };
 use gz_proto::item::{Item, MAX_ITEM_PER_PERSON, encode_person_item_info};
 use gz_proto::opcodes_game::GameMsg;
+use gz_proto::quest::PersonQuest;
 use tokio::net::TcpStream;
 
 use crate::config::GameConfig;
@@ -136,6 +137,11 @@ pub(crate) async fn send_world_entry(
     for (cmd, body) in sequence {
         send_raw(stream, cipher, cmd, &body).await?;
     }
+    // 225 rides the entry burst, as it does in the capture: there it sits between
+    // 8464 and 226, i.e. ahead of the 244/248/249 block below (`generated_frames.rs`
+    // frame order). The client only learns a quest is cleared from this frame, and
+    // its own gate check reads that belief (`MouseOperation.cpp:5500-5511`).
+    crate::quest::push_quest_state(stream, cipher, &live.quest).await?;
     send_character_state(stream, cipher, live).await
 }
 
@@ -440,6 +446,10 @@ pub(crate) struct LiveFrames<'a> {
     /// The 6219 friend-all-list body for this session, built at world entry
     /// from the hydrated `character_friends` rows plus who is online right now.
     pub(crate) friend_list: Vec<u8>,
+    /// The character's quest block, hydrated from `character_quests` at
+    /// char-select and mutated by the 5700/5701/5702 handlers. It is the body of
+    /// 225 both in the entry burst and after every change.
+    pub(crate) quest: PersonQuest,
 }
 
 impl LiveFrames<'_> {
@@ -525,7 +535,7 @@ impl LiveFrames<'_> {
             return Ok(Some(world_entry::space_box_list_empty()));
         }
         if is_person_quest {
-            return Ok(Some(world_entry::person_quest_empty()));
+            return Ok(Some(self.quest.encode()));
         }
         if is_soulguard_get {
             return Ok(Some(world_entry::soulguard_get_empty()));

@@ -42,7 +42,8 @@ $files = @(
     "0008_character_move_speed.sql",
     "0009_seed_second_account.sql",
     "0010_world_items_cell_unique.sql",
-    "0011_character_friends.sql"
+    "0011_character_friends.sql",
+    "0012_character_quests.sql"
 )
 
 foreach ($f in $files) {
