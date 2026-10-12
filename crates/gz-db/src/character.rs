@@ -257,6 +257,22 @@ pub trait CharacterRepository: Send + Sync {
         y: i32,
     ) -> Result<(), RepositoryError>;
 
+    /// Persists a move **across maps** — the write the gate warp makes, which
+    /// [`Self::update_position`] cannot express because the map is part of it.
+    /// The legacy does the same thing through `Warp(true)`'s save, and a reload
+    /// that kept the old map would drop the character back where it left.
+    ///
+    /// # Errors
+    ///
+    /// [`RepositoryError::Database`] if the update fails.
+    async fn update_map_position(
+        &self,
+        character_id: i32,
+        map_id: i32,
+        x: i32,
+        y: i32,
+    ) -> Result<(), RepositoryError>;
+
     /// Persist an accepted stat allocation (`GAMEMSG_REQUEST_USEBONUS`, 250).
     ///
     /// Rewrites the seven abilities, the remaining bonus points and the two
@@ -569,6 +585,26 @@ impl CharacterRepository for PgCharacterRepository {
             .bind(y)
             .execute(&self.pool)
             .await?;
+        Ok(())
+    }
+
+    async fn update_map_position(
+        &self,
+        character_id: i32,
+        map_id: i32,
+        x: i32,
+        y: i32,
+    ) -> Result<(), RepositoryError> {
+        sqlx::query(
+            "UPDATE characters SET map_id = $2, pos_x = $3, pos_y = $4 \
+             WHERE character_id = $1",
+        )
+        .bind(character_id)
+        .bind(map_id)
+        .bind(x)
+        .bind(y)
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 

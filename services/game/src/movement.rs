@@ -17,7 +17,88 @@ use gz_proto::order::{BasicCharUpdate, ORDER_MOVE, ORDER_SITDOWN, OrderData, Sit
 use tokio::net::TcpStream;
 
 use crate::registry::{Registry, SessionInfo, SessionKey};
-use crate::{AnyError, GameSession, LiveFrames, announce_nearby_characters, logln, send_encoded};
+use crate::{
+    AnyError, GameSession, LiveFrames, announce_map_npcs, announce_nearby_characters, logln,
+    make_char_info_for, send_encoded,
+};
+
+/// One exit gate: the tile that triggers it and where it puts the character.
+///
+/// From `New Era Live\Data\GateInfoE.txt` (columns `Unique, TxtNum, FOUnique,
+/// ItemUnique, ItemNum, SrcMap/SrcX/SrcY, DstMap/DstX/DstY, PKAreaGate`):
+///
+/// | rows | FOUnique | source | destination |
+/// |---|---|---|---|
+/// | 307, 308, 309 | 7023 | map 158 at (14,90), (28,101), (41,90) | map 0 at (288,354) |
+/// | 306 | 49 | map 0 at (291,350) | map 158 at (27,87) |
+///
+/// Hanyang's three gates are the map's exits — `FOTYPE_GATE` field objects whose
+/// hover name is text 254, "Move outside" — and the reverse row lands on the tile
+/// `Server-Login.cpp:375` spawns new characters on.
+///
+/// **A literal table is this slice's sanctioned cut** (card §4 slice 3): the real
+/// loader is A9's field-object/map work, which needs `FieldObjectSetInfo.txt` and
+/// the per-map tile arrays anyway, and the legacy reaches the same answer through
+/// the field object's `para` field (`char.cpp:9031`). Every row below is copied
+/// from the file above; nothing is derived.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Gate {
+    /// `SrcMapIndex` — the server map id the gate stands on.
+    src_map: i32,
+    /// `SrcMapX`.
+    src_x: i32,
+    /// `SrcMapY`.
+    src_y: i32,
+    /// `DstMapIndex`.
+    dst_map: i32,
+    /// `DstMapX`.
+    dst_x: i32,
+    /// `DstMapY`.
+    dst_y: i32,
+}
+
+/// Every gate this port honours, in `GateInfoE.txt` order.
+const GATES: &[Gate] = &[
+    Gate {
+        src_map: 158,
+        src_x: 14,
+        src_y: 90,
+        dst_map: 0,
+        dst_x: 288,
+        dst_y: 354,
+    },
+    Gate {
+        src_map: 158,
+        src_x: 28,
+        src_y: 101,
+        dst_map: 0,
+        dst_x: 288,
+        dst_y: 354,
+    },
+    Gate {
+        src_map: 158,
+        src_x: 41,
+        src_y: 90,
+        dst_map: 0,
+        dst_x: 288,
+        dst_y: 354,
+    },
+    Gate {
+        src_map: 0,
+        src_x: 291,
+        src_y: 350,
+        dst_map: 158,
+        dst_x: 27,
+        dst_y: 87,
+    },
+];
+
+/// The gate standing on `(map_id, x, y)`, if any.
+fn gate_at(map_id: i32, x: i32, y: i32) -> Option<&'static Gate> {
+    GATES
+        .iter()
+        .find(|g| g.src_map == map_id && g.src_x == x && g.src_y == y)
+}
 /// `MOVE_PERCENT_STEP` — the accumulator level at which the legacy commits a
 /// tile (`clMoveInfo.IncMovePercent(movedlength) >= 50`, `char-move.cpp:159`).
 const MOVE_PERCENT_STEP: i32 = 50;
@@ -576,6 +657,26 @@ pub(crate) async fn handle_userorder(
         false,
     )?;
 
+    // The exit gates are checked on the **order's destination**, exactly where the
+    // legacy checks them (`char-order.cpp:173` → `CharServerMoveByGate(x, y)`), and
+    // a gate hit replaces the walk with a warp — so this has to run before the
+    // destination is persisted as a position.
+    if let Some(gate) = gate_at(map_id, dest.0, dest.1) {
+        warp_through_gate(
+            stream,
+            outbound,
+            characters,
+            registry,
+            session_key,
+            live,
+            gate,
+        )
+        .await?;
+        // No step is armed: the character is not walking to that tile, it left the
+        // map. The read loop drops the previous movement when this returns `None`.
+        return Ok(None);
+    }
+
     // Persist the destination, then mirror: a later 248 (resync) or a re-login
     // reads the row. The stepped cell is tracked in memory for drops.
     characters
@@ -592,6 +693,80 @@ pub(crate) async fn handle_userorder(
         return Ok(None);
     }
     Ok(Some(Movement::new(dest, start, map_id, move_speed)))
+}
+
+/// Moves a character through `gate`: the map change, the frames that carry it, and
+/// every store that has to agree afterwards.
+///
+/// The legacy's shape is `clCharServer::CharServerMoveByGate` → `SetWarpInfo` →
+/// `Warp(true)` (`char.cpp:9317-9345`, `:4043`), and a warp is literally "re-send
+/// the login packet": `char.cpp:4574` builds the character's own
+/// `cltMakeCharInfo` for the new map and sends it as `GAMEMSG_RESPONSE_LOGIN` (5).
+/// The client then loads the destination map from its own files (`map/MainMap/
+/// MainMap.map`) — terrain never rides the wire — and the ordinary cell-join path
+/// tells it who (and which NPCs) are already there.
+///
+/// Order matters: the row, the cached character and the registry entry move
+/// first, because every frame below is built from them and a stale map on any of
+/// the three would aim the next fan at the map the character just left.
+///
+/// # Errors
+///
+/// Propagates database, encoder and socket failures.
+async fn warp_through_gate(
+    stream: &mut TcpStream,
+    outbound: &mut Cipher,
+    characters: &PgCharacterRepository,
+    registry: &Registry,
+    session_key: SessionKey,
+    live: &mut LiveFrames<'_>,
+    gate: &Gate,
+) -> Result<(), AnyError> {
+    let was = session_info_for(live);
+    let character_id = live
+        .character
+        .as_ref()
+        .map(|c| c.character_id)
+        .ok_or("a gate move before the character row is loaded")?;
+
+    // 1. Every store that names the old map.
+    characters
+        .update_map_position(character_id, gate.dst_map, gate.dst_x, gate.dst_y)
+        .await?;
+    let moved = {
+        let character = live
+            .character
+            .as_mut()
+            .ok_or("a gate move before the character row is loaded")?;
+        character.map_id = gate.dst_map;
+        character.pos_x = gate.dst_x;
+        character.pos_y = gate.dst_y;
+        character.clone()
+    };
+    registry.update_map_pos(session_key, gate.dst_map, gate.dst_x, gate.dst_y);
+
+    // 2. The map change itself: opcode 5 with this character's record.
+    let info = make_char_info_for(&moved, live.char_unique)?;
+    send_encoded(stream, outbound, GameMsg::ResponseLogin, &info.encode()).await?;
+
+    // 3. Both ends of the move. The departure fan is computed against the *new*
+    //    cell in the *new* map, so every session still near the old tile gets the
+    //    11 and nobody on the destination gets a spurious one.
+    let now = session_info_for(live);
+    let left = logout_departed(registry, &was, &now, session_key, live.char_unique);
+    announce_nearby_characters(registry, session_key, &moved, live.char_unique, None)?;
+    // The destination's own NPCs, which the client has never been told about.
+    announce_map_npcs(registry, session_key, gate.dst_map);
+
+    logln!(
+        "game: char {character_id} took the gate {} -> map {} at ({}, {}); {left} observer(s) \
+         on the old map were told",
+        was.map_id,
+        gate.dst_map,
+        gate.dst_x,
+        gate.dst_y
+    );
+    Ok(())
 }
 
 /// The [`SessionInfo`] the near fan keys off, built from the connection's live
@@ -724,4 +899,68 @@ pub(crate) async fn handle_leave_request(
             .await?;
     }
     send_encoded(stream, outbound, ack, &[]).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The gate table is a transcription of `Data\GateInfoE.txt`, so the test
+    /// states the file's own facts: Hanyang's three exits land on the outdoor map
+    /// at its gate tile, and the outdoor map's way back lands on the palace tile
+    /// the login spawn uses.
+    #[test]
+    fn the_gate_table_matches_the_shipped_gate_rows() {
+        assert_eq!(gate_at(158, 14, 90).unwrap().dst_map, 0);
+        assert_eq!(gate_at(158, 28, 101).unwrap().dst_map, 0);
+        assert_eq!(gate_at(158, 41, 90).unwrap().dst_map, 0);
+        for (x, y) in [(14, 90), (28, 101), (41, 90)] {
+            let gate = gate_at(158, x, y).unwrap();
+            assert_eq!(
+                (gate.dst_x, gate.dst_y),
+                (288, 354),
+                "one shared landing tile"
+            );
+        }
+        // Row 306, the reverse: the destination is the (27,87) the spawn uses
+        // (`Server-Login.cpp:375`).
+        let back = gate_at(0, 291, 350).unwrap();
+        assert_eq!((back.dst_map, back.dst_x, back.dst_y), (158, 27, 87));
+
+        // A tile that is not a gate is not one, on either map.
+        assert!(
+            gate_at(158, 27, 87).is_none(),
+            "the spawn tile is not a gate"
+        );
+        assert!(
+            gate_at(158, 288, 354).is_none(),
+            "the landing tile is on map 0"
+        );
+        assert!(gate_at(1, 14, 90).is_none(), "gates are per-map");
+        // Every gate is a two-way pair: something must bring the character back.
+        for gate in GATES {
+            assert!(
+                GATES
+                    .iter()
+                    .any(|back| back.src_map == gate.dst_map && back.dst_map == gate.src_map),
+                "gate on map {} has no way back",
+                gate.src_map
+            );
+        }
+    }
+
+    /// The destinations are inside the 10-bit fields the record packs, and the
+    /// client's map index for them is the map id itself
+    /// (`gz_proto::game::client_map_index`).
+    #[test]
+    fn every_gate_destination_fits_the_record() {
+        for gate in GATES {
+            assert!((0..1024).contains(&gate.dst_x), "uiX is 10 bits");
+            assert!((0..1024).contains(&gate.dst_y), "uiY is 10 bits");
+            assert!(
+                gz_proto::game::client_map_index(gate.dst_map) == gate.dst_map as u16,
+                "the frame carries the client's map index"
+            );
+        }
+    }
 }

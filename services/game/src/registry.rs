@@ -383,6 +383,20 @@ impl Registry {
         }
     }
 
+    /// Moves a registered character to another map, or does nothing if it is gone.
+    ///
+    /// [`Self::update_pos`] cannot express a warp: the cell a character is near is
+    /// a function of the map *and* the tile (`is_near` returns false across maps),
+    /// so a session that kept its old map would keep fans aimed at the map it
+    /// left.
+    pub fn update_map_pos(&self, key: SessionKey, map_id: i32, x: i32, y: i32) {
+        if let Some(session) = self.lock().get_mut(&key) {
+            session.info.map_id = map_id;
+            session.info.x = x;
+            session.info.y = y;
+        }
+    }
+
     /// Stores (or, with `None`, clears) a character's head chat, the pair the
     /// legacy's `SetHeadChat(bool, TCHAR*)` implements (`char.cpp:6623`).
     pub fn set_head_chat(&self, key: SessionKey, text: Option<String>) {
