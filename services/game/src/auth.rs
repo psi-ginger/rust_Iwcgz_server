@@ -11,13 +11,16 @@ use gz_proto::game::{
     CharListEntry, GameLogin, MakeCharInfo, client_map_index, decode_make_new_char,
     encode_del_result,
 };
+use gz_proto::notice::encode_another_auth;
 use gz_proto::opcodes_game::GameMsg;
 use std::sync::Arc;
 use tokio::net::TcpStream;
 use tokio::sync::Notify;
+use tokio::sync::mpsc::UnboundedSender;
 
 use crate::config::GameConfig;
-use crate::registry::{Registry, SessionKey};
+use crate::registry::{Outbound, Registry, SessionKey};
+use crate::world_entry::{ServerTime, encode_server_time};
 use crate::{AnyError, CHAR_SLOTS, GameSession, logln, send_encoded, server_info};
 /// Whether a `GAMEMSG_REQUEST_SELECTCHAR` should be honoured on this connection.
 ///
@@ -150,6 +153,15 @@ pub(crate) fn admit_game_login(
     Ok(())
 }
 
+/// The bare peer address the legacy's `GetSession()->GetIP()` would report for
+/// the `GAMEMSG_RESPONSE_ANOTHERAUTH` notice. This server's `peer` is `ip:port`,
+/// and the client renders the string verbatim, so the port is stripped.
+fn peer_ip(peer: &str) -> &str {
+    // shortcut: IPv6 hosts keep their brackets; the server binds IPv4, upgrade
+    // if that changes.
+    peer.rsplit_once(':').map_or(peer, |(ip, _)| ip)
+}
+
 /// S9–S11: verify the game login and answer with one char-list packet per slot.
 ///
 /// Before the char list is served, the account is claimed for this connection
@@ -158,7 +170,10 @@ pub(crate) fn admit_game_login(
 /// the holder's connection is woken to disconnect — the legacy closes both
 /// connections on a duplicate (`Server-Auth.cpp:51-120`). Both halves live in
 /// `claim_login`: the refusal is the returned `Err`, the kick is the holder's
-/// `close` being notified.
+/// `close` being notified. Before each is closed, the legacy hands it a
+/// `GAMEMSG_RESPONSE_ANOTHERAUTH` notice (`Server-Auth.cpp:87-114`), so this also
+/// queues the holder its notice (through the registry) and sends the newcomer its
+/// own (`bNewUser = TRUE`) before returning.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn handle_game_login(
     stream: &mut TcpStream,
@@ -168,6 +183,8 @@ pub(crate) async fn handle_game_login(
     registry: &Registry,
     session_key: SessionKey,
     close: Arc<Notify>,
+    out_tx: UnboundedSender<Outbound>,
+    peer: &str,
     login: &GameLogin,
 ) -> Result<GameSession, AnyError> {
     // The auth key is the account idnum the front handed out at login, and the
@@ -183,8 +200,33 @@ pub(crate) async fn handle_game_login(
     admit_game_login(account.account_id, &account.password_hash, login).map_err(AnyError::from)?;
 
     // One live login per account. A conflict refuses *this* connection (the
-    // caller drops the socket on any `Err`) and wakes the holder to close itself.
-    if let Some(owner) = registry.claim_login(account.account_id, session_key, close) {
+    // caller drops the socket on any `Err`), queues the holder the notice below
+    // and wakes it to close itself, and hands the newcomer its own notice before
+    // this returns (`Server-Auth.cpp:100-114` sends the identical pair). The IP
+    // and time are the newcomer's and the server's local time, exactly as the
+    // legacy builds them (`:87-96`).
+    let seconds = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_secs());
+    let system_time = encode_server_time(&ServerTime::from_unix_seconds(seconds));
+    let notice = encode_another_auth(peer_ip(peer), &system_time, false);
+    if let Some(owner) = registry.claim_login(
+        account.account_id,
+        session_key,
+        close,
+        out_tx,
+        Outbound {
+            cmd: GameMsg::ResponseAnotherauth as u16,
+            payload: notice,
+        },
+    ) {
+        send_encoded(
+            stream,
+            outbound,
+            GameMsg::ResponseAnotherauth,
+            &encode_another_auth(peer_ip(peer), &system_time, true),
+        )
+        .await?;
         return Err(format!(
             "game login for {:?}: account {} is already logged in on session {owner}; \
              refusing the duplicate login and closing the holder",

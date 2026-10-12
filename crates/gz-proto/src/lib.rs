@@ -10,6 +10,7 @@ pub mod front;
 pub mod game;
 pub mod item;
 pub mod map_geometry;
+pub mod notice;
 pub mod opcodes_auth;
 pub mod opcodes_front;
 pub mod opcodes_game;

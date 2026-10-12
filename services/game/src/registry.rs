@@ -181,17 +181,24 @@ pub struct FriendEntry {
 #[derive(Debug)]
 pub struct Registry {
     sessions: Mutex<HashMap<SessionKey, OnlineSession>>,
-    /// Accounts with a live game-login connection, `account_id -> (session key,
-    /// close signal)`. Claimed at `GAMEMSG_REQUEST_LOGIN` and released when the
-    /// connection ends, so a second login for the same account is refused while
-    /// the first is still logged in — the legacy's one-login-per-account rule
+    /// Accounts with a live game-login connection, `account_id -> `[`LoginClaim`].
+    /// Claimed at `GAMEMSG_REQUEST_LOGIN` and released when the connection ends,
+    /// so a second login for the same account is refused while the first is still
+    /// logged in — the legacy's one-login-per-account rule
     /// (`Server-Auth.cpp:51-120`, which scans `cltCharManager` for a character
     /// whose `siIDNum` matches the logging-in account and, on a match, closes
     /// *both* connections). The stored [`Notify`] is how the holder is closed:
-    /// [`Self::claim_login`] wakes it when a duplicate arrives, exactly as the
-    /// legacy sets `bCloseSocketSwitch` on the old character.
-    logins: Mutex<HashMap<i32, (SessionKey, Arc<Notify>)>>,
+    /// [`Self::claim_login`] queues the holder its duplicate-login notice on the
+    /// stored `tx` and then wakes the `Notify`, the same order as the legacy,
+    /// which sends `GAMEMSG_RESPONSE_ANOTHERAUTH` to the old character and only
+    /// then sets its `bCloseSocketSwitch` (`Server-Auth.cpp:100-106`).
+    logins: Mutex<HashMap<i32, LoginClaim>>,
 }
+
+/// One account's live login claim: the holder's session key, the signal that
+/// closes it when a duplicate arrives, and its outbound queue, so the kick can
+/// hand the holder its `GAMEMSG_RESPONSE_ANOTHERAUTH` notice before it closes.
+type LoginClaim = (SessionKey, Arc<Notify>, UnboundedSender<Outbound>);
 
 impl Default for Registry {
     fn default() -> Self {
@@ -235,28 +242,41 @@ impl Registry {
     /// connections. Here the claim is taken at `GAMEMSG_REQUEST_LOGIN`, before
     /// the char list is served, so the second connection never selects a
     /// character; the caller turns the `Some(owner)` into a refusal, and the
-    /// holder's `close` is woken here so its read loop disconnects it — the
-    /// holder-kick half of the legacy's two-way close.
+    /// holder is kicked here — the holder-kick half of the legacy's two-way
+    /// close. The kick is two steps in the legacy's order: `notice` (the
+    /// `bNewUser = FALSE` frame the caller built) is queued on the holder's
+    /// outbound channel, and only then is its `close` woken, so the holder's
+    /// read loop writes the notice before it disconnects.
+    ///
+    /// `tx` is this connection's outbound queue, kept so a *future* duplicate can
+    /// reach it the same way. `notice` is dropped unused when there is no
+    /// conflict.
     pub fn claim_login(
         &self,
         account_id: i32,
         key: SessionKey,
         close: Arc<Notify>,
+        tx: UnboundedSender<Outbound>,
+        notice: Outbound,
     ) -> Option<SessionKey> {
         let mut logins = self.logins.lock().unwrap_or_else(PoisonError::into_inner);
-        // Copy out the holder's key and close handle before any `notify`/re-lock,
-        // so the immutable borrow of `logins` ends here.
+        // Copy out the holder's key, close handle and queue before any
+        // `send`/`notify`/re-lock, so the immutable borrow of `logins` ends here.
         let existing = logins
             .get(&account_id)
-            .map(|(owner, close)| (*owner, close.clone()));
-        if let Some((owner, holder_close)) = existing
+            .map(|(owner, close, tx)| (*owner, close.clone(), tx.clone()));
+        if let Some((owner, holder_close, holder_tx)) = existing
             && owner != key
         {
+            // Queued before the wake, so the frame is already in the channel when
+            // the holder's loop sees `close` and drains it below. `send` fails
+            // only once the holder's loop is gone, where there is nobody to tell.
+            let _ = holder_tx.send(notice);
             drop(logins);
             holder_close.notify_one();
             return Some(owner);
         }
-        logins.insert(account_id, (key, close));
+        logins.insert(account_id, (key, close, tx));
         None
     }
 
@@ -332,7 +352,7 @@ impl Registry {
         self.logins
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .retain(|_, (owner, _)| *owner != key);
+            .retain(|_, (owner, _, _)| *owner != key);
         for (my_person_id, friend_person_id) in friend_notices {
             if let Some(other) = self.find_by_character_id(friend_person_id)
                 && other != key
@@ -873,24 +893,43 @@ mod tests {
     }
 
     /// One live login per account: the first claim wins, a second connection is
-    /// told who holds it and wakes the holder's close signal (the holder-kick),
-    /// the holder may re-claim, and the holder's teardown frees the account.
+    /// told who holds it, queues that holder its notice and wakes the holder's
+    /// close signal (the holder-kick), the holder may re-claim, and the holder's
+    /// teardown frees the account.
     #[tokio::test]
     async fn only_one_login_per_account_at_a_time() {
         let registry = Arc::new(Registry::new());
         let first = Registry::next_key();
         let second = Registry::next_key();
         let first_close = Arc::new(Notify::new());
+        let notice = |cmd: u16| Outbound {
+            cmd,
+            payload: vec![cmd as u8],
+        };
+        let (first_tx, mut first_rx) = tokio::sync::mpsc::unbounded_channel();
 
         assert_eq!(
-            registry.claim_login(7, first, first_close.clone()),
+            registry.claim_login(7, first, first_close.clone(), first_tx.clone(), notice(0)),
             None,
             "the first claim wins"
         );
         assert_eq!(
-            registry.claim_login(7, second, Arc::new(Notify::new())),
+            registry.claim_login(
+                7,
+                second,
+                Arc::new(Notify::new()),
+                tokio::sync::mpsc::unbounded_channel().0,
+                notice(GameMsg::ResponseAnotherauth as u16),
+            ),
             Some(first),
             "the second connection is refused and told who holds the account"
+        );
+        assert_eq!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), first_rx.recv())
+                .await
+                .expect("the holder's outbound queue got the notice"),
+            Some(notice(GameMsg::ResponseAnotherauth as u16)),
+            "the holder is handed its duplicate-login notice before it is woken"
         );
         assert!(
             tokio::time::timeout(
@@ -902,12 +941,18 @@ mod tests {
             "the holder's close signal is woken so its read loop disconnects it"
         );
         assert_eq!(
-            registry.claim_login(7, first, first_close.clone()),
+            registry.claim_login(7, first, first_close.clone(), first_tx.clone(), notice(0)),
             None,
             "the holder re-claiming its own account is not a conflict"
         );
         assert_eq!(
-            registry.claim_login(8, second, Arc::new(Notify::new())),
+            registry.claim_login(
+                8,
+                second,
+                Arc::new(Notify::new()),
+                tokio::sync::mpsc::unbounded_channel().0,
+                notice(0),
+            ),
             None,
             "a different account is free"
         );
@@ -917,7 +962,13 @@ mod tests {
         let guard = Registered::new(registry.clone(), first);
         drop(guard);
         assert_eq!(
-            registry.claim_login(7, second, Arc::new(Notify::new())),
+            registry.claim_login(
+                7,
+                second,
+                Arc::new(Notify::new()),
+                tokio::sync::mpsc::unbounded_channel().0,
+                notice(0),
+            ),
             None,
             "the account is free once the holder is gone"
         );

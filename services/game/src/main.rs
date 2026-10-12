@@ -434,9 +434,14 @@ async fn handle_client(
                 return Err("outbound channel closed while the session was live".into());
             }
             LoopTick::Closed => {
-                // A duplicate login for this account woke us; the newcomer was
-                // refused and the legacy parities this holder closed too
-                // (`Server-Auth.cpp:51-120`).
+                // A duplicate login for this account woke us. Its notice was
+                // queued to `out_rx` before the wake, so drain and write it —
+                // the legacy sends `GAMEMSG_RESPONSE_ANOTHERAUTH` and only then
+                // closes (`Server-Auth.cpp:100-106`). Draining also flushes any
+                // broadcast that raced the kick.
+                while let Ok(frame) = out_rx.try_recv() {
+                    send_raw(&mut stream, &mut outbound, frame.cmd, &frame.payload).await?;
+                }
                 logln!("game: {peer}: closed by a duplicate login for this account");
                 session_state.close(now_tick());
                 return Ok(());
@@ -560,6 +565,8 @@ async fn handle_client(
                             &registry,
                             session_key,
                             close.clone(),
+                            out_tx.clone(),
+                            peer,
                             &request,
                         )
                         .await?,
