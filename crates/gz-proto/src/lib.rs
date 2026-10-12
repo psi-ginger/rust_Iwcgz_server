@@ -9,6 +9,7 @@ pub mod friends;
 pub mod front;
 pub mod game;
 pub mod item;
+pub mod loginmany;
 pub mod map_geometry;
 pub mod notice;
 pub mod opcodes_auth;

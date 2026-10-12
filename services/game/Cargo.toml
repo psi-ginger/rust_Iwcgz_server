@@ -6,6 +6,7 @@ publish = false
 
 [dependencies]
 gz-cipher = { path = "../../crates/gz-cipher" }
+gz-data = { path = "../../crates/gz-data" }
 gz-db = { path = "../../crates/gz-db" }
 gz-lzf = { path = "../../crates/gz-lzf" }
 gz-net = { path = "../../crates/gz-net" }

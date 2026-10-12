@@ -6,6 +6,7 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use gz_cipher::Cipher;
+use gz_data::npc::{NpcPlacement, char_unique_for, placements_on};
 use gz_db::{CharacterFull, ItemRepository, PgItemRepository};
 use gz_proto::game::{
     MAX_CONSTRUCTION_NUM, MAX_VILLAGE_NUMBER, MakeCharInfo, ServerInfo, VillageStruct,
@@ -14,12 +15,14 @@ use gz_proto::game::{
     encode_response_name, encode_skillbook_magic_info,
 };
 use gz_proto::item::{Item, MAX_ITEM_PER_PERSON, encode_person_item_info};
+use gz_proto::loginmany::{LoginManyRecord, NpcRecord, encode_login_many_batches_mixed};
 use gz_proto::opcodes_game::GameMsg;
 use gz_proto::quest::PersonQuest;
 use tokio::net::TcpStream;
 
 use crate::config::GameConfig;
 use crate::registry::{Registry, SessionInfo, SessionKey};
+use crate::stats::derived_max_life;
 use crate::{AnyError, basic_info_for, logln, send_encoded, send_raw, world_entry};
 /// Answers `GAMEMSG_REQUEST_VILLAGESTRUCT` (1101). The client blocks player
 /// movement (`OrderAction`) and stops popping reserved characters
@@ -48,6 +51,77 @@ pub(crate) async fn handle_village_struct(
     .await?;
     logln!("game: sent village {village_ref} structure");
     Ok(())
+}
+
+/// The `vitality` a town NPC's life is computed from: the base every character
+/// has (`character_stats`' DDL default, and the value that reproduces the
+/// captured NPC's `uiLife` of 40 at level 1).
+const NPC_BASE_VIT: i32 = 5;
+
+/// Announces `map_id`'s static NPCs to one session, as one or more `LOGINMANY` (6)
+/// bodies.
+///
+/// Opcode 6 is the **only** frame that creates a character on a client
+/// (`Client-Login.cpp:53-85`), so an NPC the client is never told about does not
+/// exist — which is why Hanyang was empty: the town's NPCs live in the map's
+/// `NPCGroup` files and nothing announced them.
+///
+/// **Deviation:** the legacy announces the NPCs of the cells the newcomer just
+/// entered and re-announces on every cell crossing (`ServerMap.cpp:73-150`). We
+/// send the map's whole roster once, at world entry. For characters that never
+/// move and never leave that is the same client-visible outcome, and it keeps the
+/// cell bookkeeping to sessions; a moving NPC (A9, monsters) needs the per-cell
+/// fan back.
+///
+/// # Errors
+///
+/// A placement whose id cannot be computed is skipped with a log line rather than
+/// announced with a wrong id; the caller gets no error from that.
+pub(crate) fn announce_map_npcs(registry: &Registry, session_key: SessionKey, map_id: i32) {
+    let records: Vec<LoginManyRecord> = placements_on(map_id)
+        .filter_map(npc_record_for)
+        .map(LoginManyRecord::Npc)
+        .collect();
+    if records.is_empty() {
+        logln!("game: map {map_id} has no static NPCs to announce");
+        return;
+    }
+    let count = records.len();
+    let mut frames = 0;
+    for body in encode_login_many_batches_mixed(&records) {
+        registry.send_to(session_key, GameMsg::ResponseLoginmany as u16, body);
+        frames += 1;
+    }
+    logln!("game: announced {count} NPC(s) on map {map_id} in {frames} frame(s)");
+}
+
+/// The wire record for one placement.
+///
+/// `life` comes from the port's own base-life formula at the placement's level —
+/// the same 40 the captured NPC carries at level 1 — because the server will not
+/// announce a character at zero life (`char.cpp:9375`).
+fn npc_record_for(placement: &'static NpcPlacement) -> Option<NpcRecord> {
+    let make_char_unique = char_unique_for(placement).or_else(|| {
+        logln!(
+            "game: NPC kind {} at ({},{}) has no id — not announced",
+            placement.kind,
+            placement.x,
+            placement.y
+        );
+        None
+    })?;
+    Some(NpcRecord {
+        make_char_kind: placement.kind,
+        make_char_unique,
+        level: placement.level,
+        life: u32::try_from(derived_max_life(NPC_BASE_VIT, i16::from(placement.level)))
+            .unwrap_or(0),
+        x: placement.x,
+        y: placement.y,
+        map_index: client_map_index(placement.map_id),
+        total_move_speed: 0,
+        home_village_unique: 0,
+    })
 }
 
 /// The `GAMEMSG_RESPONSE_SERVERINFO` body for this single-world dev server.
@@ -660,5 +734,113 @@ impl LiveFrames<'_> {
             *cell = Item::decode(&row.raw)?;
         }
         Ok(array)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::registry::Outbound;
+
+    /// A session in the registry on Hanyang, with the outbound side a test can
+    /// read — the same seam `tests.rs` uses for the announce walk.
+    fn joined(
+        registry: &Registry,
+        char_unique: i16,
+        x: i32,
+        y: i32,
+    ) -> (SessionKey, tokio::sync::mpsc::UnboundedReceiver<Outbound>) {
+        let key = Registry::next_key();
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        registry.register(
+            key,
+            tx,
+            SessionInfo {
+                char_unique,
+                name: "Tester".to_owned(),
+                level: 13,
+                map_id: 158,
+                x,
+                y,
+                school_id: 0,
+                class_kind: 1,
+                life: 161,
+                move_speed: 12,
+                sex: 1,
+                gm_level: 0,
+            },
+        );
+        (key, rx)
+    }
+
+    /// The static NPCs are the only reason the town is not empty: opcode 6 is what
+    /// creates a character on a client (`Client-Login.cpp:53-85`), and the roster
+    /// comes from the generated `NPCGroup` table. Sarah (kind 40,
+    /// `KIND_WAITINGMAN`) is the one that matters — she hands out the chain that
+    /// lifts the exit guard (T-019).
+    #[test]
+    fn announcing_the_map_npcs_puts_sarah_on_the_wire() {
+        let registry = Registry::new();
+        let (key, mut rx) = joined(&registry, 1473, 27, 87);
+
+        announce_map_npcs(&registry, key, 158);
+
+        let frame = rx.try_recv().expect("the map's NPCs are announced");
+        assert_eq!(frame.cmd, GameMsg::ResponseLoginmany as u16);
+        let stride = gz_proto::loginmany::NPC_RECORD_LEN;
+        assert_eq!(
+            frame.payload.len(),
+            gz_data::npc::NPC_PLACEMENTS.len() * stride,
+            "every Hanyang placement in one frame, at the NPC stride"
+        );
+
+        // Walk it the way the client does: each record's own uiType picks the
+        // stride, so a player record in here would shift every following one.
+        let mut records = Vec::new();
+        let mut at = 0usize;
+        while at < frame.payload.len() {
+            let word = u32::from_le_bytes([
+                frame.payload[at],
+                frame.payload[at + 1],
+                frame.payload[at + 2],
+                frame.payload[at + 3],
+            ]);
+            assert_eq!(
+                word & 0x1,
+                gz_proto::loginmany::MAKECHARTYPE_NPC,
+                "an NPC body must carry NPC records only"
+            );
+            records.push(NpcRecord::decode(&frame.payload[at..at + stride]).expect("decodes"));
+            at += stride;
+        }
+        assert_eq!(records.len(), gz_data::npc::NPC_PLACEMENTS.len());
+
+        let sarah = records
+            .iter()
+            .find(|r| r.make_char_kind == 40)
+            .expect("KIND_WAITINGMAN is announced");
+        assert_eq!((sarah.x, sarah.y), (16, 82));
+        assert_eq!(
+            sarah.map_index,
+            client_map_index(158),
+            "the client's map index, not the server's map id"
+        );
+        assert_eq!(sarah.life, 40, "the captured level-1 NPC's life");
+        assert!(
+            (gz_data::npc::NPC_CHAR_UNIQUE_BASE..19999).contains(&sarah.make_char_unique),
+            "an NPC id has to satisfy IsNPC"
+        );
+    }
+
+    /// A map with no placements must send nothing at all: a zero-length 6 body is
+    /// walked as garbage by the client (`Client-Login.cpp:61-63`).
+    #[test]
+    fn a_map_without_npcs_announces_nothing() {
+        let registry = Registry::new();
+        let (key, mut rx) = joined(&registry, 1473, 27, 87);
+
+        announce_map_npcs(&registry, key, 1);
+
+        assert!(rx.try_recv().is_err(), "no frame for a map with no NPCs");
     }
 }

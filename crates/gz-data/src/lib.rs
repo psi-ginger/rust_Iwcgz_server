@@ -1,5 +1,9 @@
-//! Server-side item metadata the runtime needs but the client data does not
+//! Server-side master data the runtime needs but the client data does not
 //! provide as-is.
+//!
+//! Two things live here, both generated from the shipped data rather than typed:
+//! [`npc`] (static town-NPC placements, from `NPCGroup\*.txt` +
+//! `KindInfo_Unique.txt`) and the pileability table below.
 //!
 //! # Pileability
 //!
@@ -30,6 +34,8 @@
 //!   `Switch_Artifact` is off (the default `else` branch of `SetItemType`).
 //! - English `SetItemData` does not load every file on disk (e.g. `ItemBoxE`,
 //!   `SoulGuardE`), so those uniques have no type and are non-pileable too.
+
+pub mod npc;
 
 /// The item uniques that may be stacked (`cltItem::CanPile` == true).
 const PILEABLE: &[u16] = &[

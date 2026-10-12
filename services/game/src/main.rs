@@ -146,9 +146,9 @@ pub(crate) use items::{
 // `super::*`/`crate::*`, hence the allow.
 #[allow(unused_imports)]
 pub(crate) use world::{
-    LIVE_CHARACTER_STATE, LiveFrames, announce_nearby_characters, handle_village_struct,
-    make_char_info_for, make_char_info_from_session, send_character_state, send_world_entry,
-    server_info,
+    LIVE_CHARACTER_STATE, LiveFrames, announce_map_npcs, announce_nearby_characters,
+    handle_village_struct, make_char_info_for, make_char_info_from_session, send_character_state,
+    send_world_entry, server_info,
 };
 
 /// `MAX_TOTAL_CHAR_PER_USER` (3 main + 12 char-house) — the legacy sends one
@@ -783,6 +783,10 @@ async fn handle_client(
                         char_unique,
                         None,
                     )?;
+                    // ...and the map's static NPCs, which are what make the town
+                    // exist at all: the client creates a character only from this
+                    // frame (`Client-Login.cpp:53-85`).
+                    announce_map_npcs(&registry, session_key, character_id.map_id);
                     // The whole of world entry, generated from PostgreSQL: the
                     // context frames, then the character's own state block.
                     //
