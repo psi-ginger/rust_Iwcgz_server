@@ -9,7 +9,7 @@
 use std::time::{Duration, Instant};
 
 use gz_cipher::Cipher;
-use gz_db::{CharacterFull, CharacterRepository, DropLocation, PgCharacterRepository};
+use gz_db::{CharacterFull, CharacterRepository, PgCharacterRepository};
 use gz_proto::game::encode_logout;
 use gz_proto::map_geometry::cell_of;
 use gz_proto::opcodes_game::GameMsg;
@@ -18,8 +18,8 @@ use tokio::net::TcpStream;
 
 use crate::registry::{Registry, SessionInfo, SessionKey};
 use crate::{
-    AnyError, GameSession, LiveFrames, announce_map_npcs, announce_nearby_characters, logln,
-    make_char_info_for, send_encoded,
+    AnyError, LiveFrames, announce_map_npcs, announce_nearby_characters, logln, make_char_info_for,
+    send_encoded,
 };
 
 /// One exit gate: the tile that triggers it and where it puts the character.
@@ -60,6 +60,14 @@ struct Gate {
 /// Every gate this port honours, in `GateInfoE.txt` order.
 const GATES: &[Gate] = &[
     Gate {
+        src_map: 0,
+        src_x: 291,
+        src_y: 350,
+        dst_map: 158,
+        dst_x: 27,
+        dst_y: 87,
+    },
+    Gate {
         src_map: 158,
         src_x: 14,
         src_y: 90,
@@ -82,14 +90,6 @@ const GATES: &[Gate] = &[
         dst_map: 0,
         dst_x: 288,
         dst_y: 354,
-    },
-    Gate {
-        src_map: 0,
-        src_x: 291,
-        src_y: 350,
-        dst_map: 158,
-        dst_x: 27,
-        dst_y: 87,
     },
 ];
 
@@ -450,7 +450,6 @@ pub(crate) async fn step_movement(
     stream: &mut TcpStream,
     outbound: &mut Cipher,
     live: &mut LiveFrames<'_>,
-    login: &mut Option<GameSession>,
     movement: &mut Option<Movement>,
     registry: &Registry,
     session_key: SessionKey,
@@ -461,7 +460,18 @@ pub(crate) async fn step_movement(
     let Some((x, y)) = mv.advance(Instant::now()) else {
         return Ok(());
     };
-    let map_id = mv.map_id;
+    // A movement belongs to one map. A warp clears it (the gate path returns no
+    // movement), so a movement whose map no longer matches the row's is stale —
+    // stepping it would write a tile on the map the character left.
+    if live
+        .character
+        .as_ref()
+        .is_some_and(|c| c.map_id != mv.map_id)
+    {
+        mv.deadline = None;
+        *movement = None;
+        return Ok(());
+    }
     if mv.arrived() {
         mv.deadline = None;
         *movement = None;
@@ -479,9 +489,6 @@ pub(crate) async fn step_movement(
     if let Some(character) = live.character.as_mut() {
         character.pos_x = x;
         character.pos_y = y;
-    }
-    if let Some(session) = login.as_mut() {
-        session.entry_cell = Some(DropLocation { map_id, x, y });
     }
     // The legacy fans this frame to the 3×3 near block (`Server.cpp:1689`), so a
     // bystander's copy of this avatar steps with ours instead of standing still
@@ -716,52 +723,45 @@ pub(crate) async fn handle_userorder(
 async fn warp_through_gate(
     stream: &mut TcpStream,
     outbound: &mut Cipher,
-    characters: &PgCharacterRepository,
+    characters: &dyn CharacterRepository,
     registry: &Registry,
     session_key: SessionKey,
     live: &mut LiveFrames<'_>,
     gate: &Gate,
 ) -> Result<(), AnyError> {
-    let was = session_info_for(live);
-    let character_id = live
-        .character
-        .as_ref()
-        .map(|c| c.character_id)
-        .ok_or("a gate move before the character row is loaded")?;
+    let warp = apply_gate_move(
+        characters,
+        registry,
+        session_key,
+        live.char_unique,
+        &mut live.character,
+        gate,
+    )
+    .await?;
+    let character_id = warp.moved.character_id;
 
-    // 1. Every store that names the old map.
-    characters
-        .update_map_position(character_id, gate.dst_map, gate.dst_x, gate.dst_y)
-        .await?;
-    let moved = {
-        let character = live
-            .character
-            .as_mut()
-            .ok_or("a gate move before the character row is loaded")?;
-        character.map_id = gate.dst_map;
-        character.pos_x = gate.dst_x;
-        character.pos_y = gate.dst_y;
-        character.clone()
-    };
-    registry.update_map_pos(session_key, gate.dst_map, gate.dst_x, gate.dst_y);
-
-    // 2. The map change itself: opcode 5 with this character's record.
-    let info = make_char_info_for(&moved, live.char_unique)?;
+    // The map change itself: opcode 5 with this character's record.
+    let info = make_char_info_for(&warp.moved, live.char_unique)?;
     send_encoded(stream, outbound, GameMsg::ResponseLogin, &info.encode()).await?;
 
-    // 3. Both ends of the move. The departure fan is computed against the *new*
-    //    cell in the *new* map, so every session still near the old tile gets the
-    //    11 and nobody on the destination gets a spurious one.
-    let now = session_info_for(live);
-    let left = logout_departed(registry, &was, &now, session_key, live.char_unique);
-    announce_nearby_characters(registry, session_key, &moved, live.char_unique, None)?;
+    // Both ends of the move. The departure fan is computed against the *new* cell
+    // in the *new* map, so every session still near the old tile gets the 11 and
+    // nobody on the destination gets a spurious one.
+    let left = logout_departed(
+        registry,
+        &warp.was,
+        &warp.now,
+        session_key,
+        live.char_unique,
+    );
+    announce_nearby_characters(registry, session_key, &warp.moved, live.char_unique, None)?;
     // The destination's own NPCs, which the client has never been told about.
-    announce_map_npcs(registry, session_key, gate.dst_map);
+    announce_map_npcs(registry, session_key, warp.now.map_id);
 
     logln!(
         "game: char {character_id} took the gate {} -> map {} at ({}, {}); {left} observer(s) \
          on the old map were told",
-        was.map_id,
+        warp.was.map_id,
         gate.dst_map,
         gate.dst_x,
         gate.dst_y
@@ -769,13 +769,70 @@ async fn warp_through_gate(
     Ok(())
 }
 
+/// What a gate move changed, before any frame is built from it.
+struct GateWarp {
+    /// The character row, already moved to the destination.
+    moved: CharacterFull,
+    /// The near-fan view *before* the move — the set the departure 11 is diffed
+    /// against (`logout_departed`).
+    was: SessionInfo,
+    /// The same view after it.
+    now: SessionInfo,
+}
+
+/// Applies a gate move to every store that names the character's place: the row,
+/// the cached copy and the registry entry.
+///
+/// Separated from the frames so the decision is testable without a socket or a
+/// database — the same split the quest handlers use (T-019 slice 3 review, F2).
+///
+/// # Errors
+///
+/// [`gz_db::RepositoryError`] from the map write, which the caller propagates.
+async fn apply_gate_move(
+    characters: &dyn CharacterRepository,
+    registry: &Registry,
+    session_key: SessionKey,
+    char_unique: i32,
+    character: &mut Option<CharacterFull>,
+    gate: &Gate,
+) -> Result<GateWarp, AnyError> {
+    let was = session_info_from(character, char_unique);
+    let row = character
+        .as_mut()
+        .ok_or("a gate move before the character row is loaded")?;
+
+    characters
+        .update_map_position(row.character_id, gate.dst_map, gate.dst_x, gate.dst_y)
+        .await?;
+    row.map_id = gate.dst_map;
+    row.pos_x = gate.dst_x;
+    row.pos_y = gate.dst_y;
+    let moved = row.clone();
+    registry.update_map_pos(session_key, gate.dst_map, gate.dst_x, gate.dst_y);
+
+    let now = SessionInfo {
+        map_id: moved.map_id,
+        x: moved.pos_x,
+        y: moved.pos_y,
+        ..was.clone()
+    };
+    Ok(GateWarp { moved, was, now })
+}
+
 /// The [`SessionInfo`] the near fan keys off, built from the connection's live
 /// row. Shared by the move 241 fan and the sit/stand 241 fan so both compute the
 /// observer set from the one character state.
 fn session_info_for(live: &LiveFrames<'_>) -> SessionInfo {
-    let character = live.character.as_ref();
+    session_info_from(&live.character, live.char_unique)
+}
+
+/// [`session_info_for`] over a bare row, so a test can build the same view
+/// without a connection.
+fn session_info_from(character: &Option<CharacterFull>, char_unique: i32) -> SessionInfo {
+    let character = character.as_ref();
     SessionInfo {
-        char_unique: live.char_unique as i16,
+        char_unique: char_unique as i16,
         name: character.map(|c| c.name.clone()).unwrap_or_default(),
         level: character.map(|c| c.level as i32).unwrap_or(1),
         map_id: character.map(|c| c.map_id).unwrap_or(0),
@@ -887,15 +944,15 @@ pub(crate) async fn handle_leave_request(
     stream: &mut TcpStream,
     outbound: &mut Cipher,
     characters: &PgCharacterRepository,
-    session: Option<&GameSession>,
+    character: Option<&CharacterFull>,
     ack: GameMsg,
 ) -> Result<(), AnyError> {
-    if let Some(session) = session
-        && let Some(character_id) = session.character_id
-        && let Some(cell) = session.entry_cell
-    {
+    // Where the character stands is the row's business, not a session copy's:
+    // `step_movement` re-seats the row per committed tile and a gate warp moves
+    // it with the map, so this save follows a warp instead of undoing it.
+    if let Some(character) = character {
         characters
-            .update_position(character_id, cell.x, cell.y)
+            .update_position(character.character_id, character.pos_x, character.pos_y)
             .await?;
     }
     send_encoded(stream, outbound, ack, &[]).await
@@ -904,6 +961,7 @@ pub(crate) async fn handle_leave_request(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gz_db::RepositoryError;
 
     /// The gate table is a transcription of `Data\GateInfoE.txt`, so the test
     /// states the file's own facts: Hanyang's three exits land on the outdoor map
@@ -962,5 +1020,214 @@ mod tests {
                 "the frame carries the client's map index"
             );
         }
+    }
+
+    /// One tile can only be one gate: `gate_at` returns the first match, so a
+    /// duplicate row would silently shadow the other one.
+    #[test]
+    fn no_two_gate_rows_share_a_source_tile() {
+        let mut seen = std::collections::HashSet::new();
+        for gate in GATES {
+            assert!(
+                seen.insert((gate.src_map, gate.src_x, gate.src_y)),
+                "two gate rows claim ({}, {}):{}",
+                gate.src_map,
+                gate.src_x,
+                gate.src_y
+            );
+        }
+    }
+
+    /// A character repository that records the two position writes and nothing
+    /// else — the seam `apply_gate_move` takes so the warp's decision is testable
+    /// without PostgreSQL (T-019 slice 3 review, F2).
+    #[derive(Default)]
+    struct MemoryCharacters {
+        map_writes: std::sync::Mutex<Vec<(i32, i32, i32, i32)>>,
+    }
+
+    #[async_trait::async_trait]
+    impl CharacterRepository for MemoryCharacters {
+        async fn list_for_account(
+            &self,
+            _account_id: i32,
+        ) -> Result<Vec<gz_db::CharacterSummary>, RepositoryError> {
+            Ok(Vec::new())
+        }
+
+        async fn find_by_slot(
+            &self,
+            _account_id: i32,
+            _slot: i16,
+        ) -> Result<Option<CharacterFull>, RepositoryError> {
+            Ok(None)
+        }
+
+        async fn find_by_name(
+            &self,
+            _name: &str,
+        ) -> Result<Option<CharacterFull>, RepositoryError> {
+            Ok(None)
+        }
+
+        async fn create_character(
+            &self,
+            _account_id: i32,
+            _name: &str,
+            _class_kind: i16,
+            _gender: i16,
+            _slot: i16,
+        ) -> Result<i32, RepositoryError> {
+            Err(RepositoryError::NotFound)
+        }
+
+        async fn delete_character(
+            &self,
+            _account_id: i32,
+            _slot: i16,
+        ) -> Result<Option<i32>, RepositoryError> {
+            Ok(None)
+        }
+
+        async fn set_delete_pending(
+            &self,
+            _account_id: i32,
+            _slot: i16,
+            _pending: bool,
+        ) -> Result<Option<i32>, RepositoryError> {
+            Ok(None)
+        }
+
+        async fn resolve_game_unique(&self, _character_id: i32) -> Result<i32, RepositoryError> {
+            Err(RepositoryError::NotFound)
+        }
+
+        async fn update_position(
+            &self,
+            _character_id: i32,
+            _x: i32,
+            _y: i32,
+        ) -> Result<(), RepositoryError> {
+            Ok(())
+        }
+
+        async fn update_map_position(
+            &self,
+            character_id: i32,
+            map_id: i32,
+            x: i32,
+            y: i32,
+        ) -> Result<(), RepositoryError> {
+            self.map_writes
+                .lock()
+                .unwrap()
+                .push((character_id, map_id, x, y));
+            Ok(())
+        }
+
+        async fn update_stats(
+            &self,
+            _character_id: i32,
+            _stats: &gz_db::StatsUpdate,
+        ) -> Result<(), RepositoryError> {
+            Ok(())
+        }
+    }
+
+    /// A row standing on Hanyang's east gate, as the character loader would hand
+    /// it over.
+    fn row_on_the_east_gate() -> CharacterFull {
+        CharacterFull {
+            character_id: 1,
+            name: "Tester".to_owned(),
+            class_kind: 1,
+            gender: 1,
+            level: 13,
+            max_life: 161,
+            max_mana: 40,
+            move_speed: 12,
+            exp: 0,
+            money: 1000,
+            map_id: 158,
+            pos_x: 41,
+            pos_y: 90,
+            slot: 0,
+            school_id: 0,
+            game_unique: None,
+            str: 20,
+            dex: 20,
+            vit: 5,
+            mag: 5,
+            hnd: 10,
+            luk: 10,
+            wis: 10,
+            bonus_points: 5,
+        }
+    }
+
+    /// The warp's decision, end to end and without a socket: the row, the cached
+    /// copy and the registry all move together, and `was`/`now` describe the two
+    /// ends the departure 11 is diffed against.
+    #[tokio::test]
+    async fn a_gate_move_moves_every_store_that_names_the_map() {
+        let characters = MemoryCharacters::default();
+        let registry = Registry::new();
+        let key = Registry::next_key();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        registry.register(
+            key,
+            tx,
+            session_info_from(&Some(row_on_the_east_gate()), 1473),
+        );
+
+        let mut character = Some(row_on_the_east_gate());
+        let gate = gate_at(158, 41, 90).expect("the east gate");
+        let warp = apply_gate_move(&characters, &registry, key, 1473, &mut character, gate)
+            .await
+            .expect("the gate move applies");
+
+        // 1. The durable row.
+        assert_eq!(
+            characters.map_writes.lock().unwrap().clone(),
+            vec![(1, 0, 288, 354)],
+            "the map must move with the position, or a re-login returns to Hanyang"
+        );
+        // 2. The cached copy every frame is built from.
+        let cached = character.as_ref().expect("still loaded");
+        assert_eq!((cached.map_id, cached.pos_x, cached.pos_y), (0, 288, 354));
+        assert_eq!(warp.moved.map_id, 0);
+        // 3. The registry entry the near fans key off.
+        let stored = registry.info(key).expect("still registered");
+        assert_eq!((stored.map_id, stored.x, stored.y), (0, 288, 354));
+        // 4. The two ends the departure 11 diffs.
+        assert_eq!((warp.was.map_id, warp.was.x, warp.was.y), (158, 41, 90));
+        assert_eq!((warp.now.map_id, warp.now.x, warp.now.y), (0, 288, 354));
+        assert!(
+            !gz_proto::map_geometry::cells_adjacent(
+                cell_of(warp.was.x, warp.was.y, warp.was.map_id),
+                cell_of(warp.now.x, warp.now.y, warp.now.map_id),
+            ),
+            "crossing maps must never look like a step within one"
+        );
+    }
+
+    /// A gate move with no character row is refused rather than writing a
+    /// position for nobody.
+    #[tokio::test]
+    async fn a_gate_move_without_a_row_is_refused() {
+        let characters = MemoryCharacters::default();
+        let registry = Registry::new();
+        let key = Registry::next_key();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        registry.register(key, tx, session_info_from(&None, 1473));
+
+        let mut character = None;
+        let gate = gate_at(158, 41, 90).expect("the east gate");
+        assert!(
+            apply_gate_move(&characters, &registry, key, 1473, &mut character, gate)
+                .await
+                .is_err()
+        );
+        assert!(characters.map_writes.lock().unwrap().is_empty());
     }
 }

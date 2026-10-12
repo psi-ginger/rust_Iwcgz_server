@@ -7,7 +7,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use gz_cipher::Cipher;
 use gz_data::npc::{NpcPlacement, char_unique_for, placements_on};
-use gz_db::{CharacterFull, ItemRepository, PgItemRepository};
+use gz_db::{CharacterFull, DropLocation, ItemRepository, PgItemRepository};
 use gz_proto::game::{
     MAX_CONSTRUCTION_NUM, MAX_VILLAGE_NUMBER, MakeCharInfo, ServerInfo, VillageStruct,
     client_map_index, encode_all_char_info_one, encode_all_char_info_two, encode_change_horse,
@@ -257,6 +257,21 @@ pub(crate) fn make_char_info_for(
         map_unique: 0,
         make_ani_type: 0,
     })
+}
+
+/// The cell a character row stands on, as the drop/logout path wants it.
+///
+/// One owner, one source. The row is re-seated per committed tile by
+/// `step_movement` and moved together with the map by a gate warp, so anything
+/// that needs "where this character is now" reads it from here. A second copy on
+/// the session is what let a drop land one warp behind (T-019 slice 3 review).
+#[must_use]
+pub(crate) fn character_cell(character: &CharacterFull) -> DropLocation {
+    DropLocation {
+        map_id: character.map_id,
+        x: character.pos_x,
+        y: character.pos_y,
+    }
 }
 
 /// Makes a newly-entered character exist for everyone nearby, and tells it about

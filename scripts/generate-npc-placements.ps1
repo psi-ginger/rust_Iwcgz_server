@@ -1,9 +1,21 @@
-# generate-npc-placements.ps1 - regenerate the gz-data `NPC_PLACEMENTS` table.
+# generate-npc-placements.ps1 - regenerate the generated placement tables.
 #
-# The table (crates/gz-data/src/npc.rs) is what the game service turns into the
-# `cltMakeCharInfoCommon` records a joining client receives in a
-# `GAMEMSG_RESPONSE_LOGINMANY` (6) body, so it is the difference between "Hanyang
-# is empty" and "Sarah Spencer is standing at (16,82)".
+# Emits two committed tables from the client data, and `-Check` fails when either
+# has drifted:
+#
+#   * `NPC_PLACEMENTS` (crates/gz-data/src/npc.rs) - the static town NPCs, from
+#     `NPCGroup\*.txt` + `KindInfo_Unique.txt`.
+#   * `GATES` (services/game/src/movement.rs) - the map-to-map gates, from
+#     `Data\GateInfoE.txt`.
+#
+# (The file name predates the second table; the `-Table` switch picks one.)
+#
+# The NPC table is what the game service turns into the `cltMakeCharInfoCommon`
+# records a joining client receives in a `GAMEMSG_RESPONSE_LOGINMANY` (6) body,
+# so it is the difference between "Hanyang is empty" and "Sarah Spencer is
+# standing at (16,82)". The gate table is what the order path checks a move
+# destination against (`char-order.cpp:173`), so it is the difference between a
+# city exit that works and a tile that does nothing.
 #
 # Recipe, straight from the client's own data so client and server cannot disagree:
 #
@@ -33,6 +45,9 @@ param(
     [string]$DataRoot = (Join-Path $PSScriptRoot '..\..\New Era Live'),
     [int]$MapIndex = 158,
     [string]$RustPath = (Join-Path $PSScriptRoot '..\crates\gz-data\src\npc.rs'),
+    [string]$GateRustPath = (Join-Path $PSScriptRoot '..\services\game\src\movement.rs'),
+    [ValidateSet('all', 'npc', 'gate')]
+    [string]$Table = 'all',
     [switch]$Check
 )
 
@@ -154,35 +169,127 @@ $body = @($sorted | ForEach-Object {
     )
 })
 
-if ($Check) {
-    if (-not (Test-Path $RustPath)) { throw "Rust source not found: '$RustPath' (set -RustPath)" }
-    $text = Get-Content $RustPath -Raw
-    # Scope the scan to the committed table block: the module's own tests build
-    # `NpcPlacement` values too, and counting those would make this check lie.
-    $tableMatch = [regex]::Match(
-        $text,
-        'pub const NPC_PLACEMENTS: &\[NpcPlacement\] = &\[(.*?)\];',
-        [System.Text.RegularExpressions.RegexOptions]::Singleline)
-    if (-not $tableMatch.Success) { throw "no NPC_PLACEMENTS table found in $RustPath" }
-    $pattern = 'NpcPlacement\s*\{\s*kind:\s*(\d+)\s*,\s*map_id:\s*(-?\d+)\s*,\s*x:\s*(\d+)\s*,\s*y:\s*(\d+)\s*,\s*level:\s*(\d+)\s*,?\s*\}'
-    $committed = @([regex]::Matches(
-            $tableMatch.Groups[1].Value,
-            $pattern,
-            [System.Text.RegularExpressions.RegexOptions]::Singleline) | ForEach-Object {
-        '{0}/{1}/{2}/{3}/{4}' -f $_.Groups[1].Value, $_.Groups[2].Value, $_.Groups[3].Value,
-            $_.Groups[4].Value, $_.Groups[5].Value
-    })
-    $generated = @($sorted | ForEach-Object { '{0}/{1}/{2}/{3}/{4}' -f $_.Kind, $_.MapId, $_.X, $_.Y, $_.Level })
-    if (($generated -join ';') -ne ($committed -join ';')) {
-        throw "NPC_PLACEMENTS is stale: $($generated.Count) generated vs $($committed.Count) committed. Re-run without -Check and paste the block."
+# --- gates on the served maps ---------------------------------------------------
+#
+# `GateInfoE.txt` columns: Unique, TxtNum, FOUnique, ItemUnique, ItemNum, SrcMap,
+# SrcX, SrcY, DstMap, DstX, DstY, PKAreaGate, then a comment. A gate is emitted
+# only when **both** ends are maps this port serves: the file also carries every
+# other city's field-to-dungeon links, and pulling those in would add hundreds of
+# rows for maps nothing can reach yet. The served set grows with the maps we
+# serve, one line here.
+$servedMaps = @(0, $MapIndex)
+$gateFile = Join-Path $DataRoot 'Data\GateInfoE.txt'
+if (-not (Test-Path $gateFile)) { throw "gate table not found: '$gateFile' (set -DataRoot)" }
+
+$gates = New-Object 'System.Collections.Generic.List[object]'
+$gateSeenTiles = @{}
+$inData = $false
+foreach ($line in [System.IO.File]::ReadAllLines($gateFile, [System.Text.Encoding]::Unicode)) {
+    if ($line -match '^\s*<Data>') { $inData = $true; continue }
+    if (-not $inData) { continue }
+    $fields = $line -split "`t"
+    if ($fields.Count -lt 11) { continue }
+    $nums = @()
+    foreach ($field in $fields[0..10]) {
+        $value = 0
+        if (-not [int]::TryParse($field.Trim(), [ref]$value)) { $nums = @(); break }
+        $nums += $value
     }
-    Write-Host "NPC_PLACEMENTS is current: $($generated.Count) placements from $fileCount group file(s) on map $MapIndex"
+    if ($nums.Count -lt 11) { continue }
+    $srcMap = $nums[5]
+    $dstMap = $nums[8]
+    if (($servedMaps -notcontains $srcMap) -or ($servedMaps -notcontains $dstMap)) { continue }
+    $tileKey = "$srcMap/$($nums[6])/$($nums[7])"
+    if ($gateSeenTiles.ContainsKey($tileKey)) {
+        throw "$($gateFile): two gate rows claim source tile $tileKey"
+    }
+    $gateSeenTiles[$tileKey] = $true
+    $gates.Add([pscustomobject]@{
+        SrcMap = $srcMap
+        SrcX   = $nums[6]
+        SrcY   = $nums[7]
+        DstMap = $dstMap
+        DstX   = $nums[9]
+        DstY   = $nums[10]
+    })
+}
+if ($gates.Count -eq 0) { throw "no gate rows found between maps $($servedMaps -join ', ')" }
+# Kept in `GateInfoE.txt` order (no sort): that order is the one the table's own
+# doc documents, and it is deterministic by itself.
+$gateSorted = $gates.ToArray()
+
+$gateBody = @($gateSorted | ForEach-Object {
+    @(
+        "    Gate {",
+        "        src_map: $($_.SrcMap),",
+        "        src_x: $($_.SrcX),",
+        "        src_y: $($_.SrcY),",
+        "        dst_map: $($_.DstMap),",
+        "        dst_x: $($_.DstX),",
+        "        dst_y: $($_.DstY),",
+        "    },"
+    )
+})
+$gateGenerated = @($gateSorted | ForEach-Object { '{0}/{1}/{2}/{3}/{4}/{5}' -f $_.SrcMap, $_.SrcX, $_.SrcY, $_.DstMap, $_.DstX, $_.DstY })
+
+if ($Check) {
+    if ($Table -ne 'gate') {
+        if (-not (Test-Path $RustPath)) { throw "Rust source not found: '$RustPath' (set -RustPath)" }
+        $text = Get-Content $RustPath -Raw
+        # Scope the scan to the committed table block: the module's own tests build
+        # `NpcPlacement` values too, and counting those would make this check lie.
+        $tableMatch = [regex]::Match(
+            $text,
+            'pub const NPC_PLACEMENTS: &\[NpcPlacement\] = &\[(.*?)\];',
+            [System.Text.RegularExpressions.RegexOptions]::Singleline)
+        if (-not $tableMatch.Success) { throw "no NPC_PLACEMENTS table found in $RustPath" }
+        $pattern = 'NpcPlacement\s*\{\s*kind:\s*(\d+)\s*,\s*map_id:\s*(-?\d+)\s*,\s*x:\s*(\d+)\s*,\s*y:\s*(\d+)\s*,\s*level:\s*(\d+)\s*,?\s*\}'
+        $committed = @([regex]::Matches(
+                $tableMatch.Groups[1].Value,
+                $pattern,
+                [System.Text.RegularExpressions.RegexOptions]::Singleline) | ForEach-Object {
+            '{0}/{1}/{2}/{3}/{4}' -f $_.Groups[1].Value, $_.Groups[2].Value, $_.Groups[3].Value,
+                $_.Groups[4].Value, $_.Groups[5].Value
+        })
+        $generated = @($sorted | ForEach-Object { '{0}/{1}/{2}/{3}/{4}' -f $_.Kind, $_.MapId, $_.X, $_.Y, $_.Level })
+        if (($generated -join ';') -ne ($committed -join ';')) {
+            throw "NPC_PLACEMENTS is stale: $($generated.Count) generated vs $($committed.Count) committed. Re-run without -Check and paste the block."
+        }
+        Write-Host "NPC_PLACEMENTS is current: $($generated.Count) placements from $fileCount group file(s) on map $MapIndex"
+    }
+    if ($Table -ne 'npc') {
+        if (-not (Test-Path $GateRustPath)) { throw "Rust source not found: '$GateRustPath' (set -GateRustPath)" }
+        $text = Get-Content $GateRustPath -Raw
+        $tableMatch = [regex]::Match(
+            $text,
+            'const GATES: &\[Gate\] = &\[(.*?)\];',
+            [System.Text.RegularExpressions.RegexOptions]::Singleline)
+        if (-not $tableMatch.Success) { throw "no GATES table found in $GateRustPath" }
+        $pattern = 'Gate\s*\{\s*src_map:\s*(-?\d+)\s*,\s*src_x:\s*(\d+)\s*,\s*src_y:\s*(\d+)\s*,\s*dst_map:\s*(-?\d+)\s*,\s*dst_x:\s*(\d+)\s*,\s*dst_y:\s*(\d+)\s*,?\s*\}'
+        $committed = @([regex]::Matches(
+                $tableMatch.Groups[1].Value,
+                $pattern,
+                [System.Text.RegularExpressions.RegexOptions]::Singleline) | ForEach-Object {
+            '{0}/{1}/{2}/{3}/{4}/{5}' -f $_.Groups[1].Value, $_.Groups[2].Value, $_.Groups[3].Value,
+                $_.Groups[4].Value, $_.Groups[5].Value, $_.Groups[6].Value
+        })
+        if (($gateGenerated -join ';') -ne ($committed -join ';')) {
+            throw "GATES is stale: $($gateGenerated.Count) generated vs $($committed.Count) committed. Re-run without -Check and paste the block."
+        }
+        Write-Host "GATES is current: $($gateGenerated.Count) row(s) between maps $($servedMaps -join ', ')"
+    }
     exit 0
 }
 
-Write-Host "# $($sorted.Count) placement(s) from $fileCount group file(s) on map $MapIndex" -ForegroundColor Cyan
-if ($skipped.Count -gt 0) {
-    Write-Host "# skipped $($skipped.Count) kind(s) with no id in KindInfo_Unique.txt:" -ForegroundColor Yellow
-    foreach ($entry in $skipped) { Write-Host "#   $entry" -ForegroundColor Yellow }
+if ($Table -ne 'gate') {
+    Write-Host "# $($sorted.Count) placement(s) from $fileCount group file(s) on map $MapIndex" -ForegroundColor Cyan
+    if ($skipped.Count -gt 0) {
+        Write-Host "# skipped $($skipped.Count) kind(s) with no id in KindInfo_Unique.txt:" -ForegroundColor Yellow
+        foreach ($entry in $skipped) { Write-Host "#   $entry" -ForegroundColor Yellow }
+    }
+    @("pub const NPC_PLACEMENTS: &[NpcPlacement] = &[") + $body + @("];")
 }
-@("pub const NPC_PLACEMENTS: &[NpcPlacement] = &[") + $body + @("];")
+if ($Table -ne 'npc') {
+    Write-Host "# $($gateSorted.Count) gate row(s) between maps $($servedMaps -join ', ')" -ForegroundColor Cyan
+    @("const GATES: &[Gate] = &[") + $gateBody + @("];")
+}

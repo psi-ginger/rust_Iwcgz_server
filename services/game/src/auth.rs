@@ -255,7 +255,6 @@ pub(crate) async fn handle_game_login(
         gm_level: account.gm_level,
         character_id: None,
         username: account.username,
-        entry_cell: None,
     })
 }
 

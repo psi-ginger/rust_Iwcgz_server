@@ -37,7 +37,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use gz_cipher::Cipher;
 use gz_db::{
-    DropLocation, FriendRepository, PgAccountRepository, PgCharacterRepository, PgFriendRepository,
+    FriendRepository, PgAccountRepository, PgCharacterRepository, PgFriendRepository,
     PgItemRepository, PgQuestRepository, QuestRepository,
 };
 use gz_net::session::{Rejection, Session};
@@ -147,8 +147,8 @@ pub(crate) use items::{
 #[allow(unused_imports)]
 pub(crate) use world::{
     LIVE_CHARACTER_STATE, LiveFrames, announce_map_npcs, announce_nearby_characters,
-    handle_village_struct, make_char_info_for, make_char_info_from_session, send_character_state,
-    send_world_entry, server_info,
+    character_cell, handle_village_struct, make_char_info_for, make_char_info_from_session,
+    send_character_state, send_world_entry, server_info,
 };
 
 /// `MAX_TOTAL_CHAR_PER_USER` (3 main + 12 char-house) — the legacy sends one
@@ -466,7 +466,6 @@ async fn handle_client(
                             &mut stream,
                             &mut outbound,
                             &mut live,
-                            &mut login,
                             &mut movement,
                             &registry,
                             session_key,
@@ -628,11 +627,6 @@ async fn handle_client(
                     };
                     if let Some(session) = login.as_mut() {
                         session.character_id = Some(character_id.character_id);
-                        session.entry_cell = Some(DropLocation {
-                            map_id: character_id.map_id,
-                            x: character_id.pos_x,
-                            y: character_id.pos_y,
-                        });
                     }
                     if let Some(session) = login.as_ref() {
                         live.account_id = session.account_id;
@@ -899,18 +893,16 @@ async fn handle_client(
                     .await?;
                 }
                 c if c == GameMsg::RequestInvdrop as u16 => {
-                    let (character_id, cell) = {
-                        let session = login
-                            .as_ref()
-                            .ok_or("item drop before a successful game login")?;
-                        let character_id = session
-                            .character_id
-                            .ok_or("item drop before a character was selected")?;
-                        let cell = session
-                            .entry_cell
-                            .ok_or("item drop before a character position was known")?;
-                        (character_id, cell)
-                    };
+                    // The cell comes from the character row, the **one** owner of
+                    // "where this character stands": world entry seeds it, every
+                    // committed step re-seats it (`step_movement`) and a gate warp
+                    // moves it together with the map. A second copy on the session
+                    // is what let a drop land one warp behind.
+                    let character = live
+                        .character
+                        .as_ref()
+                        .ok_or("item drop before a character was selected")?;
+                    let (character_id, cell) = (character.character_id, character_cell(character));
                     handle_inv_drop(
                         &mut stream,
                         &mut outbound,
@@ -991,13 +983,6 @@ async fn handle_client(
                     .await?
                     {
                         Some(mut mv) => {
-                            if let Some(session) = login.as_mut() {
-                                session.entry_cell = Some(DropLocation {
-                                    map_id: mv.map_id,
-                                    x: mv.pos.0,
-                                    y: mv.pos.1,
-                                });
-                            }
                             // Arm the deadline for the first step.
 
                             mv.deadline = Some(next_move_deadline(&mv, Instant::now()));
@@ -1084,7 +1069,7 @@ async fn handle_client(
                         &mut stream,
                         &mut outbound,
                         &characters,
-                        login.as_ref(),
+                        live.character.as_ref(),
                         ack,
                     )
                     .await?;
@@ -1257,13 +1242,6 @@ struct GameSession {
     /// The logged-in account's name (`accounts.username`). Char-list/create
     /// messages echo this back to the client inside `cltCharListInfo.clBI.szAccountID`.
     username: String,
-    /// The character's current cell, used as the cell for
-    /// `GAMEMSG_REQUEST_INVDROP`.
-    ///
-    /// Seeded at world entry and updated on every `ORDER_MOVE`
-    /// ([`handle_userorder`]), so a dropped item lands where the character is
-    /// standing rather than where it spawned.
-    entry_cell: Option<DropLocation>,
 }
 
 async fn send_encoded(
