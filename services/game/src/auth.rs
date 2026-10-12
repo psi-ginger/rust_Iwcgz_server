@@ -12,9 +12,12 @@ use gz_proto::game::{
     encode_del_result,
 };
 use gz_proto::opcodes_game::GameMsg;
+use std::sync::Arc;
 use tokio::net::TcpStream;
+use tokio::sync::Notify;
 
 use crate::config::GameConfig;
+use crate::registry::{Registry, SessionKey};
 use crate::{AnyError, CHAR_SLOTS, GameSession, logln, send_encoded, server_info};
 /// Whether a `GAMEMSG_REQUEST_SELECTCHAR` should be honoured on this connection.
 ///
@@ -148,11 +151,23 @@ pub(crate) fn admit_game_login(
 }
 
 /// S9–S11: verify the game login and answer with one char-list packet per slot.
+///
+/// Before the char list is served, the account is claimed for this connection
+/// ([`Registry::claim_login`]). A second login for an account already logged in
+/// is refused with an error, which the caller turns into a disconnect, **and**
+/// the holder's connection is woken to disconnect — the legacy closes both
+/// connections on a duplicate (`Server-Auth.cpp:51-120`). Both halves live in
+/// `claim_login`: the refusal is the returned `Err`, the kick is the holder's
+/// `close` being notified.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn handle_game_login(
     stream: &mut TcpStream,
     outbound: &mut Cipher,
     accounts: &PgAccountRepository,
     characters: &PgCharacterRepository,
+    registry: &Registry,
+    session_key: SessionKey,
+    close: Arc<Notify>,
     login: &GameLogin,
 ) -> Result<GameSession, AnyError> {
     // The auth key is the account idnum the front handed out at login, and the
@@ -166,6 +181,17 @@ pub(crate) async fn handle_game_login(
         Err(e) => return Err(e.into()),
     };
     admit_game_login(account.account_id, &account.password_hash, login).map_err(AnyError::from)?;
+
+    // One live login per account. A conflict refuses *this* connection (the
+    // caller drops the socket on any `Err`) and wakes the holder to close itself.
+    if let Some(owner) = registry.claim_login(account.account_id, session_key, close) {
+        return Err(format!(
+            "game login for {:?}: account {} is already logged in on session {owner}; \
+             refusing the duplicate login and closing the holder",
+            login.userid, account.account_id
+        )
+        .into());
+    }
 
     let occupied = send_char_list(
         stream,

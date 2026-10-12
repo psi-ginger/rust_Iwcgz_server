@@ -58,6 +58,7 @@ use gz_proto::friends::{encode_friend_login_response, encode_friend_logout_respo
 use gz_proto::game::BasicInfo;
 use gz_proto::map_geometry::{cell_of, cells_adjacent};
 use gz_proto::opcodes_game::GameMsg;
+use tokio::sync::Notify;
 use tokio::sync::mpsc::UnboundedSender;
 
 /// `MAX_CHAR_NUMBER` (`CommonHeader.h:556`) — `GetIDFromCharUnique` returns 0
@@ -180,6 +181,16 @@ pub struct FriendEntry {
 #[derive(Debug)]
 pub struct Registry {
     sessions: Mutex<HashMap<SessionKey, OnlineSession>>,
+    /// Accounts with a live game-login connection, `account_id -> (session key,
+    /// close signal)`. Claimed at `GAMEMSG_REQUEST_LOGIN` and released when the
+    /// connection ends, so a second login for the same account is refused while
+    /// the first is still logged in — the legacy's one-login-per-account rule
+    /// (`Server-Auth.cpp:51-120`, which scans `cltCharManager` for a character
+    /// whose `siIDNum` matches the logging-in account and, on a match, closes
+    /// *both* connections). The stored [`Notify`] is how the holder is closed:
+    /// [`Self::claim_login`] wakes it when a duplicate arrives, exactly as the
+    /// legacy sets `bCloseSocketSwitch` on the old character.
+    logins: Mutex<HashMap<i32, (SessionKey, Arc<Notify>)>>,
 }
 
 impl Default for Registry {
@@ -194,6 +205,7 @@ impl Registry {
     pub fn new() -> Self {
         Self {
             sessions: Mutex::new(HashMap::new()),
+            logins: Mutex::new(HashMap::new()),
         }
     }
 
@@ -210,6 +222,42 @@ impl Registry {
     /// poisoned it, and a half-updated map is still better than a dead server.
     fn lock(&self) -> MutexGuard<'_, HashMap<SessionKey, OnlineSession>> {
         self.sessions.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Claims `account_id` for `key`'s connection. Returns the session key that
+    /// already holds the account if another one does, in which case this
+    /// connection must be refused; `None` means the claim succeeded (or was
+    /// already this connection's).
+    ///
+    /// This is the legacy's duplicate-login guard (`Server-Auth.cpp:51-120`):
+    /// the legacy scans `cltCharManager` for an online character whose `siIDNum`
+    /// matches the account and aborts the second login, then closes *both*
+    /// connections. Here the claim is taken at `GAMEMSG_REQUEST_LOGIN`, before
+    /// the char list is served, so the second connection never selects a
+    /// character; the caller turns the `Some(owner)` into a refusal, and the
+    /// holder's `close` is woken here so its read loop disconnects it — the
+    /// holder-kick half of the legacy's two-way close.
+    pub fn claim_login(
+        &self,
+        account_id: i32,
+        key: SessionKey,
+        close: Arc<Notify>,
+    ) -> Option<SessionKey> {
+        let mut logins = self.logins.lock().unwrap_or_else(PoisonError::into_inner);
+        // Copy out the holder's key and close handle before any `notify`/re-lock,
+        // so the immutable borrow of `logins` ends here.
+        let existing = logins
+            .get(&account_id)
+            .map(|(owner, close)| (*owner, close.clone()));
+        if let Some((owner, holder_close)) = existing
+            && owner != key
+        {
+            drop(logins);
+            holder_close.notify_one();
+            return Some(owner);
+        }
+        logins.insert(account_id, (key, close));
+        None
     }
 
     /// Enters a connection into the table, replacing anything already under
@@ -278,6 +326,13 @@ impl Registry {
             sessions.remove(&key);
             notices
         };
+        // Drop any account-login claim this connection held, so a disconnect —
+        // clean or not — frees the account for the next login (`Registered`'s
+        // drop is the single exit path).
+        self.logins
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .retain(|_, (owner, _)| *owner != key);
         for (my_person_id, friend_person_id) in friend_notices {
             if let Some(other) = self.find_by_character_id(friend_person_id)
                 && other != key
@@ -815,6 +870,57 @@ mod tests {
         drop(guard);
         assert_eq!(registry.find_by_name("Tester"), None);
         assert_eq!(registry.info(key), None);
+    }
+
+    /// One live login per account: the first claim wins, a second connection is
+    /// told who holds it and wakes the holder's close signal (the holder-kick),
+    /// the holder may re-claim, and the holder's teardown frees the account.
+    #[tokio::test]
+    async fn only_one_login_per_account_at_a_time() {
+        let registry = Arc::new(Registry::new());
+        let first = Registry::next_key();
+        let second = Registry::next_key();
+        let first_close = Arc::new(Notify::new());
+
+        assert_eq!(
+            registry.claim_login(7, first, first_close.clone()),
+            None,
+            "the first claim wins"
+        );
+        assert_eq!(
+            registry.claim_login(7, second, Arc::new(Notify::new())),
+            Some(first),
+            "the second connection is refused and told who holds the account"
+        );
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(100),
+                first_close.notified()
+            )
+            .await
+            .is_ok(),
+            "the holder's close signal is woken so its read loop disconnects it"
+        );
+        assert_eq!(
+            registry.claim_login(7, first, first_close.clone()),
+            None,
+            "the holder re-claiming its own account is not a conflict"
+        );
+        assert_eq!(
+            registry.claim_login(8, second, Arc::new(Notify::new())),
+            None,
+            "a different account is free"
+        );
+
+        // The holder's guard dropping is every exit path (`Registered`), and it
+        // must release the account.
+        let guard = Registered::new(registry.clone(), first);
+        drop(guard);
+        assert_eq!(
+            registry.claim_login(7, second, Arc::new(Notify::new())),
+            None,
+            "the account is free once the holder is gone"
+        );
     }
 
     /// A second `REQUEST_SELECTCHAR` re-registers the same connection: the new

@@ -54,6 +54,7 @@ use gz_proto::opcodes_game::GameMsg;
 use gz_proto::order::OrderData;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::Notify;
 
 type AnyError = Box<dyn std::error::Error + Send + Sync>;
 
@@ -274,18 +275,22 @@ async fn serve(cfg: &GameConfig) -> Result<(), AnyError> {
 
 /// One turn of the read loop's `select!`.
 ///
-/// Three things can end the wait: a frame from the peer, a frame queued for
-/// this connection by a broadcast ([`Outbound`]), or the window that bounds the
-/// wait (the handshake deadline before the first frame, the next movement step
-/// after it). Every branch is cancel-safe — `TcpStream::read` consumes nothing
-/// while pending, an `mpsc` `recv` that loses the race has taken nothing, and a
-/// sleep holds no state — so a frame cannot be lost by the switch.
+/// Four things can end the wait: a frame from the peer, a frame queued for
+/// this connection by a broadcast ([`Outbound`]), the connection being closed
+/// from elsewhere (a duplicate login kicking the holder), or the window that
+/// bounds the wait (the handshake deadline before the first frame, the next
+/// movement step after it). Every branch is cancel-safe — `TcpStream::read`
+/// consumes nothing while pending, an `mpsc` `recv` that loses the race has
+/// taken nothing, `Notify::notified` leaves its permit intact, and a sleep
+/// holds no state — so a frame cannot be lost by the switch.
 enum LoopTick {
     /// Bytes arrived (or the socket reported EOF, or the read failed).
     Read(std::io::Result<usize>),
     /// A queued outbound frame is due. `None` would mean every sender is gone,
     /// which cannot happen while this task holds `out_tx`.
     Send(Option<Outbound>),
+    /// The connection was closed from elsewhere, with no frame to lose.
+    Closed,
     /// The wait's window elapsed.
     TimedOut,
 }
@@ -385,6 +390,11 @@ async fn handle_client(
     // is the no-op it should be. See `Registered`.
     let session_key = Registry::next_key();
     let _registered = Registered::new(registry.clone(), session_key);
+    // Woken by [`Registry::claim_login`] when a duplicate login for this account
+    // arrives. The legacy closes *both* connections on a duplicate
+    // (`Server-Auth.cpp:51-120`); this is how the holder's read loop learns it
+    // must disconnect.
+    let close = Arc::new(Notify::new());
     // Everything aimed at this connection but produced elsewhere — a whisper,
     // a head-chat fan, the general-chat broadcast this speaker is also part of
     // — is queued here and written by this loop, so only this task ever writes
@@ -407,6 +417,7 @@ async fn handle_client(
         let tick = tokio::select! {
             read = stream.read(&mut buf) => LoopTick::Read(read),
             queued = out_rx.recv() => LoopTick::Send(queued),
+            _ = close.notified() => LoopTick::Closed,
             _ = async {
                 match read_window {
                     Some(window) => tokio::time::sleep(window).await,
@@ -421,6 +432,14 @@ async fn handle_client(
             }
             LoopTick::Send(None) => {
                 return Err("outbound channel closed while the session was live".into());
+            }
+            LoopTick::Closed => {
+                // A duplicate login for this account woke us; the newcomer was
+                // refused and the legacy parities this holder closed too
+                // (`Server-Auth.cpp:51-120`).
+                logln!("game: {peer}: closed by a duplicate login for this account");
+                session_state.close(now_tick());
+                return Ok(());
             }
             LoopTick::TimedOut => {
                 if session_state.state().is_active() {
@@ -538,6 +557,9 @@ async fn handle_client(
                             &mut outbound,
                             &accounts,
                             &characters,
+                            &registry,
+                            session_key,
+                            close.clone(),
                             &request,
                         )
                         .await?,
