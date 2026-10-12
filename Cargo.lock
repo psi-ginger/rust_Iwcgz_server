@@ -357,6 +357,7 @@ dependencies = [
 name = "game"
 version = "0.0.1"
 dependencies = [
+ "async-trait",
  "gz-cipher",
  "gz-db",
  "gz-lzf",

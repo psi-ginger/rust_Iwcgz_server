@@ -5,6 +5,7 @@
 //! touching callers. M1 scope: accounts only.
 
 pub mod character;
+pub mod friend;
 pub mod item;
 pub mod password;
 pub mod repository;
@@ -13,6 +14,7 @@ pub use character::{
     CharacterFull, CharacterRepository, CharacterSummary, PALACE_MAP_INDEX, PALACE_SPAWN_X,
     PALACE_SPAWN_Y, PgCharacterRepository, StatsUpdate,
 };
+pub use friend::{FriendRepository, OwnedFriend, PgFriendRepository};
 pub use item::{
     CharacterItem, DropLocation, DropOutcome, DropStatus, GroundClaim, ItemRepository, MoveOutcome,
     PgItemRepository, PickupOutcome, PickupStatus, SplitOutcome, SplitStatus, container_of,

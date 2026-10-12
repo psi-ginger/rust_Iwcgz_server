@@ -11,3 +11,7 @@ gz-lzf = { path = "../../crates/gz-lzf" }
 gz-net = { path = "../../crates/gz-net" }
 gz-proto = { path = "../../crates/gz-proto" }
 tokio = { version = "1", features = ["full"] }
+
+[dev-dependencies]
+# `MemoryFriends` exercises the 6202 accept handler's persistence seam.
+async-trait = "0.1"

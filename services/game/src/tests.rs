@@ -1,6 +1,7 @@
 use super::*;
 use crate::registry::SessionKey;
-use gz_db::CharacterFull;
+use async_trait::async_trait;
+use gz_db::{CharacterFull, FriendRepository, OwnedFriend, RepositoryError};
 use gz_proto::game::{
     GameLogin, MakeCharInfo, encode_all_char_info_one, encode_all_char_info_two,
     encode_change_horse, encode_family_update, encode_get_village_info, encode_login_many_batches,
@@ -2281,6 +2282,31 @@ fn basic_info_for_test(level: i16, name: &str) -> BasicInfo {
     }
 }
 
+/// A friend repository that never persists — the registry is the only store
+/// these connection-level tests exercise, so a DB outage inside the 6202
+/// accept handler must not change any assertion here.
+struct MemoryFriends;
+
+#[async_trait]
+impl FriendRepository for MemoryFriends {
+    async fn load_owned(
+        &self,
+        _owner_character_id: i32,
+    ) -> Result<Vec<OwnedFriend>, RepositoryError> {
+        Ok(Vec::new())
+    }
+
+    async fn add(
+        &self,
+        _owner_character_id: i32,
+        _friend_character_id: i32,
+        _group: u8,
+        _list_slot: i16,
+    ) -> Result<(), RepositoryError> {
+        Ok(())
+    }
+}
+
 /// A 123 for an online target is answered on *this* connection with a 124
 /// carrying the target's identity (`Server-System.cpp:638-651`) — that is what
 /// opens the requester's whisper window.
@@ -2495,10 +2521,10 @@ fn friend_add_ignores_self_and_already_friends() {
     registry.friend_add(
         alice,
         crate::registry::FriendEntry {
-            char_unique: 12,
             person_id: 42,
             group: 0,
             name: "Bob".into(),
+            account_id: "tester".into(),
         },
     );
     handle_friend_add(&registry, alice, &body).unwrap();
@@ -2508,8 +2534,8 @@ fn friend_add_ignores_self_and_already_friends() {
 /// The acceptor's 6202 records the friendship on both sides and appends the
 /// accepted friend to the requester's "New Friend" list with a 6203 carrying
 /// the *friend's* identity (`Client-Friend.cpp:47-59`).
-#[test]
-fn friend_add_accept_appends_to_the_requester() {
+#[tokio::test]
+async fn friend_add_accept_appends_to_the_requester() {
     let registry = Registry::new();
     let (alice_key, mut ra) = chat_join(&registry, chat_info(11, "Alice", 0, 0));
     let (bob_key, mut rb) = chat_join(&registry, chat_info(12, "Bob", 0, 0));
@@ -2521,7 +2547,9 @@ fn friend_add_accept_appends_to_the_requester() {
     body[4..8].copy_from_slice(&42i32.to_le_bytes());
     body[8..12].copy_from_slice(&11i32.to_le_bytes());
     body[12..17].copy_from_slice(b"Alice");
-    handle_friend_add_accept(&registry, bob_key, &body).unwrap();
+    handle_friend_add_accept(&MemoryFriends, &registry, bob_key, &body)
+        .await
+        .unwrap();
 
     let frame = ra.try_recv().expect("Alice gets the 6203");
     assert_eq!(frame.cmd, GameMsg::ResponseFriendaddaccept as u16);
@@ -2547,7 +2575,9 @@ fn friend_add_accept_appends_to_the_requester() {
     // A duplicated accept — Bob clicking accept again after the friendship is
     // on his list — is dropped before any push (`Server-Friend.cpp:193-205`),
     // so Alice must not get a second 6203.
-    handle_friend_add_accept(&registry, bob_key, body).unwrap();
+    handle_friend_add_accept(&MemoryFriends, &registry, bob_key, body)
+        .await
+        .unwrap();
     assert_chat_silent(&mut ra, "duplicate accept sends no second 6203");
 }
 
@@ -2555,8 +2585,8 @@ fn friend_add_accept_appends_to_the_requester() {
 /// 6203-reported positions, so the requester's accepted friend shows up in its
 /// tab under its group, with live map/level/kind while the friend is online
 /// (`Client-Friend.cpp:107-205`).
-#[test]
-fn friend_list_replies_with_requester_s_friends_at_their_slots() {
+#[tokio::test]
+async fn friend_list_replies_with_requester_s_friends_at_their_slots() {
     let registry = Registry::new();
     let (alice_key, mut ra) = chat_join(&registry, chat_info(11, "Alice", 0, 0));
     let (bob_key, mut rb) = chat_join(&registry, chat_info(12, "Bob", 0, 0));
@@ -2568,7 +2598,9 @@ fn friend_list_replies_with_requester_s_friends_at_their_slots() {
     body[4..8].copy_from_slice(&42i32.to_le_bytes());
     body[8..12].copy_from_slice(&11i32.to_le_bytes());
     body[12..17].copy_from_slice(b"Alice");
-    handle_friend_add_accept(&registry, bob_key, &body).unwrap();
+    handle_friend_add_accept(&MemoryFriends, &registry, bob_key, &body)
+        .await
+        .unwrap();
     let _ = ra.try_recv().expect("the 6203");
 
     // The empty 1-byte request body is ignored, so handle it as the client does.

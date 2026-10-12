@@ -54,6 +54,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use gz_proto::chat::{MAX_PLAYER_NAME, cut};
+use gz_proto::friends::{encode_friend_login_response, encode_friend_logout_response};
 use gz_proto::game::BasicInfo;
 use gz_proto::map_geometry::{cell_of, cells_adjacent};
 use gz_proto::opcodes_game::GameMsg;
@@ -143,25 +144,30 @@ pub struct OnlineSession {
     /// database round trip (`Server-Person.cpp:83`). Refreshed on every 250
     /// stat spend; `None` until `REQUEST_SELECTCHAR`.
     basic_info: Option<BasicInfo>,
-    /// Accepted friendships, in memory only — the 6200 duplicate guard's
-    /// `clFriend[i]` scan (`Server-Friend.cpp:52-64`).
+    /// Accepted friendships, hydrated from `character_friends` at world entry
+    /// and appended by a 6202 accept; the 6200 duplicate guard's
+    /// `clFriend[i]` scan (`Server-Friend.cpp:52-64`) and the 6210/6219
+    /// builders all read it.
     friends: Vec<FriendEntry>,
     tx: UnboundedSender<Outbound>,
 }
 
 /// One accepted friendship, stored per owner session. The field set the 6210
-/// friend-list needs: the client renders a slot only when its person id is > 0
-/// (`Client-Friend.cpp:136`) and shows the group the 6203 already reported.
+/// friend-list and 6219 all-list need: the client renders a slot only when its
+/// person id is > 0 (`Client-Friend.cpp:136`) and shows the group the 6203
+/// already reported. Hydrated from `character_friends` at world entry and
+/// appended by a 6202 accept, so a re-login keeps the list the database holds.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FriendEntry {
-    /// The friend's `siCharUnique`.
-    pub char_unique: i16,
     /// The friend's person id — `cltSimplePerson.siPersonID`.
     pub person_id: i32,
     /// The group the friendship is stored under (`siGroupID`).
     pub group: u8,
     /// The friend's character name — the duplicate-check key.
     pub name: String,
+    /// The friend's account id — `szAccountID[i]` in the 6219 all-list and the
+    /// account 6207/6203 carry.
+    pub account_id: String,
 }
 
 /// The table of world-entered connections, shared by every connection task.
@@ -236,24 +242,53 @@ impl Registry {
     /// from [`Self::logout_departed`] (walking out of range): this is the
     /// *session ending* (logout, disconnect, crash), and must be sent
     /// synchronously because the `Drop` guard cannot await.
+    ///
+    /// Once the table lock is released it also pushes a 6208
+    /// `RESPONSE_FRIENDLOGOUT` to every still-online friend of the departing
+    /// character, so their client clears its connect status
+    /// (`NNewFriendDlg.cpp:889-905`). The fan runs after the lock because it
+    /// looks friends up through [`Self::find_by_character_id`], which takes
+    /// the same lock.
     pub fn remove(&self, key: SessionKey) {
-        let mut sessions = self.lock();
-        if let Some(departing) = sessions.get(&key) {
-            let info = departing.info.clone();
-            // Encode LOGOUT (11) = 4-byte char_unique (little-endian)
-            let mut payload = Vec::with_capacity(4);
-            payload.extend_from_slice(&info.char_unique.to_le_bytes());
-            // Broadcast to near block (excluding self, which is already going away)
-            for (other_key, other) in sessions.iter() {
-                if *other_key != key && is_near(&info, &other.info) {
-                    let _ = other.tx.send(Outbound {
-                        cmd: GameMsg::ResponseLogout as u16,
-                        payload: payload.clone(),
-                    });
+        let friend_notices: Vec<(i32, i32)> = {
+            let mut sessions = self.lock();
+            let mut notices = Vec::new();
+            if let Some(departing) = sessions.get(&key) {
+                let info = departing.info.clone();
+                // Encode LOGOUT (11) = 4-byte char_unique (little-endian)
+                let mut payload = Vec::with_capacity(4);
+                payload.extend_from_slice(&info.char_unique.to_le_bytes());
+                // Broadcast to near block (excluding self, which is already going away)
+                for (other_key, other) in sessions.iter() {
+                    if *other_key != key && is_near(&info, &other.info) {
+                        let _ = other.tx.send(Outbound {
+                            cmd: GameMsg::ResponseLogout as u16,
+                            payload: payload.clone(),
+                        });
+                    }
+                }
+                // The 6208 recipients are read now, while the entry is still
+                // under the lock; the sends happen after it drops.
+                if let Some(my_person_id) = departing.basic_info.as_ref().map(|b| b.character_id) {
+                    for friend in &departing.friends {
+                        notices.push((my_person_id, friend.person_id));
+                    }
                 }
             }
+            sessions.remove(&key);
+            notices
+        };
+        for (my_person_id, friend_person_id) in friend_notices {
+            if let Some(other) = self.find_by_character_id(friend_person_id)
+                && other != key
+            {
+                let _ = self.send_to(
+                    other,
+                    GameMsg::ResponseFriendlogout as u16,
+                    encode_friend_logout_response(my_person_id),
+                );
+            }
         }
-        sessions.remove(&key);
     }
 
     /// A copy of one session's character row, or `None` if it is not
@@ -385,6 +420,52 @@ impl Registry {
             .get(&key)
             .map(|s| s.friends.clone())
             .unwrap_or_default()
+    }
+
+    /// Replaces a session's friend list wholesale — the hydrate-on-world-entry
+    /// path, which fills the vec from `character_friends` so a re-login keeps
+    /// the stored friendships. `friends_of` answers 6209/6219 from this.
+    pub fn set_friends(&self, key: SessionKey, friends: Vec<FriendEntry>) {
+        if let Some(session) = self.lock().get_mut(&key) {
+            session.friends = friends;
+        }
+    }
+
+    /// Tells every friend of `key`'s character who is online that it just
+    /// logged in — the legacy's `siLogin == 1` loop
+    /// (`ServerDB-Friend.cpp:45-52`), which runs when a character's DB friend
+    /// list is loaded. The group carried is the one *this* list stores the
+    /// friend under (`ServerDB-Friend.cpp:49` passes its own `siGroupID[i]`);
+    /// person, charunique and account are the logging-in character's.
+    ///
+    /// Returns how many friends took the frame.
+    pub fn friend_login_push(&self, key: SessionKey) -> usize {
+        let Some(info) = self.info(key) else {
+            return 0;
+        };
+        let Some(basic) = self.basic_info(key) else {
+            return 0;
+        };
+        let friends = self.friends_of(key);
+        let mut sent = 0;
+        for friend in friends {
+            if let Some(other) = self.find_by_character_id(friend.person_id)
+                && other != key
+                && self.send_to(
+                    other,
+                    GameMsg::ResponseFriendlogin as u16,
+                    encode_friend_login_response(
+                        friend.group,
+                        basic.character_id,
+                        i32::from(info.char_unique),
+                        &basic.account_id,
+                    ),
+                )
+            {
+                sent += 1;
+            }
+        }
+        sent
     }
 
     /// Queues one frame for one connection; `false` when it is gone.
@@ -1044,6 +1125,138 @@ mod tests {
         assert_silent(&mut rb, "a different home village");
         let frame = rc.try_recv().unwrap();
         assert_eq!(frame.payload, b"home");
+    }
+
+    /// Hydrating a session's friends and pushing 6207 tells every friend who
+    /// is currently online that this character logged in — the legacy's
+    /// `siLogin == 1` loop (`ServerDB-Friend.cpp:45-52`). The frame carries the
+    /// *sender's* group for the friend, and its own person id / charunique /
+    /// account; an online session whose person id was never set is skipped, and
+    /// a session without basic_info has nobody to announce.
+    #[test]
+    fn friend_login_push_notifies_the_online_friends() {
+        let registry = Registry::new();
+        let (alice, _ra) = join(&registry, info(11, "Alice", 0, 0));
+        let (bob, mut rb) = join(&registry, info(12, "Bob", 0, 0));
+        let (_carol, _rc) = join(&registry, info(13, "Carol", 0, 0));
+        registry.set_basic_info(
+            alice,
+            BasicInfo {
+                character_id: 42,
+                ..basic_info_fixture(34)
+            },
+        );
+        registry.set_basic_info(
+            bob,
+            BasicInfo {
+                character_id: 43,
+                ..basic_info_fixture(20)
+            },
+        );
+
+        // Alice lists Bob under group 2 and Carol under group 1 — but Carol's
+        // person id (44) has no session registering it, so she stays offline.
+        registry.set_friends(
+            alice,
+            vec![
+                FriendEntry {
+                    person_id: 43,
+                    group: 2,
+                    name: "Bob".into(),
+                    account_id: "tester".into(),
+                },
+                FriendEntry {
+                    person_id: 44,
+                    group: 1,
+                    name: "Carol".into(),
+                    account_id: "tester".into(),
+                },
+            ],
+        );
+
+        assert_eq!(
+            registry.friend_login_push(alice),
+            1,
+            "Bob is online; Carol has no registered person id"
+        );
+        let frame = rb.try_recv().unwrap();
+        assert_eq!(frame.cmd, GameMsg::ResponseFriendlogin as u16);
+        let body = &frame.payload;
+        assert_eq!(body[0], 2, "Bob's group in Alice's own list");
+        assert_eq!(
+            i32::from_le_bytes(body[4..8].try_into().unwrap()),
+            42,
+            "Alice's person id"
+        );
+        assert_eq!(
+            i32::from_le_bytes(body[8..12].try_into().unwrap()),
+            11,
+            "Alice's charunique"
+        );
+        assert_eq!(&body[12..18], b"tester", "Alice's account id");
+        assert_eq!(body.len(), gz_proto::friends::RESPONSE_FRIENDLOGIN_SIZE);
+
+        // A session that never world-entered has no basic_info, so no push.
+        let (stranger, mut rs) = join(&registry, info(14, "Stranger", 0, 0));
+        assert_eq!(registry.friend_login_push(stranger), 0);
+        assert_silent(&mut rs, "no person to announce, nothing sent");
+    }
+
+    /// A session ending pushes 6208 to the friends of its character who are
+    /// still online, so their client clears the person's connect status
+    /// (`NNewFriendDlg.cpp:889-905`). The register-time LOGOUT fan goes first.
+    #[test]
+    fn remove_tells_online_friends_the_character_went_offline() {
+        let registry = Registry::new();
+        let (alice, mut ra) = join(&registry, info(11, "Alice", 0, 0));
+        let (bob, mut rb) = join(&registry, info(12, "Bob", 0, 0));
+        registry.set_basic_info(
+            alice,
+            BasicInfo {
+                character_id: 42,
+                ..basic_info_fixture(34)
+            },
+        );
+        registry.set_basic_info(
+            bob,
+            BasicInfo {
+                character_id: 43,
+                ..basic_info_fixture(20)
+            },
+        );
+        // Alice listed Bob (person 43) — a friend of the departing character
+        // who is still online, so *his* client must learn she went.
+        registry.set_friends(
+            alice,
+            vec![FriendEntry {
+                person_id: 43,
+                group: 1,
+                name: "Bob".into(),
+                account_id: "tester".into(),
+            }],
+        );
+
+        registry.remove(alice);
+
+        let logout = rb.try_recv().unwrap();
+        assert_eq!(logout.cmd, GameMsg::ResponseLogout as u16);
+        let gone = rb.try_recv().unwrap();
+        assert_eq!(gone.cmd, GameMsg::ResponseFriendlogout as u16);
+        assert_eq!(
+            i32::from_le_bytes(gone.payload.try_into().unwrap()),
+            42,
+            "the departing character's person id"
+        );
+        // Alice's session is gone with the removal, so her inbox is closed
+        // (either `Empty` or `Disconnected`) — but had the fan wrongly queued
+        // her a notice, it would surface here as `Ok`.
+        assert!(
+            matches!(
+                ra.try_recv(),
+                Err(TryRecvError::Empty | TryRecvError::Disconnected)
+            ),
+            "Alice's own inbox gets no friend notice"
+        );
     }
 
     /// `GetIDFromName` copies through `StringCchCopy(..., MAX_PLAYER_NAME, ...)`

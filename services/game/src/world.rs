@@ -124,6 +124,7 @@ pub(crate) async fn send_world_entry(
         char_unique,
         now: world_entry::ServerTime::from_unix_seconds(seconds),
         person_item_info: encode_person_item_info(slot, &announced).to_vec(),
+        friend_list: live.friend_list.clone(),
     });
 
     let total: usize = sequence.iter().map(|(_, body)| body.len()).sum();
@@ -436,6 +437,9 @@ pub(crate) struct LiveFrames<'a> {
     /// reference character to our session; generating them means stamping the
     /// session's id, not `characters.game_unique`.
     pub(crate) char_unique: i32,
+    /// The 6219 friend-all-list body for this session, built at world entry
+    /// from the hydrated `character_friends` rows plus who is online right now.
+    pub(crate) friend_list: Vec<u8>,
 }
 
 impl LiveFrames<'_> {

@@ -246,6 +246,13 @@ pub struct WorldEntry {
     /// char-list frame and inside 248's passport blob, in both cases in regions
     /// the legacy never writes.
     pub person_item_info: Vec<u8>,
+
+    /// The 6219 `RESPONSE_FRIENDALLLIST` body, built by the caller from the
+    /// session's stored friendships plus who is online right now
+    /// (`encode_friend_all_list_response`). Always
+    /// [`gz_proto::friends::RESPONSE_FRIENDALLLIST_SIZE`] bytes; the fallback
+    /// for a missing/hydration-failed list is zeros, which shows an empty tab.
+    pub friend_list: Vec<u8>,
 }
 
 /// Builds the 45-frame world-entry sequence, in the order the reference server
@@ -314,23 +321,22 @@ pub fn prologue(input: &WorldEntry) -> Vec<(u16, Vec<u8>)> {
         input.person_item_info.clone(),
     ));
 
-    // Friend list. **Deliberately all zeros even though the capture is not.**
-    // The captured 5,100-byte body is 19.5% non-zero, and replaying it would
-    // show every account someone else's friends -- both wrong and a data leak.
-    // We model no friends, so the honest body is 5,100 zero bytes.
-    //
-    // An earlier version of this comment blamed those bytes on the reference
-    // character's real friend list. That was probably wrong, and the correction
-    // is the reason: the non-zero bytes are short runs at irregular offsets
-    // (6, 16, 21, 32, 36, 44, ...), and a fixed-stride record array would be
-    // regular. A live check on 2026-10-05 settled it from the other side --
-    // the reference character had no friends on the live server either. So the
-    // likelier explanation is an uninitialised buffer, the same `f7 59` that
-    // sits in `PERSONITEMINFO`'s padding and in 248's passport blob. Zeros are
-    // right either way; only the reasoning was wrong.
+    // Friend list: the caller-supplied 6219 body, which `main.rs` builds from
+    // the session's stored friendships plus who is online. The captured frame
+    // is deliberately never reused — its 19.5% non-zero bytes, scattered at
+    // irregular offsets, are an uninitialised buffer rather than real friend
+    // records (a fixed-stride array would be regular, and the reference
+    // character had no friends). That reasoning lives on in
+    // `the_friend_list_is_empty_and_keeps_the_captured_length`, which sends an
+    // empty body at the captured length when there is no list to send.
+    assert_eq!(
+        input.friend_list.len(),
+        FRIEND_LIST_LEN,
+        "FRIENDALLLIST must be {FRIEND_LIST_LEN} bytes"
+    );
     out.push((
         GameMsg::ResponseFriendalllist as u16,
-        vec![0u8; FRIEND_LIST_LEN],
+        input.friend_list.clone(),
     ));
 
     // Character options: none set.
@@ -442,7 +448,10 @@ pub fn encode_server_time(now: &ServerTime) -> Vec<u8> {
 /// is "nothing here". It is generated rather than replayed so the same code path
 /// reports a populated slot correctly for any other character.
 pub const PERSON_ITEM_INFO_SLOT: u16 = 8;
-const FRIEND_LIST_LEN: usize = 5_100;
+/// The 6219 friend-all-list body length — fixed by the `cltFriendInfo` record
+/// arrays (`CommonHeader.h:3504-3528`). Aliased to the codec's constant so the
+/// generator cannot drift from the encoder.
+const FRIEND_LIST_LEN: usize = gz_proto::friends::RESPONSE_FRIENDALLLIST_SIZE;
 const CHAR_OPTION_LEN: usize = 6;
 
 #[cfg(test)]
@@ -467,6 +476,7 @@ mod tests {
                 &gz_proto::item::Item::empty(),
             )
             .to_vec(),
+            friend_list: vec![0u8; FRIEND_LIST_LEN],
         }
     }
 
@@ -676,11 +686,10 @@ mod tests {
         // the reference character knew, which is both wrong and a data leak. The
         // irregular run spacing (offsets 6, 16, 21, 32, 36, 44, …) is what says
         // uninitialised buffer rather than friend records: a fixed-stride array
-        // would put them at a regular interval.
-        //
-        // That reasoning is preserved in this comment now the capture is in
-        // `archive/capture/`; the assertion is on our own body, which must be empty
-        // at the capture's length.
+        // would put them at a regular interval. That is preserved here now the
+        // `entry()` fixture supplies an empty body at the caller's length; the
+        // non-empty encoding is the codec's own test
+        // (`gz_proto::friends`, `the_friend_all_list_response_…`).
         let generated = prologue(&entry(1));
         let (_, body) = generated
             .iter()
@@ -693,8 +702,7 @@ mod tests {
         );
         assert!(
             body.iter().all(|&b| b == 0),
-            "friend list must be empty: we model no friends, and replaying the \
-             capture would leak the reference character's"
+            "the empty fixture means an empty friend tab"
         );
     }
 

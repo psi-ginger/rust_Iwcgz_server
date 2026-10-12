@@ -8,9 +8,13 @@
 //!
 //! The port answers 6201 to the *target* (opening its accept dialog) and 6203
 //! to the *requester* (adding the accepted friend to its "New Friend" list);
-//! the 1108 offline notice goes to the requester, and 6209/6210 serve the
-//! friend dialog's list. The rest of the family (6205+ delete, memos, groups)
-//! is not modelled — the tab shows whatever the in-memory list holds.
+//! the 1108 offline notice goes to the requester, 6209/6210 serve the friend
+//! dialog's list, 6219 ships the full list at world entry (`CommonHeader.h:
+//! 3504-3528`, sent by `ServerDB-Friend.cpp:67-72`), and 6207/6208 push a
+//! friend's login/logout to everyone who has it listed
+//! (`ServerDB-Friend.cpp:45-52` login only; the logout push's body is
+//! `MsgType-Friend.h:172-181`). The rest of the family (6205+ delete, memos,
+//! groups) is not modelled — the tab shows whatever the list holds.
 
 use crate::chat::{MAX_PLAYER_NAME, cut};
 use crate::wire::{Reader, WireError, Writer};
@@ -42,6 +46,20 @@ pub const SRVAL_FRIEND_NOTCONNECTED: u16 = 7500;
 /// `sizeof(cltGameMsgRequest_FriendList)` — the 6209 body: an empty class, so
 /// MSVC sizes it 1 byte (`MsgType-Friend.h:72-78`).
 pub const REQUEST_FRIENDLIST_SIZE: usize = 1;
+
+/// `sizeof(cltGameMsgResponse_FriendLogin)` — the 6207 body
+/// (`MsgType-Friend.h:154-169`): `SI08` + 3 pad + `SI32` + `SI32` + `TCHAR[20]`.
+pub const RESPONSE_FRIENDLOGIN_SIZE: usize = 32;
+
+/// `sizeof(cltGameMsgResponse_FriendLogOut)` — the 6208 body
+/// (`MsgType-Friend.h:172-181`): one `SI32`.
+pub const RESPONSE_FRIENDLOGOUT_SIZE: usize = 4;
+
+/// `sizeof(cltGameMsgResponse_FriendAllList)` — the 6219 body: the fixed-size
+/// record arrays of `cltFriendInfo` (`CommonHeader.h:3504-3528`),
+/// 5 * 20 group names + 100 `SI08` groups + 100 `cltSimplePerson` (24 B) +
+/// 100 * 20 account ids + 100 `SI32` char ids + 100 `bool` connect statuses.
+pub const RESPONSE_FRIENDALLLIST_SIZE: usize = 5_100;
 
 /// `MAX_FRIEND_NUMBER` (`CommonHeader.h:3501`) — the friend tables' fixed
 /// record count; the client copies every record unconditionally
@@ -243,6 +261,103 @@ pub fn encode_friend_list_response(entries: &[FriendListEntry]) -> Vec<u8> {
     w.finish()
 }
 
+/// One non-zero slot of the 6219 body — index `i` in the entries slice is list
+/// slot `i`, the position 6203 reported. Filled from the character's stored
+/// friendships plus who is online right now (`ServerDB-Friend.cpp:21-65`).
+pub struct FriendAllListEntry {
+    /// `siGroupID[i]`.
+    pub group: u8,
+    /// `clFriend[i].siPersonID`; the client hides a slot with a 0.
+    pub person_id: i32,
+    /// `clFriend[i].szName`.
+    pub name: String,
+    /// `szAccountID[i]` — the friend's account id.
+    pub account_id: String,
+    /// `siCharID[i]` — the friend's current session character id, 0 offline.
+    pub char_id: i32,
+    /// `bConnectStatus[i]`.
+    pub connect: bool,
+}
+
+/// Encodes the 6219 body — `cltGameMsgResponse_FriendAllList`, the friend list
+/// shipped at world entry so the client's `pclFriendInfo` knows every stored
+/// friend and its connect status before the dialog is ever opened
+/// (`Client-Friend.cpp` `DoMsg_GAMEMSG_RESPONSE_FRIENDALLLIST`). Record arrays
+/// are fixed-size, so the reply is always [`RESPONSE_FRIENDALLLIST_SIZE`];
+/// group names are not modelled (the client shows the numeric group).
+#[must_use]
+pub fn encode_friend_all_list_response(entries: &[FriendAllListEntry]) -> Vec<u8> {
+    debug_assert!(entries.len() <= MAX_FRIEND_NUMBER);
+    let zero = FriendAllListEntry {
+        group: 0,
+        person_id: 0,
+        name: String::new(),
+        account_id: String::new(),
+        char_id: 0,
+        connect: false,
+    };
+    let at = |i: usize| entries.get(i).unwrap_or(&zero);
+    let mut w = Writer::with_capacity(RESPONSE_FRIENDALLLIST_SIZE);
+    // `szGroupName[5][MAX_FRIEND_GROUPNAME] = 20` — no group names in the port.
+    for _ in 0..5 * 20 {
+        w.u8(0);
+    }
+    for i in 0..MAX_FRIEND_NUMBER {
+        w.u8(at(i).group);
+    }
+    for i in 0..MAX_FRIEND_NUMBER {
+        let e = at(i);
+        let mut name = e.name.clone();
+        cut(&mut name, MAX_PLAYER_NAME - 1);
+        w.i32(e.person_id);
+        w.fixed_str(&name, MAX_PLAYER_NAME);
+    }
+    for i in 0..MAX_FRIEND_NUMBER {
+        let mut account_id = at(i).account_id.clone();
+        cut(&mut account_id, MAX_PLAYER_NAME - 1);
+        w.fixed_str(&account_id, MAX_PLAYER_NAME);
+    }
+    for i in 0..MAX_FRIEND_NUMBER {
+        w.i32(at(i).char_id);
+    }
+    for i in 0..MAX_FRIEND_NUMBER {
+        w.u8(u8::from(at(i).connect));
+    }
+    w.finish()
+}
+
+/// Encodes the 6207 body — `cltGameMsgResponse_FriendLogin`
+/// (`MsgType-Friend.h:154-169`): "friend X is online now". `group` is the
+/// group the *sender* stored the friend under (the legacy passes its own
+/// list's `siGroupID[i]`, `ServerDB-Friend.cpp:49`), and person/char/account
+/// are the sender's own.
+#[must_use]
+pub fn encode_friend_login_response(
+    group: u8,
+    person_id: i32,
+    char_id: i32,
+    account_id: &str,
+) -> Vec<u8> {
+    let mut account_id = account_id.to_owned();
+    cut(&mut account_id, MAX_PLAYER_NAME - 1);
+    let mut w = Writer::with_capacity(RESPONSE_FRIENDLOGIN_SIZE);
+    w.u8(group); // @ 0
+    w.pad(3); // SI32 alignment
+    w.i32(person_id); // @ 4
+    w.i32(char_id); // @ 8
+    w.fixed_str(&account_id, MAX_PLAYER_NAME); // @ 12
+    w.finish()
+}
+
+/// Encodes the 6208 body — `cltGameMsgResponse_FriendLogOut`
+/// (`MsgType-Friend.h:172-181`): friend `person_id` went offline.
+#[must_use]
+pub fn encode_friend_logout_response(person_id: i32) -> Vec<u8> {
+    let mut w = Writer::with_capacity(RESPONSE_FRIENDLOGOUT_SIZE);
+    w.i32(person_id);
+    w.finish()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -371,5 +486,62 @@ mod tests {
             "siHomeMapIndex stays 0 — no home maps in the port"
         );
         assert_eq!(&body[4100..4400], vec![0u8; 300], "the rank arrays stay 0");
+    }
+
+    #[test]
+    fn the_friend_all_list_response_is_fixed_with_slots_and_connect_status() {
+        let body = encode_friend_all_list_response(&[FriendAllListEntry {
+            group: 3,
+            person_id: 42,
+            name: "Comrade".into(),
+            account_id: "tester".into(),
+            char_id: 0x05BF,
+            connect: true,
+        }]);
+        assert_eq!(body.len(), RESPONSE_FRIENDALLLIST_SIZE);
+        assert_eq!(&body[..100], vec![0u8; 100], "szGroupName stays empty");
+        assert_eq!(body[100], 3, "slot 0 group");
+        assert_eq!(body[101], 0, "slot 1 group is empty");
+        // clFriend[0] at 200, clFriend[1] at 224.
+        assert_eq!(
+            i32::from_le_bytes(body[200..204].try_into().unwrap()),
+            42,
+            "clFriend[0].siPersonID"
+        );
+        assert_eq!(&body[204..211], b"Comrade");
+        assert_eq!(
+            i32::from_le_bytes(body[224..228].try_into().unwrap()),
+            0,
+            "slot 1's empty person hides it from the render"
+        );
+        // szAccountID[0] at 2600, siCharID[0] at 4600, bConnectStatus[0] at 5000.
+        assert_eq!(&body[2600..2606], b"tester", "szAccountID[0]");
+        assert_eq!(
+            i32::from_le_bytes(body[4600..4604].try_into().unwrap()),
+            0x05BF,
+            "siCharID[0] — the online friend's session character id"
+        );
+        assert_eq!(body[5000], 1, "bConnectStatus[0]");
+        assert_eq!(body[5001], 0, "slot 1 is offline");
+        assert_eq!(&body[5100..], &[][..], "exactly 5,100 bytes");
+    }
+
+    #[test]
+    fn the_friend_login_response_is_32_bytes_at_the_zp8_offsets() {
+        let body = encode_friend_login_response(9, 42, 0x05BF, "tester");
+        assert_eq!(body.len(), RESPONSE_FRIENDLOGIN_SIZE);
+        assert_eq!(body[0], 9);
+        assert_eq!(&body[1..4], &[0, 0, 0], "pad to the SI32");
+        assert_eq!(i32::from_le_bytes(body[4..8].try_into().unwrap()), 42);
+        assert_eq!(i32::from_le_bytes(body[8..12].try_into().unwrap()), 0x05BF);
+        assert_eq!(&body[12..18], b"tester", "szAccountID at 12");
+        assert_eq!(body.len(), 32);
+    }
+
+    #[test]
+    fn the_friend_logout_response_is_a_lone_person_id() {
+        let body = encode_friend_logout_response(42);
+        assert_eq!(body.len(), RESPONSE_FRIENDLOGOUT_SIZE);
+        assert_eq!(i32::from_le_bytes(body.try_into().unwrap()), 42);
     }
 }

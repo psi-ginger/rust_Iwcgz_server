@@ -4,28 +4,34 @@
 //!
 //! Handlers do no I/O and no `await`: they resolve the other party through the
 //! [`Registry`] and queue encoded frames on its per-session outbox, exactly like
-//! the chat handlers. The sender's own replies go through the same queue.
+//! the chat handlers. The sender's own replies go through the same queue. The
+//! one exception is the 6202 accept, which persists the friendship to
+//! `character_friends` before the in-memory push.
 //!
 //! The client-side flow (`NRightMouseMenuDlg.cpp:249-266`) names the target by
 //! character name; the legacy server resolves it against the online hash table
 //! and forwards the request so the *target* decides
-//! (`Server-Client\Server-Friend.cpp:19-107`). Friendships live in memory only —
-//! there is no friend table in the port's database — and the friend dialog
-//! shows them: 6209 is answered with a 6210 list
-//! (`Server-Friend.cpp:228-275`), while the rest of the family (6205+ delete,
-//! memos, groups) stays unmodelled. The accept dialog's reject button (6204)
-//! is dropped unhandled because telling the requester off needs the letter
-//! system, which is also not modelled.
+//! (`Server-Client\Server-Friend.cpp:19-107`). Friendships are stored per
+//! character in PostgreSQL, loaded at world entry, and the friend dialog shows
+//! them: 6209 is answered with a 6210 list
+//! (`Server-Friend.cpp:228-275`) and world entry carries the whole list as a
+//! 6219 (`ServerDB-Friend.cpp:67-72`), while the rest of the family (6205+
+//! delete, memos, groups) stays unmodelled. The accept dialog's reject button
+//! (6204) is dropped unhandled because telling the requester off needs the
+//! letter system, which is also not modelled.
 
+use gz_db::FriendRepository;
 use gz_proto::friends::{
-    FriendListEntry, SRVAL_FRIEND_NOTCONNECTED, decode_friend_add_accept_request,
-    decode_friend_add_request, encode_friend_add_accept_response, encode_friend_add_response,
-    encode_friend_list_response, encode_server_return,
+    FriendAllListEntry, FriendListEntry, SRVAL_FRIEND_NOTCONNECTED,
+    decode_friend_add_accept_request, decode_friend_add_request, encode_friend_add_accept_response,
+    encode_friend_add_response, encode_friend_all_list_response, encode_friend_list_response,
+    encode_server_return,
 };
 use gz_proto::opcodes_game::GameMsg;
 use gz_proto::wire::WireError;
 
 use crate::logln;
+use crate::logln_err;
 use crate::registry::{FriendEntry, Registry, SessionKey};
 
 /// Handles 6200 `REQUEST_FRIENDADD` (`Server-Friend.cpp:19-107`).
@@ -76,26 +82,28 @@ pub(crate) fn handle_friend_add(
         basic.character_id,
         &sender.name,
     );
-    registry.send_to(target_key, GameMsg::ResponseFriendadd as u16, body);
+    let _ = registry.send_to(target_key, GameMsg::ResponseFriendadd as u16, body);
     Ok(())
 }
 
 /// Handles 6202 `REQUEST_FRIENDADDACCEPT` (`Server-Friend.cpp:155-…`).
 ///
 /// The acceptor (this connection) confirms the request, whose ids and name are
-/// the original requester's. The server records the friendship in memory on
-/// both sides and tells the requester with a 6203 — the message that appends
-/// the accepted friend to the requester's "New Friend" dialog
-/// (`Client-Friend.cpp:47-59`). The friend-list slot is where the entry landed
-/// in the requester's list; the acceptor gets no reply, its dialog just closes.
-/// A requester who has logged out in the meantime (or is no longer owned by
-/// that name) is silently skipped — there is nobody to add the friend to.
+/// the original requester's. The server persists the friendship to
+/// `character_friends` on both sides, records it in memory, and tells the
+/// requester with a 6203 — the message that appends the accepted friend to the
+/// requester's "New Friend" dialog (`Client-Friend.cpp:47-59`). The friend-list
+/// slot is where the entry landed in the requester's list; the acceptor gets no
+/// reply, its dialog just closes. A requester who has logged out in the
+/// meantime (or is no longer owned by that name) is silently skipped — there is
+/// nobody to add the friend to.
 ///
 /// # Errors
 ///
 /// [`WireError::Truncated`] for a request body shorter than
 /// `gz_proto::friends::REQUEST_FRIENDADDACCEPT_SIZE`.
-pub(crate) fn handle_friend_add_accept(
+pub(crate) async fn handle_friend_add_accept(
+    friends: &dyn FriendRepository,
     registry: &Registry,
     session_key: SessionKey,
     payload: &[u8],
@@ -128,33 +136,65 @@ pub(crate) fn handle_friend_add_accept(
         );
         return Ok(());
     };
+    let Some(requester) = registry.info(requester_key) else {
+        return Ok(());
+    };
+    let Some(requester_basic) = registry.basic_info(requester_key) else {
+        return Ok(());
+    };
+    // Persist both directions first, keyed to the slot each side's list is
+    // about to give the friend — the count before the push. A database failure
+    // degrades to the in-memory friendship rather than failing the accept
+    // (the 6203 still flows; the friendship just does not survive a re-login).
+    let requester_slot = registry.friends_of(requester_key).len() as i16;
+    let acceptor_slot = registry.friends_of(session_key).len() as i16;
+    let saved = friends
+        .add(
+            requester_basic.character_id,
+            acceptor_basic.character_id,
+            request.group,
+            requester_slot,
+        )
+        .await
+        .and(
+            friends
+                .add(
+                    acceptor_basic.character_id,
+                    requester_basic.character_id,
+                    request.group,
+                    acceptor_slot,
+                )
+                .await,
+        );
+    if let Err(e) = saved {
+        logln_err!(
+            "game: friend DB persist for {} <-> {} failed: {e}",
+            acceptor.name,
+            requester.name
+        );
+    }
     // The requester's slot is the 6203's list index; a duplicate accept (already
     // friends) falls back to 0 and still pushes the dialog entry.
     let slot = registry
         .friend_add(
             requester_key,
             FriendEntry {
-                char_unique: acceptor.char_unique,
                 person_id: acceptor_basic.character_id,
                 group: request.group,
                 name: acceptor.name.clone(),
+                account_id: acceptor_basic.account_id.clone(),
             },
         )
         .unwrap_or(0);
-    if let (Some(requester), Some(requester_basic)) = (
-        registry.info(requester_key),
-        registry.basic_info(requester_key),
-    ) {
-        registry.friend_add(
-            session_key,
-            FriendEntry {
-                char_unique: requester.char_unique,
-                person_id: requester_basic.character_id,
-                group: request.group,
-                name: requester.name.clone(),
-            },
-        );
-    }
+    registry.friend_add(
+        session_key,
+        FriendEntry {
+            person_id: requester_basic.character_id,
+            group: request.group,
+            name: requester.name.clone(),
+            account_id: requester_basic.account_id.clone(),
+        },
+    );
     let body = encode_friend_add_accept_response(
         slot as i16,
         request.group,
@@ -198,4 +238,31 @@ pub(crate) fn handle_friend_list(registry: &Registry, session_key: SessionKey) {
         GameMsg::ResponseFriendlist as u16,
         encode_friend_list_response(&entries),
     );
+}
+
+/// The 6219 `RESPONSE_FRIENDALLLIST` body for a session — the whole friend
+/// list a freshly-entered character's client needs to draw its friend tab
+/// before any 6209: names, accounts, groups, and who is online right now
+/// (`cltFriendInfo`, `CommonHeader.h:3504-3528`; built by
+/// `ServerDB-Friend.cpp:21-72`). Connect status and the online friend's
+/// session charunique are resolved live against the registry, zeros for the
+/// offline, so no state has to be kept beyond the friendships themselves.
+pub(crate) fn friend_all_list_body(registry: &Registry, session_key: SessionKey) -> Vec<u8> {
+    let friends = registry.friends_of(session_key);
+    let mut entries = Vec::with_capacity(friends.len());
+    for friend in friends {
+        let (char_id, connect) = registry
+            .find_by_character_id(friend.person_id)
+            .and_then(|key| registry.info(key))
+            .map_or((0, false), |info| (i32::from(info.char_unique), true));
+        entries.push(FriendAllListEntry {
+            group: friend.group,
+            person_id: friend.person_id,
+            name: friend.name,
+            account_id: friend.account_id,
+            char_id,
+            connect,
+        });
+    }
+    encode_friend_all_list_response(&entries)
 }

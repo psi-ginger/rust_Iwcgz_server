@@ -36,7 +36,10 @@ use std::sync::Arc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use gz_cipher::Cipher;
-use gz_db::{DropLocation, PgAccountRepository, PgCharacterRepository, PgItemRepository};
+use gz_db::{
+    DropLocation, FriendRepository, PgAccountRepository, PgCharacterRepository, PgFriendRepository,
+    PgItemRepository,
+};
 use gz_net::session::{Rejection, Session};
 use gz_net::{COMPRESSION_FLAG, Frame, FrameParser, HEADER_SIZE, MAX_FRAME_SIZE, Tick};
 use gz_proto::chat::{
@@ -93,10 +96,12 @@ pub(crate) use chat::{
 };
 
 // The friend family lives in `friends.rs`; the crate root re-exports the
-// handlers the 6200/6202 dispatch arms call so the `mod tests` below can reach
-// them through `super::*`.
+// handlers the 6200/6202/6209 dispatch arms call so the `mod tests` below can
+// reach them through `super::*`.
 #[allow(unused_imports)]
-pub(crate) use friends::{handle_friend_add, handle_friend_add_accept, handle_friend_list};
+pub(crate) use friends::{
+    friend_all_list_body, handle_friend_add, handle_friend_add_accept, handle_friend_list,
+};
 
 // The movement family lives in `movement.rs`. The dispatcher calls the request
 // handlers and `next_move_deadline`; the `mod tests` below reach `Movement` and
@@ -229,6 +234,7 @@ async fn serve(cfg: &GameConfig) -> Result<(), AnyError> {
     let accounts = PgAccountRepository::connect(&cfg.database_url).await?;
     let characters = PgCharacterRepository::connect(&cfg.database_url).await?;
     let items = PgItemRepository::connect(&cfg.database_url).await?;
+    let friends = PgFriendRepository::connect(&cfg.database_url).await?;
     // One table for every connection: the chat family is the first code here
     // that addresses players other than the one asking.
     let registry = Arc::new(Registry::new());
@@ -250,12 +256,15 @@ async fn serve(cfg: &GameConfig) -> Result<(), AnyError> {
         let accounts = accounts.clone();
         let characters = characters.clone();
         let items = items.clone();
+        let friends = friends.clone();
         let registry = registry.clone();
         let peer = peer.to_string();
         let cfg = cfg.clone();
         tokio::spawn(async move {
-            if let Err(e) =
-                handle_client(stream, &peer, &cfg, accounts, characters, items, registry).await
+            if let Err(e) = handle_client(
+                stream, &peer, &cfg, accounts, characters, items, friends, registry,
+            )
+            .await
             {
                 logln_err!("game: {peer}: {e}");
             }
@@ -302,6 +311,7 @@ enum LoopTick {
 /// [`Session::reject`], so a refusal is structurally a disconnect: the cipher
 /// cannot be resynchronised mid-stream in any case, since both key bytes advance
 /// on every call (BUG-011's writeup).
+#[allow(clippy::too_many_arguments)]
 async fn handle_client(
     mut stream: TcpStream,
     peer: &str,
@@ -309,6 +319,7 @@ async fn handle_client(
     accounts: PgAccountRepository,
     characters: PgCharacterRepository,
     items: PgItemRepository,
+    friends: PgFriendRepository,
     registry: Arc<Registry>,
 ) -> Result<(), AnyError> {
     let mut session_state = Session::new(cfg.timeouts);
@@ -364,6 +375,7 @@ async fn handle_client(
         account_name: String::new(),
         character: None,
         char_unique,
+        friend_list: Vec::new(),
     };
 
     // The registry key this connection answers under, plus the removal guard.
@@ -632,6 +644,51 @@ async fn handle_client(
                     {
                         registry.set_basic_info(session_key, basic);
                     }
+                    // Hydrate the friend list from PostgreSQL, then tell any
+                    // online friend that this character logged in (6207) — the
+                    // legacy does both when a character's DB friend list lands
+                    // (`ServerDB-Friend.cpp:23-52`). The 6219 world-entry frame
+                    // below is built from the same list. A failed load degrades
+                    // to an empty tab for this session rather than blocking
+                    // world entry.
+                    let friend_all = match friends.load_owned(character_id.character_id).await {
+                        Ok(loaded) => {
+                            let count = loaded.len();
+                            registry.set_friends(
+                                session_key,
+                                loaded
+                                    .into_iter()
+                                    .map(|f| crate::registry::FriendEntry {
+                                        person_id: f.person_id,
+                                        group: f.group,
+                                        name: f.name,
+                                        account_id: f.account_id,
+                                    })
+                                    .collect(),
+                            );
+                            logln!(
+                                "game: {} loaded {count} friend(s) from the database",
+                                character_id.name
+                            );
+                            let notified = registry.friend_login_push(session_key);
+                            if notified > 0 {
+                                logln!(
+                                    "game: {}: notified {notified} online friend(s) of login",
+                                    character_id.name
+                                );
+                            }
+                            friend_all_list_body(&registry, session_key)
+                        }
+                        Err(e) => {
+                            logln_err!(
+                                "game: friend load for {} failed: {e}; friend tab empty for this \
+                                 session",
+                                character_id.name
+                            );
+                            vec![0u8; gz_proto::friends::RESPONSE_FRIENDALLLIST_SIZE]
+                        }
+                    };
+                    live.friend_list = friend_all;
                     // Make the newcomer visible, and make it visible to everyone
                     // already here — both halves of
                     // `cltServerMap::SendNewOthersInfoToPerson` (`ServerMap.cpp:73-150`).
@@ -1005,7 +1062,8 @@ async fn handle_client(
                     handle_friend_add(&registry, session_key, payload.as_ref())?;
                 }
                 c if c == GameMsg::RequestFriendaddaccept as u16 => {
-                    handle_friend_add_accept(&registry, session_key, payload.as_ref())?;
+                    handle_friend_add_accept(&friends, &registry, session_key, payload.as_ref())
+                        .await?;
                 }
                 c if c == GameMsg::RequestFriendlist as u16 => {
                     handle_friend_list(&registry, session_key);
