@@ -1,41 +1,15 @@
-//! The quest family — 5700 `REQUEST_SETQUESTGOING`, 5701 `REQUEST_CANCELQUEST`,
-//! 5702 `REQUEST_QUESTSTATUS` — and the 225 push that keeps the client's own
-//! quest block true (T-019 slice 1).
+//! The quest request family: 5700 `REQUEST_SETQUESTGOING`, 5701
+//! `REQUEST_CANCELQUEST`, 5702 `REQUEST_QUESTSTATUS`, and the 225 push that keeps
+//! the client's own quest block true.
 //!
-//! # Why this exists
-//!
-//! The client will not walk out of the starting map while it believes the
-//! newbie chain is unfinished: `MouseOperation.cpp:5500-5511` refuses the move
-//! order while `ClearQuest(30005) == false && ClearQuest(30006) == false &&
-//! mapindex == MAPINDEX_PALACE (158) && level < 10`, i.e. the exit is guarded by
-//! *client-side* quest state that the server has to make true. We used to answer
-//! 225 with zeros, so the guard could never lift. See
-//! `docs\rust-rewrite\tasks\T-019-npc-quest-hanyang-exit.md`.
-//!
-//! # Scope (slice 1)
-//!
-//! * the four quests of Sarah Spencer's `BEGINNER2` chain that carry the
-//!   conditions this port can evaluate: `OPENCHARSTATUS`, `BONUSZERO`,
-//!   `EQUIPPOS`, `GOMAP` (`New Era Live\Quest\beginner2\3000{0,3,5,6}E.txt`);
-//! * accept → in-progress → cleared, per type, persisted per type;
-//! * 225 after every change, to the acting session only — the legacy gates it on
-//!   `UPDATE_QUEST` and sends it to self (`Char-UpdateChangedData.cpp:247-253`).
-//!
-//! **Deviation — rewards are logged, not granted.** Each of the four quests
-//! hands out money, exp and an item (`30005E.txt:21,25` and its siblings). This
-//! port has no exp/level path at all (T-018 slice 6 C is explicitly deferred)
-//! and no "grant an item into a free slot" repository call, so granting only the
-//! money would be a half-truth and silently inventing an exp curve would be
-//! worse. The clear path therefore logs exactly what the legacy would have
-//! granted, and the card records this as the open half of slice 1.
-//!
-//! **Policy — soft-fail.** An unknown quest, a condition the port does not
-//! model, a request for a quest that is not in progress, or a failed check is a
-//! logged no-op. The session is never closed; the legacy's `CloseSocket()` paths
-//! are deliberately not ported (same policy as 250).
+//! The `apply_*` functions are the decisions and take every collaborator as a trait
+//! object; the `handle_*` functions are the I/O shells that decode, apply, and send
+//! what the outcome asks for. That split is what lets the whole state machine be
+//! tested without a socket or a database.
 
 use gz_cipher::Cipher;
-use gz_db::{CharacterFull, ItemRepository, QuestRepository, RepositoryError};
+use gz_db::{CharacterRepository, ItemRepository, QuestRepository, RepositoryError};
+use gz_proto::item::{Item, encode_person_item_info};
 use gz_proto::opcodes_game::GameMsg;
 use gz_proto::quest::{
     CancelQuest, PersonQuest, QUEST_CLEAR_COND_BONUSZERO, QUEST_CLEAR_COND_EQUIPPOS,
@@ -44,137 +18,11 @@ use gz_proto::quest::{
 };
 use tokio::net::TcpStream;
 
+use super::QuestActor;
+use super::chain::{BEGINNER2_CHAIN, chain_quest};
+use super::reward::{QuestRewardStore, RewardGrant, RewardPlan, RewardStorage, grant_reward};
 use crate::{AnyError, logln, send_encoded};
 
-/// What the handlers need to read about the acting character.
-///
-/// A snapshot rather than a borrow: `handle_client` holds the live row behind
-/// `LiveFrames`, and taking these three values out first is what lets the
-/// handlers borrow the quest block mutably at the same time.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct QuestActor {
-    /// `cltPIPInfo.siLevel`.
-    pub level: i16,
-    /// `cltPIPInfo.siBonus` — `QUEST_CLEAR_COND_BONUSZERO` wants it at 0
-    /// (`Char-Quest.cpp:104-110`).
-    pub bonus_points: i16,
-    /// The acting character's row id, for the repository calls.
-    pub character_id: i32,
-}
-
-impl QuestActor {
-    /// Reads the three values off the selected character row.
-    #[must_use]
-    pub(crate) fn from_character(character: &CharacterFull) -> Self {
-        Self {
-            level: character.level,
-            bonus_points: character.bonus_points,
-            character_id: character.character_id,
-        }
-    }
-}
-
-/// One quest of a modelled chain.
-///
-/// `bit` is the quest's row in its group file's `Bit` column, which is the bit
-/// `siQuestState` uses (`Quest.h:191-200`); `predecessor` is the quest that must
-/// already be cleared for this one to be accepted — the chain the legacy
-/// enforces through `siMustClearQuestUnique` (`Server-Person.cpp:1881-1888`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct ChainQuest {
-    /// `QUEST_TYPE_*` index.
-    pub quest_type: i16,
-    /// `siQuestUnique`.
-    pub unique: i16,
-    /// Bit index inside the type's `siQuestState`.
-    pub bit: u8,
-    /// `QUEST_CLEAR_COND_*` the client has to satisfy.
-    pub cmd: i16,
-    /// `siPara1` of the condition.
-    pub para1: i16,
-    /// `siPara2` of the condition.
-    pub para2: i16,
-    /// The quest that must be cleared first, or 0 for the chain's first.
-    pub predecessor: i16,
-    /// Reward money the legacy grants on clear (`Reward_Other.Money`).
-    pub reward_money: i64,
-    /// Reward exp the legacy grants (`Reward_Other.Exp`).
-    pub reward_exp: i32,
-    /// Reward item unique (`Reward_Item.ItemUnique1`), 0 for none.
-    pub reward_item: i16,
-    /// Reward item count.
-    pub reward_item_num: i16,
-}
-
-/// Sarah Spencer's `BEGINNER2` chain, in order, as the client's data defines it.
-///
-/// Sources: `New Era Live\Quest\beginner2.txt:9-19` (bit → unique) and each
-/// quest's own `Condition` / `Para1` / `Para2` / reward rows. `30005` and
-/// `30006` are the two the client's gate checks
-/// (`MouseOperation.cpp:5500-5502`).
-pub(crate) const BEGINNER2_CHAIN: &[ChainQuest] = &[
-    ChainQuest {
-        quest_type: 14, // QUEST_TYPE_BEGINNER2
-        unique: 30000,
-        bit: 0,
-        cmd: QUEST_CLEAR_COND_OPENCHARSTATUS,
-        para1: 0,
-        para2: 1,
-        predecessor: 0,
-        reward_money: 100,
-        reward_exp: 30,
-        reward_item: 1500,
-        reward_item_num: 1,
-    },
-    ChainQuest {
-        quest_type: 14,
-        unique: 30003,
-        bit: 1,
-        cmd: QUEST_CLEAR_COND_BONUSZERO,
-        para1: 0,
-        para2: 1,
-        predecessor: 30000,
-        reward_money: 110,
-        reward_exp: 30,
-        reward_item: 20164,
-        reward_item_num: 1,
-    },
-    ChainQuest {
-        quest_type: 14,
-        unique: 30005,
-        bit: 2,
-        cmd: QUEST_CLEAR_COND_EQUIPPOS,
-        para1: 7,
-        para2: 1,
-        predecessor: 30003,
-        reward_money: 120,
-        reward_exp: 30,
-        reward_item: 20163,
-        reward_item_num: 1,
-    },
-    ChainQuest {
-        quest_type: 14,
-        unique: 30006,
-        bit: 3,
-        cmd: QUEST_CLEAR_COND_GOMAP,
-        para1: 0,
-        para2: 1,
-        predecessor: 30005,
-        reward_money: 130,
-        reward_exp: 40,
-        reward_item: 2565,
-        reward_item_num: 20,
-    },
-];
-
-/// The chain quest named by `(type, unique)`, if this port models it.
-fn chain_quest(quest_type: i16, unique: i16) -> Option<&'static ChainQuest> {
-    BEGINNER2_CHAIN
-        .iter()
-        .find(|q| q.quest_type == quest_type && q.unique == unique)
-}
-
-/// The one item question a quest condition asks: is `slot` occupied?
 ///
 /// A narrow trait rather than the whole [`ItemRepository`]: `EQUIPPOS` needs one
 /// boolean (`Char-Quest.cpp:360-368` reads `clCharItem.clItem[para1].siUnique`),
@@ -202,8 +50,15 @@ impl<T: ItemRepository + ?Sized> SlotOccupancy for T {
 }
 
 /// What a request did to the quest block.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub(crate) enum QuestOutcome {
+    /// The block changed and a reward was paid: persist, push 225, and tell the
+    /// client about the item slot the reward landed in.
+    Cleared { reward: RewardGrant },
+    /// Granting the reward was refused because the inventory has no room: nothing
+    /// changed, and the client is told why (`SRVAL_QUEST_FAIL_FULLINV`,
+    /// `Server-Person.cpp:1287-1296`).
+    RewardRefused,
     /// The block changed: persist and push 225.
     Changed,
     /// Nothing to persist or send — the request was a logged no-op.
@@ -226,6 +81,8 @@ pub(crate) enum QuestOutcome {
 pub(crate) async fn apply_quest_going(
     quests: &dyn QuestRepository,
     slots: &dyn SlotOccupancy,
+    storage: &dyn RewardStorage,
+    npc_price_rate: i32,
     actor: &QuestActor,
     state: &mut PersonQuest,
     request: QuestGoing,
@@ -312,23 +169,33 @@ pub(crate) async fn apply_quest_going(
             );
             return Ok(QuestOutcome::NoChange);
         }
+        // The legacy pays before it clears, and refuses the clear when it cannot
+        // pay (`Server-Person.cpp:1287-1296`): a reward is never lost to a full
+        // inventory. Granting first also keeps our two writes ordered so a failure
+        // cannot leave a cleared quest that was never paid.
+        let plan = RewardPlan::for_quest(quest, npc_price_rate);
+        let reward = match grant_reward(storage, actor, &plan).await? {
+            RewardGrant::InventoryFull => {
+                logln!(
+                    "game: quest {} clear refused — inventory cannot take the reward",
+                    quest.unique
+                );
+                return Ok(QuestOutcome::RewardRefused);
+            }
+            granted => granted,
+        };
         unit.set_clear(quest.bit);
         unit.clear_going();
         quests
             .save(actor.character_id, quest.quest_type, unit)
             .await?;
         logln!(
-            "game: quest {} (type {}, bit {}) cleared — reward not granted (deviation: \
-             money {} / exp {} / item {} x{}, no money/exp/item-grant path yet)",
+            "game: quest {} (type {}, bit {}) cleared",
             quest.unique,
             quest.quest_type,
-            quest.bit,
-            quest.reward_money,
-            quest.reward_exp,
-            quest.reward_item,
-            quest.reward_item_num
+            quest.bit
         );
-        return Ok(QuestOutcome::Changed);
+        return Ok(QuestOutcome::Cleared { reward });
     }
 
     // Accept / advance. The predecessor and already-cleared checks ran before
@@ -411,6 +278,8 @@ pub(crate) async fn apply_cancel_quest(
 pub(crate) async fn apply_quest_status(
     quests: &dyn QuestRepository,
     slots: &dyn SlotOccupancy,
+    storage: &dyn RewardStorage,
+    npc_price_rate: i32,
     actor: &QuestActor,
     state: &mut PersonQuest,
     request: QuestStatus,
@@ -478,23 +347,31 @@ pub(crate) async fn apply_quest_status(
         );
         return Ok(QuestOutcome::NoChange);
     }
+    // Same order as the 5700 clear: pay, or refuse the clear (`Server-Person.cpp`
+    // reaches the reward block from both entry points).
+    let plan = RewardPlan::for_quest(quest, npc_price_rate);
+    let reward = match grant_reward(storage, actor, &plan).await? {
+        RewardGrant::InventoryFull => {
+            logln!(
+                "game: quest {} status clear refused — inventory cannot take the reward",
+                quest.unique
+            );
+            return Ok(QuestOutcome::RewardRefused);
+        }
+        granted => granted,
+    };
     unit.set_clear(quest.bit);
     unit.clear_going();
     quests
         .save(actor.character_id, quest.quest_type, unit)
         .await?;
     logln!(
-        "game: quest {} (type {}, bit {}) cleared by the client's report — reward not granted \
-         (deviation: money {} / exp {} / item {} x{})",
+        "game: quest {} (type {}, bit {}) cleared by the client's report",
         quest.unique,
         quest.quest_type,
-        quest.bit,
-        quest.reward_money,
-        quest.reward_exp,
-        quest.reward_item,
-        quest.reward_item_num
+        quest.bit
     );
-    Ok(QuestOutcome::Changed)
+    Ok(QuestOutcome::Cleared { reward })
 }
 
 /// Sends 225 with the whole block, to this session only.
@@ -522,11 +399,15 @@ pub(crate) async fn push_quest_state(
 ///
 /// A malformed body is a logged no-op, not an error; socket and repository
 /// failures propagate.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn handle_set_quest_going(
     stream: &mut TcpStream,
     cipher: &mut Cipher,
     quests: &dyn QuestRepository,
     slots: &dyn SlotOccupancy,
+    items: &dyn ItemRepository,
+    characters: &dyn CharacterRepository,
+    npc_price_rate: i32,
     actor: &QuestActor,
     state: &mut PersonQuest,
     payload: &[u8],
@@ -535,8 +416,15 @@ pub(crate) async fn handle_set_quest_going(
         logln!("game: malformed 5700 ({} bytes) — ignored", payload.len());
         return Ok(());
     };
-    if apply_quest_going(quests, slots, actor, state, request).await? == QuestOutcome::Changed {
-        push_quest_state(stream, cipher, state).await?;
+    let store = QuestRewardStore { items, characters };
+    match apply_quest_going(quests, slots, &store, npc_price_rate, actor, state, request).await? {
+        QuestOutcome::Cleared { reward } => {
+            push_quest_state(stream, cipher, state).await?;
+            announce_reward(stream, cipher, &reward).await?;
+        }
+        QuestOutcome::RewardRefused => announce_reward_refused(stream, cipher).await?,
+        QuestOutcome::Changed => push_quest_state(stream, cipher, state).await?,
+        QuestOutcome::NoChange => {}
     }
     Ok(())
 }
@@ -569,11 +457,15 @@ pub(crate) async fn handle_cancel_quest(
 /// # Errors
 ///
 /// As [`handle_set_quest_going`].
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn handle_quest_status(
     stream: &mut TcpStream,
     cipher: &mut Cipher,
     quests: &dyn QuestRepository,
     slots: &dyn SlotOccupancy,
+    items: &dyn ItemRepository,
+    characters: &dyn CharacterRepository,
+    npc_price_rate: i32,
     actor: &QuestActor,
     state: &mut PersonQuest,
     payload: &[u8],
@@ -582,10 +474,80 @@ pub(crate) async fn handle_quest_status(
         logln!("game: malformed 5702 ({} bytes) — ignored", payload.len());
         return Ok(());
     };
-    if apply_quest_status(quests, slots, actor, state, request).await? == QuestOutcome::Changed {
-        push_quest_state(stream, cipher, state).await?;
+    let store = QuestRewardStore { items, characters };
+    match apply_quest_status(quests, slots, &store, npc_price_rate, actor, state, request).await? {
+        QuestOutcome::Cleared { reward } => {
+            push_quest_state(stream, cipher, state).await?;
+            announce_reward(stream, cipher, &reward).await?;
+        }
+        QuestOutcome::RewardRefused => announce_reward_refused(stream, cipher).await?,
+        QuestOutcome::Changed => push_quest_state(stream, cipher, state).await?,
+        QuestOutcome::NoChange => {}
     }
     Ok(())
+}
+
+/// Tells the acting session what a reward did: the slot the item landed in, with
+/// its *new* contents.
+///
+/// This is the frame the legacy's DB layer answers a grant with
+/// (`ServerDB-Item.cpp:1374-1420`, `GAMEMSG_RESPONSE_PERSONITEMINFO`), and it is
+/// what makes a quest reward appear without a relog.
+///
+/// # Errors
+///
+/// Propagates socket failures and an unreadable stored record.
+async fn announce_reward(
+    stream: &mut TcpStream,
+    cipher: &mut Cipher,
+    reward: &RewardGrant,
+) -> Result<(), AnyError> {
+    let RewardGrant::Granted { slot, .. } = reward else {
+        return Ok(());
+    };
+    let Some(row) = slot else {
+        return Ok(());
+    };
+    let item = Item::decode(&row.raw).map_err(|e| {
+        format!(
+            "reward slot {} holds an unreadable {}-byte record: {e}",
+            row.slot,
+            row.raw.len()
+        )
+    })?;
+    send_encoded(
+        stream,
+        cipher,
+        GameMsg::ResponsePersoniteminfo,
+        &encode_person_item_info(row.slot, &item),
+    )
+    .await
+}
+
+/// Tells the client a reward was withheld because there is no room for it.
+///
+/// The legacy sends `SRVAL_QUEST_FAIL_FULLINV` (`Server-Person.cpp:1290`), a
+/// server-response *id* the client localises. This port has no SRVAL table, so the
+/// text travels in a notice instead — same dialog, no shared id space.
+///
+/// # Errors
+///
+/// Propagates socket failures.
+async fn announce_reward_refused(
+    stream: &mut TcpStream,
+    cipher: &mut Cipher,
+) -> Result<(), AnyError> {
+    send_encoded(
+        stream,
+        cipher,
+        GameMsg::ResponseNotice,
+        &gz_proto::chat::encode_notice(
+            "Quest",
+            "Your inventory is too full to receive the reward.",
+            true,
+        ),
+    )
+    .await
 }
 
 #[cfg(test)]
@@ -641,6 +603,73 @@ mod tests {
         }
     }
 
+    /// A reward store that records what it was asked to hand over, and can pretend
+    /// the inventory is full.
+    struct RewardFake {
+        calls: Mutex<Vec<String>>,
+        /// `Some(slot)` to accept the item, `None` for `GIVEITEM_RESULT_NOINVEN`.
+        room: Option<u16>,
+    }
+
+    impl Default for RewardFake {
+        /// Room in slot 15 — `INV0`, the first carry slot a character holding
+        /// nothing has free.
+        fn default() -> Self {
+            Self {
+                calls: Mutex::new(Vec::new()),
+                room: Some(15),
+            }
+        }
+    }
+
+    impl RewardFake {
+        fn full() -> Self {
+            Self {
+                calls: Mutex::new(Vec::new()),
+                room: None,
+            }
+        }
+
+        fn calls(&self) -> Vec<String> {
+            self.calls.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl RewardStorage for RewardFake {
+        async fn store_item(
+            &self,
+            character_id: i32,
+            item_unique: u16,
+            count: i32,
+        ) -> Result<Option<gz_db::CharacterItem>, RepositoryError> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(format!("item {character_id} {item_unique} x{count}"));
+            Ok(self.room.map(|slot| gz_db::CharacterItem {
+                slot,
+                container: gz_proto::item::container_of(slot),
+                item_unique: i32::from(item_unique),
+                count,
+                raw: vec![0; gz_proto::item::CLT_ITEM_SIZE],
+            }))
+        }
+
+        async fn add_money(&self, character_id: i32, amount: i64) -> Result<(), RepositoryError> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(format!("money {character_id} {amount}"));
+            Ok(())
+        }
+    }
+
+    /// True when the outcome is a clear that carried a grant.
+    fn cleared(outcome: &QuestOutcome) -> bool {
+        matches!(outcome, QuestOutcome::Cleared { .. })
+    }
+
     fn newbie(bonus_points: i16) -> QuestActor {
         QuestActor {
             level: 1,
@@ -652,6 +681,7 @@ mod tests {
     async fn accept(
         quests: &MemoryQuests,
         slots: &FixedSlots,
+        rewards: &RewardFake,
         actor: &QuestActor,
         state: &mut PersonQuest,
         unique: i16,
@@ -659,6 +689,8 @@ mod tests {
         apply_quest_going(
             quests,
             slots,
+            rewards,
+            100,
             actor,
             state,
             QuestGoing {
@@ -677,6 +709,7 @@ mod tests {
     async fn report(
         quests: &MemoryQuests,
         slots: &FixedSlots,
+        rewards: &RewardFake,
         actor: &QuestActor,
         state: &mut PersonQuest,
         unique: i16,
@@ -685,6 +718,8 @@ mod tests {
         apply_quest_status(
             quests,
             slots,
+            rewards,
+            100,
             actor,
             state,
             QuestStatus {
@@ -705,19 +740,19 @@ mod tests {
     #[tokio::test]
     async fn the_tutorial_chain_reaches_the_bit_that_opens_the_exit() {
         let quests = MemoryQuests::default();
+        let rewards = RewardFake::default();
         let slots = FixedSlots(vec![7]); // the JP Straw Shoes, equipped
         let actor = newbie(0); // every bonus point spent
         let mut state = PersonQuest::new();
 
         for unique in [30000, 30003, 30005] {
             assert_eq!(
-                accept(&quests, &slots, &actor, &mut state, unique).await,
+                accept(&quests, &slots, &rewards, &actor, &mut state, unique).await,
                 QuestOutcome::Changed,
                 "quest {unique} starts"
             );
-            assert_eq!(
-                report(&quests, &slots, &actor, &mut state, unique).await,
-                QuestOutcome::Changed,
+            assert!(
+                cleared(&report(&quests, &slots, &rewards, &actor, &mut state, unique).await),
                 "quest {unique} clears"
             );
         }
@@ -739,13 +774,12 @@ mod tests {
         // 30006's condition is GOMAP(map 0) — cleared by walking out of Hanyang,
         // which the client reports from `Client.cpp:5499-5523`.
         assert_eq!(
-            accept(&quests, &slots, &actor, &mut state, 30006).await,
+            accept(&quests, &slots, &rewards, &actor, &mut state, 30006).await,
             QuestOutcome::Changed
         );
-        assert_eq!(
-            report(&quests, &slots, &actor, &mut state, 30006).await,
-            QuestOutcome::Changed
-        );
+        assert!(cleared(
+            &report(&quests, &slots, &rewards, &actor, &mut state, 30006).await
+        ));
         assert!(state.unit(14).unwrap().is_clear(3));
 
         // Every change wrote exactly its own type — the legacy's per-type update
@@ -756,13 +790,14 @@ mod tests {
     #[tokio::test]
     async fn a_quest_cannot_start_before_its_predecessor_is_cleared() {
         let quests = MemoryQuests::default();
+        let rewards = RewardFake::default();
         let slots = FixedSlots(vec![7]);
         let actor = newbie(0);
         let mut state = PersonQuest::new();
 
         // 30005 needs 30003, which needs 30000 — nothing is cleared yet.
         assert_eq!(
-            accept(&quests, &slots, &actor, &mut state, 30005).await,
+            accept(&quests, &slots, &rewards, &actor, &mut state, 30005).await,
             QuestOutcome::NoChange
         );
         assert_eq!(state.unit(14).unwrap().cur_unique, 0);
@@ -772,77 +807,80 @@ mod tests {
     #[tokio::test]
     async fn bonuszero_refuses_while_points_are_unspent() {
         let quests = MemoryQuests::default();
+        let rewards = RewardFake::default();
         let slots = FixedSlots(vec![]);
         let mut state = PersonQuest::new();
 
         // Start 30000 and clear it, then start 30003.
         let unspent = newbie(5);
-        accept(&quests, &slots, &unspent, &mut state, 30000).await;
-        report(&quests, &slots, &unspent, &mut state, 30000).await;
-        accept(&quests, &slots, &unspent, &mut state, 30003).await;
+        accept(&quests, &slots, &rewards, &unspent, &mut state, 30000).await;
+        report(&quests, &slots, &rewards, &unspent, &mut state, 30000).await;
+        accept(&quests, &slots, &rewards, &unspent, &mut state, 30003).await;
 
         // With 5 points left the condition is not met (`Char-Quest.cpp:104-110`).
         assert_eq!(
-            report(&quests, &slots, &unspent, &mut state, 30003).await,
+            report(&quests, &slots, &rewards, &unspent, &mut state, 30003).await,
             QuestOutcome::NoChange
         );
         assert!(!state.unit(14).unwrap().is_clear(1));
 
         // The same report after the points are spent clears it.
         let spent = newbie(0);
-        assert_eq!(
-            report(&quests, &slots, &spent, &mut state, 30003).await,
-            QuestOutcome::Changed
-        );
+        assert!(cleared(
+            &report(&quests, &slots, &rewards, &spent, &mut state, 30003).await
+        ));
         assert!(state.unit(14).unwrap().is_clear(1));
     }
 
     #[tokio::test]
     async fn equippos_refuses_an_empty_slot() {
         let quests = MemoryQuests::default();
+        let rewards = RewardFake::default();
         let actor = newbie(0);
         let mut state = PersonQuest::new();
         let empty = FixedSlots(vec![]);
         let equipped = FixedSlots(vec![7]);
 
         for unique in [30000, 30003] {
-            accept(&quests, &equipped, &actor, &mut state, unique).await;
-            report(&quests, &equipped, &actor, &mut state, unique).await;
+            accept(&quests, &equipped, &rewards, &actor, &mut state, unique).await;
+            report(&quests, &equipped, &rewards, &actor, &mut state, unique).await;
         }
-        accept(&quests, &equipped, &actor, &mut state, 30005).await;
+        accept(&quests, &equipped, &rewards, &actor, &mut state, 30005).await;
 
         // Slot 7 empty: `clItem[7].siUnique == 0` (`Char-Quest.cpp:360-368`).
         assert_eq!(
-            report(&quests, &empty, &actor, &mut state, 30005).await,
+            report(&quests, &empty, &rewards, &actor, &mut state, 30005).await,
             QuestOutcome::NoChange
         );
         assert!(!state.unit(14).unwrap().is_clear(2));
 
-        assert_eq!(
-            report(&quests, &equipped, &actor, &mut state, 30005).await,
-            QuestOutcome::Changed
-        );
+        assert!(cleared(
+            &report(&quests, &equipped, &rewards, &actor, &mut state, 30005).await
+        ));
         assert!(state.unit(14).unwrap().is_clear(2));
     }
 
     #[tokio::test]
     async fn an_unmodelled_or_mismatched_request_is_a_logged_no_op() {
         let quests = MemoryQuests::default();
+        let rewards = RewardFake::default();
         let slots = FixedSlots(vec![7]);
         let actor = newbie(0);
         let mut state = PersonQuest::new();
 
         // A quest this port does not model.
         assert_eq!(
-            accept(&quests, &slots, &actor, &mut state, 30015).await,
+            accept(&quests, &slots, &rewards, &actor, &mut state, 30015).await,
             QuestOutcome::NoChange
         );
         // A report whose condition is not the one in progress.
-        accept(&quests, &slots, &actor, &mut state, 30000).await;
+        accept(&quests, &slots, &rewards, &actor, &mut state, 30000).await;
         assert_eq!(
             apply_quest_status(
                 &quests,
                 &slots,
+                &rewards,
+                100,
                 &actor,
                 &mut state,
                 QuestStatus {
@@ -859,7 +897,7 @@ mod tests {
         );
         // A report for a quest that is not in progress.
         assert_eq!(
-            report(&quests, &slots, &actor, &mut state, 30003).await,
+            report(&quests, &slots, &rewards, &actor, &mut state, 30003).await,
             QuestOutcome::NoChange
         );
         assert!(!state.unit(14).unwrap().is_clear(0));
@@ -869,11 +907,12 @@ mod tests {
     #[tokio::test]
     async fn cancelling_clears_the_going_fields_and_not_the_bits() {
         let quests = MemoryQuests::default();
+        let rewards = RewardFake::default();
         let slots = FixedSlots(vec![7]);
         let actor = newbie(0);
         let mut state = PersonQuest::new();
 
-        accept(&quests, &slots, &actor, &mut state, 30000).await;
+        accept(&quests, &slots, &rewards, &actor, &mut state, 30000).await;
         assert_eq!(state.unit(14).unwrap().cur_unique, 30000);
 
         let outcome = apply_cancel_quest(
@@ -909,27 +948,60 @@ mod tests {
         assert_eq!(again, QuestOutcome::NoChange);
     }
 
-    /// The chain table's four entries are the ones the client's gate names, and
-    /// each carries the condition its own quest file declares.
-    #[test]
-    fn the_chain_matches_the_client_data() {
-        assert_eq!(BEGINNER2_CHAIN.len(), 4);
-        let uniques: Vec<i16> = BEGINNER2_CHAIN.iter().map(|q| q.unique).collect();
-        assert_eq!(uniques, vec![30000, 30003, 30005, 30006]);
-        assert_eq!(BEGINNER2_CHAIN[0].cmd, QUEST_CLEAR_COND_OPENCHARSTATUS);
-        assert_eq!(BEGINNER2_CHAIN[1].cmd, QUEST_CLEAR_COND_BONUSZERO);
-        assert_eq!(BEGINNER2_CHAIN[2].cmd, QUEST_CLEAR_COND_EQUIPPOS);
-        assert_eq!(BEGINNER2_CHAIN[2].para1, 7, "the shoe slot");
-        assert_eq!(BEGINNER2_CHAIN[3].cmd, QUEST_CLEAR_COND_GOMAP);
-        assert_eq!(BEGINNER2_CHAIN[3].para1, 0, "map 0, the outdoor field");
-        // Bits are the group file's Bit column, and 30005/30006 are exactly the
-        // two quests `MouseOperation.cpp:5500-5502` tests.
-        assert_eq!(BEGINNER2_CHAIN[2].bit, 2);
-        assert_eq!(BEGINNER2_CHAIN[3].bit, 3);
-        // The chain is a chain.
-        assert_eq!(BEGINNER2_CHAIN[0].predecessor, 0);
-        for pair in BEGINNER2_CHAIN.windows(2) {
-            assert_eq!(pair[1].predecessor, pair[0].unique);
+    /// The acceptance test of T-019's reward work: clearing a quest hands over the
+    /// item its own quest file names, then the money — the thing the client needs
+    /// before it can equip the shoes and walk out.
+    #[tokio::test]
+    async fn a_clear_grants_the_quest_files_item_and_money() {
+        let quests = MemoryQuests::default();
+        let rewards = RewardFake {
+            room: Some(16),
+            ..Default::default()
+        };
+        let slots = FixedSlots(vec![]);
+        let actor = newbie(0);
+        let mut state = PersonQuest::new();
+
+        accept(&quests, &slots, &rewards, &actor, &mut state, 30000).await;
+        let outcome = report(&quests, &slots, &rewards, &actor, &mut state, 30000).await;
+
+        // 30000's reward row: item 1500 x1, money 100 (`30000E.txt`).
+        match outcome {
+            QuestOutcome::Cleared {
+                reward: RewardGrant::Granted { slot },
+            } => {
+                let row = slot.expect("30000 gives an item");
+                assert_eq!(row.slot, 16, "the slot the store reported");
+                assert_eq!(row.item_unique, 1500);
+            }
+            other => panic!("expected a paid clear, got {other:?}"),
         }
+        assert_eq!(
+            rewards.calls(),
+            vec!["item 42 1500 x1".to_string(), "money 42 100".to_string()]
+        );
+        assert!(state.unit(14).unwrap().is_clear(0), "and the bit is set");
+    }
+
+    /// A full inventory must leave the quest in progress rather than clear it into
+    /// nothing: `Server-Person.cpp:1287-1296` refuses the clear, so the reward is
+    /// still owed when there is room again.
+    #[tokio::test]
+    async fn a_full_inventory_refuses_the_clear_and_keeps_the_quest_going() {
+        let quests = MemoryQuests::default();
+        let rewards = RewardFake::full();
+        let slots = FixedSlots(vec![]);
+        let actor = newbie(0);
+        let mut state = PersonQuest::new();
+
+        accept(&quests, &slots, &rewards, &actor, &mut state, 30000).await;
+        let outcome = report(&quests, &slots, &rewards, &actor, &mut state, 30000).await;
+
+        assert_eq!(outcome, QuestOutcome::RewardRefused);
+        let unit = state.unit(14).unwrap();
+        assert!(!unit.is_clear(0), "the quest must not clear unpaid");
+        assert_eq!(unit.cur_unique, 30000, "it is still in progress");
+        // Nothing was written and no money was paid.
+        assert_eq!(rewards.calls(), vec!["item 42 1500 x1".to_string()]);
     }
 }

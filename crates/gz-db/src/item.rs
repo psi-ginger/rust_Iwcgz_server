@@ -197,6 +197,32 @@ pub trait ItemRepository: Send + Sync {
         items: &[CharacterItem],
     ) -> Result<(), RepositoryError>;
 
+    /// Puts `count` of `item_unique` into the character's inventory, choosing the
+    /// slot exactly as the legacy's grant path does, and returns the slot's
+    /// resulting row.
+    ///
+    /// This is `cltCharServer::GiveItem` (`Char-Item.cpp:8898`): build the item,
+    /// ask [`grant_slot`] where it goes, write it. The returned row is what the
+    /// caller reports to the client in a `PERSONITEMINFO` frame — the legacy's DB
+    /// layer answers the grant with exactly that, carrying the slot's *new*
+    /// contents (`ServerDB-Item.cpp:1374-1420`), which for a merge is the topped-up
+    /// stack rather than what was added.
+    ///
+    /// `None` is `GIVEITEM_RESULT_NOINVEN`: nothing was written and the caller must
+    /// not treat the reward as delivered (for a quest that means refusing the
+    /// clear, `Server-Person.cpp:1287-1296`).
+    ///
+    /// # Errors
+    ///
+    /// [`RepositoryError::Database`] if the read or write fails, or
+    /// [`RepositoryError::Invalid`] if the slot being merged into holds an
+    /// unreadable record.
+    async fn grant(
+        &self,
+        character_id: i32,
+        item_unique: u16,
+        count: i32,
+    ) -> Result<Option<CharacterItem>, RepositoryError>;
     /// Applies a `GAMEMSG_REQUEST_ITEMMOVE` (303) to the stored array.
     ///
     /// The client applies the move locally and never waits for a reply — the
@@ -512,6 +538,53 @@ async fn clear_slot(
     Ok(())
 }
 
+/// The count a grant actually stores.
+///
+/// A pileable item keeps the requested count; a non-pileable one is **one** item per
+/// grant, which is what `GiveItem` clamps it to after asking `CanPile`
+/// (`Char-Item.cpp:8926-8934`). Split out from [`grant`] so the rule is testable
+/// without a database.
+fn grant_count(item_unique: i32, requested: i32) -> i32 {
+    if stackable(item_unique) { requested } else { 1 }
+}
+
+/// The slot a granted item lands in, and the count to write there.
+///
+/// Pure, so the placement rule is testable without a database. It mirrors
+/// `cltPItemInfo::CanAddInv` (`ItemPerson.cpp:256`), which `GiveItem`
+/// (`Char-Item.cpp:8959`) calls before every grant: a **pileable** item first
+/// tops up an existing stack *of the same unique* that has room, and otherwise --
+/// or for a non-pileable item -- takes the lowest free carry slot. `None` is the
+/// legacy's `GIVEITEM_RESULT_NOINVEN`.
+///
+/// `occupied` is the character's `(slot, item_unique, count)` set; slots outside
+/// [`carry_slots`] cannot receive a grant, since the client never said which
+/// equipment slot it wants (the same reason the pickup path excludes them).
+fn grant_slot(occupied: &[(u16, i32, i32)], item_unique: i32, count: i32) -> Option<(u16, i32)> {
+    if count <= 0 {
+        return None;
+    }
+    let carry: Vec<u16> = carry_slots().collect();
+    if stackable(item_unique) {
+        for (slot, held_unique, held) in occupied {
+            // Same item or nothing: piling onto a *different* item would write the
+            // wrong unique into the slot, which is what `CanAddInv`'s
+            // `dst_unique == src_unique` check is for (`ItemPerson.cpp:315`).
+            if *held_unique != item_unique || !carry.contains(slot) || *held <= 0 {
+                continue;
+            }
+            let merged = held + count;
+            if merged <= MAX_PILE {
+                return Some((*slot, merged));
+            }
+        }
+    }
+    carry
+        .into_iter()
+        .find(|slot| !occupied.iter().any(|(s, _, held)| s == slot && *held > 0))
+        .map(|slot| (slot, count))
+}
+
 /// The slots a picked-up item may land in, in the order the legacy would try
 /// them.
 ///
@@ -600,6 +673,88 @@ impl ItemRepository for PgItemRepository {
                 raw,
             })
             .collect())
+    }
+
+    async fn grant(
+        &self,
+        character_id: i32,
+        item_unique: u16,
+        count: i32,
+    ) -> Result<Option<CharacterItem>, RepositoryError> {
+        // A non-pileable item is one item per grant: `GiveItem` clamps the count
+        // after asking `CanPile` (`Char-Item.cpp:8926-8934`).
+        let count = grant_count(i32::from(item_unique), count);
+        if count <= 0 {
+            return Ok(None);
+        }
+
+        let mut tx = self.pool.begin().await?;
+        let rows: Vec<(i16, i32, i32, Vec<u8>)> = sqlx::query_as(
+            "SELECT slot, item_unique, count, raw FROM character_items \
+             WHERE character_id = $1 FOR UPDATE",
+        )
+        .bind(character_id)
+        .fetch_all(&mut *tx)
+        .await?;
+        let occupied: Vec<(u16, i32, i32)> = rows
+            .iter()
+            .map(|(slot, unique, count, _)| {
+                (u16::try_from(*slot).unwrap_or(u16::MAX), *unique, *count)
+            })
+            .collect();
+
+        let Some((slot, new_count)) = grant_slot(&occupied, i32::from(item_unique), count) else {
+            // `GIVEITEM_RESULT_NOINVEN`: the transaction rolls back on drop, so the
+            // caller can refuse the reward knowing nothing moved.
+            return Ok(None);
+        };
+
+        // The 84-byte record carries the count, so a merge rewrites the stack's own
+        // record rather than inventing a second one from the unique.
+        let existing = rows
+            .iter()
+            .find(|(s, _, count, _)| u16::try_from(*s).unwrap_or(u16::MAX) == slot && *count > 0);
+        let new_count_u16 = u16::try_from(new_count).unwrap_or(u16::MAX);
+        let raw = match existing {
+            Some((_, _, _, raw)) => {
+                let mut item = Item::decode(raw).map_err(|e| {
+                    RepositoryError::Invalid(format!(
+                        "character {character_id} slot {slot} has an unreadable {}-byte record: {e}",
+                        raw.len()
+                    ))
+                })?;
+                item.set_count(new_count_u16);
+                item.encode().to_vec()
+            }
+            None => Item::from_unique(item_unique, new_count_u16)
+                .encode()
+                .to_vec(),
+        };
+
+        sqlx::query(
+            "INSERT INTO character_items \
+             (character_id, slot, container, item_unique, count, raw) \
+             VALUES ($1, $2, $3, $4, $5, $6) \
+             ON CONFLICT (character_id, slot) DO UPDATE SET \
+                 container = EXCLUDED.container, item_unique = EXCLUDED.item_unique, \
+                 count = EXCLUDED.count, raw = EXCLUDED.raw",
+        )
+        .bind(character_id)
+        .bind(i16::try_from(slot).unwrap_or(0))
+        .bind(i16::try_from(container_of(slot)).unwrap_or(0))
+        .bind(i32::from(item_unique))
+        .bind(new_count)
+        .bind(&raw)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(Some(CharacterItem {
+            slot,
+            container: container_of(slot),
+            item_unique: i32::from(item_unique),
+            count: new_count,
+            raw,
+        }))
     }
 
     async fn replace_all(
@@ -1298,8 +1453,52 @@ impl ItemRepository for PgItemRepository {
 
 #[cfg(test)]
 mod tests {
-    use super::{DropLocation, carry_slots, drop_candidates, stackable};
+    use super::{DropLocation, carry_slots, drop_candidates, grant_count, grant_slot, stackable};
     use gz_proto::item::personitem::*;
+
+    /// The placement rule of a grant, mirroring `cltPItemInfo::CanAddInv`
+    /// (`ItemPerson.cpp:256`): pileable tops up a stack *of the same item* with room,
+    /// everything else takes the lowest free carry slot, and a full carry range is
+    /// the legacy's `GIVEITEM_RESULT_NOINVEN`.
+    #[test]
+    fn a_grant_tops_up_a_stack_then_takes_the_lowest_free_slot() {
+        // Slot 15 holds 5 heal items, slot 30 a sword.
+        let occupied = vec![(15u16, 2000i32, 5i32), (30, 1, 1)];
+        // 2000 is pileable: 5 + 3 <= MAX_PILE, so it tops that stack up.
+        assert_eq!(grant_slot(&occupied, 2000, 3), Some((15, 8)));
+        // It keeps topping the same stack up while there is room.
+        assert_eq!(grant_slot(&occupied, 2000, 1), Some((15, 6)));
+        // A sword does not stack: it takes a free slot whatever is on the target.
+        assert_eq!(grant_slot(&occupied, 1, 1), Some((16, 1)));
+        // A *different* pileable item must never land in an occupied stack: piling
+        // it there would write the wrong unique into the slot (`ItemPerson.cpp:315`
+        // compares `dst_unique` with `src_unique` for exactly this reason).
+        assert_eq!(grant_slot(&occupied, 2100, 1), Some((16, 1)));
+        // With every same-unique stack full, it falls through to the lowest free
+        // carry slot -- and never to an equipment slot.
+        assert_eq!(
+            grant_slot(&[(15, 2000, 30000), (20, 2000, 30000)], 2000, 1),
+            Some((16, 1))
+        );
+        // Merging must never exceed the pile cap, even when the reward alone fits.
+        assert_eq!(grant_slot(&[(15, 2000, 29999)], 2000, 5), Some((16, 5)));
+    }
+
+    /// The count rule beside the placement rule: a non-pileable reward is one
+    /// item, however many the reward row asked for; a pileable one keeps its count.
+    #[test]
+    fn a_non_pileable_grant_is_one_item() {
+        assert_eq!(grant_count(1, 5), 1, "a sword");
+        assert_eq!(grant_count(2000, 5), 5, "a pileable heal item");
+    }
+
+    #[test]
+    fn a_grant_with_nowhere_to_go_is_refused() {
+        let full: Vec<(u16, i32, i32)> = carry_slots().map(|slot| (slot, 1, 1)).collect();
+        assert_eq!(grant_slot(&full, 1, 1), None);
+        // A zero or negative count is nothing to give.
+        assert_eq!(grant_slot(&[], 2000, 0), None);
+    }
 
     /// A pickup may land anywhere the character carries, but never in equipment:
     /// the request is to carry the item and says nothing about which equipment

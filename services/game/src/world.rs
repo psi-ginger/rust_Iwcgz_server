@@ -131,6 +131,14 @@ fn npc_record_for(placement: &'static NpcPlacement) -> Option<NpcRecord> {
 /// and world entry stalls — the failure the 2026-10-05 login-alert RE traced to
 /// a *mask byte* rather than to this value. It comes from configuration so a
 /// client built for another region is a config change, not a rebuild.
+/// The NPC price rate this server advertises in SERVERINFO, as a percentage.
+///
+/// The legacy keeps it in the item statistics table and lets it drift with the
+/// market (`clItemStatistic.siNPCPriceRate`, read by the quest reward path at
+/// `Server-Person.cpp:1429`); this port has no such table, so one constant stands in
+/// for it — 100, i.e. no scaling — and both SERVERINFO and the quest reward use it.
+pub(crate) const NPC_PRICE_RATE: i32 = 100;
+
 pub(crate) fn server_info(cfg: &GameConfig) -> ServerInfo {
     ServerInfo {
         service_area: cfg.service_area,
@@ -142,7 +150,7 @@ pub(crate) fn server_info(cfg: &GameConfig) -> ServerInfo {
         special_quest_bonus_time: false,
         broadcast: false,
         best_village_level: 0,
-        npc_price_rate: 100,
+        npc_price_rate: NPC_PRICE_RATE,
         item_price_index: 0,
         event_switch: [false; 8],
         minimum_teacher_level: 0,

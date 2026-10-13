@@ -273,6 +273,18 @@ pub trait CharacterRepository: Send + Sync {
         y: i32,
     ) -> Result<(), RepositoryError>;
 
+    /// Adds `amount` to the purse — the write the legacy does through
+    /// `sDBRequest_ChangeMoney(..., CHANGE_MONEY_REASON_QUESTREWARD, ...)`
+    /// (`Server-Person.cpp:1436`).
+    ///
+    /// The 2,100,000,000 `MAX_MONEY` check in `0006_character_money.sql` is left to
+    /// the database: an over-vault grant fails here rather than silently wrapping.
+    ///
+    /// # Errors
+    ///
+    /// [`RepositoryError::Database`] if the update fails.
+    async fn add_money(&self, character_id: i32, amount: i64) -> Result<(), RepositoryError>;
+
     /// Persist an accepted stat allocation (`GAMEMSG_REQUEST_USEBONUS`, 250).
     ///
     /// Rewrites the seven abilities, the remaining bonus points and the two
@@ -605,6 +617,15 @@ impl CharacterRepository for PgCharacterRepository {
         .bind(y)
         .execute(&self.pool)
         .await?;
+        Ok(())
+    }
+
+    async fn add_money(&self, character_id: i32, amount: i64) -> Result<(), RepositoryError> {
+        sqlx::query("UPDATE characters SET money = money + $2 WHERE character_id = $1")
+            .bind(character_id)
+            .bind(amount)
+            .execute(&self.pool)
+            .await?;
         Ok(())
     }
 

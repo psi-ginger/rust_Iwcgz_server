@@ -1125,6 +1125,12 @@ mod tests {
             Ok(())
         }
 
+        /// The quest reward path pays through this; the movement tests do not, so it
+        /// only has to be honest about doing nothing.
+        async fn add_money(&self, _character_id: i32, _amount: i64) -> Result<(), RepositoryError> {
+            Ok(())
+        }
+
         async fn update_stats(
             &self,
             _character_id: i32,
