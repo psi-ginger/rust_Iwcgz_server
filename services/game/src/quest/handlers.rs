@@ -61,6 +61,18 @@ pub(crate) enum QuestOutcome {
     RewardRefused,
     /// The block changed: persist and push 225.
     Changed,
+    /// **Nothing changed, but push 225 anyway.** The request only makes sense if
+    /// the client's own copy of the block disagrees with ours, and the client has
+    /// no other way to learn ours: it derives the quest it shows from the 225 the
+    /// server sent (`Quest-Manager.cpp:701-723` reads the type's `clUnit`, and
+    /// falls back to "lowest unset bit" when the unit is empty), and only a fresh
+    /// 225 makes it re-derive (`Client-Person-BigInfo.cpp:254-268`).
+    ///
+    /// The 2026-10-13 live run is why this exists: the character's block said
+    /// 30000 and 30003 were cleared with 30005 in progress, the client still asked
+    /// to *start* 30000, and the old silent `NoChange` left the player clicking a
+    /// button that could never do anything.
+    Resync,
     /// Nothing to persist or send — the request was a logged no-op.
     NoChange,
 }
@@ -122,8 +134,17 @@ pub(crate) async fn apply_quest_going(
             .unit(quest.quest_type)
             .is_some_and(|u| u.is_clear(quest.bit))
         {
-            logln!("game: quest {} already cleared — ignored", quest.unique);
-            return Ok(QuestOutcome::NoChange);
+            // The client asked to start a quest we already have cleared. Its copy
+            // of the block is provably stale (otherwise it would not ask), and only
+            // a fresh 225 can fix that, so answer with the block instead of
+            // silence. A *going* step cannot come from the client's own
+            // condition-met retry -- that one sends `QUEST_STEP_CLEAR`
+            // (`Quest-NInterface.cpp:217`) -- so this cannot echo into a loop.
+            logln!(
+                "game: quest {} already cleared — resyncing the client's quest block",
+                quest.unique
+            );
+            return Ok(QuestOutcome::Resync);
         }
     }
 
@@ -384,13 +405,12 @@ pub(crate) async fn push_quest_state(
     cipher: &mut Cipher,
     state: &PersonQuest,
 ) -> Result<(), AnyError> {
-    send_encoded(
-        stream,
-        cipher,
-        GameMsg::ResponsePersonQuest,
-        &state.encode(),
-    )
-    .await
+    let body = state.encode();
+    // Logged because the block is the client's *only* source for what it shows in
+    // the quest windows: when a player reports a quest button doing nothing, the
+    // first question is whether a 225 left this session and when.
+    logln!("game: pushed 225 quest block ({} bytes)", body.len());
+    send_encoded(stream, cipher, GameMsg::ResponsePersonQuest, &body).await
 }
 
 /// 5700 as a handler: decode, apply, push.
@@ -423,7 +443,9 @@ pub(crate) async fn handle_set_quest_going(
             announce_reward(stream, cipher, &reward).await?;
         }
         QuestOutcome::RewardRefused => announce_reward_refused(stream, cipher).await?,
-        QuestOutcome::Changed => push_quest_state(stream, cipher, state).await?,
+        QuestOutcome::Changed | QuestOutcome::Resync => {
+            push_quest_state(stream, cipher, state).await?
+        }
         QuestOutcome::NoChange => {}
     }
     Ok(())
@@ -481,7 +503,9 @@ pub(crate) async fn handle_quest_status(
             announce_reward(stream, cipher, &reward).await?;
         }
         QuestOutcome::RewardRefused => announce_reward_refused(stream, cipher).await?,
-        QuestOutcome::Changed => push_quest_state(stream, cipher, state).await?,
+        QuestOutcome::Changed | QuestOutcome::Resync => {
+            push_quest_state(stream, cipher, state).await?
+        }
         QuestOutcome::NoChange => {}
     }
     Ok(())
@@ -1003,5 +1027,31 @@ mod tests {
         assert_eq!(unit.cur_unique, 30000, "it is still in progress");
         // Nothing was written and no money was paid.
         assert_eq!(rewards.calls(), vec!["item 42 1500 x1".to_string()]);
+    }
+
+    /// The live failure of 2026-10-13, as a test: the character already has 30000
+    /// cleared, the client's own copy says it is not, so the client asks to start
+    /// it again. That must produce a resync (push 225) rather than the silent no-op
+    /// that left the player clicking a dead button.
+    #[tokio::test]
+    async fn a_going_request_for_a_cleared_quest_resyncs_instead_of_going_silent() {
+        let quests = MemoryQuests::default();
+        let rewards = RewardFake::default();
+        let slots = FixedSlots(vec![7]);
+        let actor = newbie(0);
+        let mut state = PersonQuest::new();
+
+        accept(&quests, &slots, &rewards, &actor, &mut state, 30000).await;
+        assert!(cleared(
+            &report(&quests, &slots, &rewards, &actor, &mut state, 30000).await
+        ));
+
+        let outcome = accept(&quests, &slots, &rewards, &actor, &mut state, 30000).await;
+        assert_eq!(outcome, QuestOutcome::Resync);
+        // The refusal persists nothing and moves nothing: it only re-asserts the
+        // block the client should already have.
+        let unit = state.unit(14).unwrap();
+        assert!(unit.is_clear(0));
+        assert_eq!(unit.cur_unique, 0);
     }
 }

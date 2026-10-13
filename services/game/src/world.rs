@@ -224,7 +224,20 @@ pub(crate) async fn send_world_entry(
     // frame order). The client only learns a quest is cleared from this frame, and
     // its own gate check reads that belief (`MouseOperation.cpp:5500-5511`).
     crate::quest::push_quest_state(stream, cipher, &live.quest).await?;
-    send_character_state(stream, cipher, live).await
+    send_character_state(stream, cipher, live).await?;
+    // And once more after the character-state frames.
+    //
+    // The capture sends 225 exactly once, ahead of 244/249/248, and this port copied
+    // that order -- but this port does not replay the whole captured burst (the
+    // un-modelled frames are withheld), and the 2026-10-13 live run showed the client
+    // behaving as if its `clUnit[QUEST_TYPE_BEGINNER2]` were zeros even though the
+    // frame left here carrying the loaded state (instrumented and confirmed on the
+    // wire). 225 is idempotent -- the client's handler is a `Set` followed by a
+    // re-derivation (`Client-Person-BigInfo.cpp:254-268`, `Quest-Manager.cpp:701`)
+    // -- so re-asserting it after the last frame that can touch the character object
+    // costs one frame and cannot lose state. If a future run shows the first push is
+    // enough, this is the line to delete.
+    crate::quest::push_quest_state(stream, cipher, &live.quest).await
 }
 
 /// The frames that carry the character's own identity and stats, in the order the
