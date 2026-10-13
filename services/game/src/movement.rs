@@ -9,7 +9,7 @@
 use std::time::{Duration, Instant};
 
 use gz_cipher::Cipher;
-use gz_db::{CharacterFull, CharacterRepository, PgCharacterRepository};
+use gz_db::{CharacterFull, CharacterRepository, ItemRepository, PgCharacterRepository};
 use gz_proto::game::encode_logout;
 use gz_proto::map_geometry::cell_of;
 use gz_proto::opcodes_game::GameMsg;
@@ -57,6 +57,16 @@ struct Gate {
     center_x: i32,
     /// The gate object's `TileCenterY`.
     center_y: i32,
+    /// The item the gate requires, and how many — `GateInfoE.txt` columns 4 and 5.
+    ///
+    /// The legacy checks these before warping and **never consumes them**:
+    /// `char.cpp:9123-9133` reads `ItemUnique`/`ItemNum` off the gate row (`:9077-9078`),
+    /// and if `clCharItem.GetItemNum(itemunique) < itemnum` it answers
+    /// `SRVAL_FAIL_WARP_NOITEM` and returns. Nothing in that function takes the item
+    /// away, so a ticket is an entry *key*, not a fee. 0 means no requirement.
+    item_unique: i32,
+    /// See [`Gate::item_unique`].
+    item_num: i32,
     /// `DstMapIndex`.
     dst_map: i32,
     /// `DstMapX`.
@@ -79,6 +89,8 @@ const GATES: &[Gate] = &[
         dst_map: 158,
         dst_x: 27,
         dst_y: 87,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 158,
@@ -91,6 +103,8 @@ const GATES: &[Gate] = &[
         dst_map: 0,
         dst_x: 288,
         dst_y: 354,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 158,
@@ -103,6 +117,8 @@ const GATES: &[Gate] = &[
         dst_map: 0,
         dst_x: 288,
         dst_y: 354,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 158,
@@ -115,6 +131,8 @@ const GATES: &[Gate] = &[
         dst_map: 0,
         dst_x: 288,
         dst_y: 354,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 0,
@@ -127,6 +145,8 @@ const GATES: &[Gate] = &[
         dst_map: 109,
         dst_x: 62,
         dst_y: 70,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 109,
@@ -139,6 +159,8 @@ const GATES: &[Gate] = &[
         dst_map: 0,
         dst_x: 260,
         dst_y: 603,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 109,
@@ -151,6 +173,8 @@ const GATES: &[Gate] = &[
         dst_map: 94,
         dst_x: 6,
         dst_y: 69,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 94,
@@ -163,6 +187,8 @@ const GATES: &[Gate] = &[
         dst_map: 109,
         dst_x: 61,
         dst_y: 13,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 0,
@@ -175,6 +201,8 @@ const GATES: &[Gate] = &[
         dst_map: 99,
         dst_x: 6,
         dst_y: 44,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 99,
@@ -187,6 +215,8 @@ const GATES: &[Gate] = &[
         dst_map: 0,
         dst_x: 323,
         dst_y: 425,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 99,
@@ -199,6 +229,8 @@ const GATES: &[Gate] = &[
         dst_map: 101,
         dst_x: 33,
         dst_y: 47,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 101,
@@ -211,6 +243,8 @@ const GATES: &[Gate] = &[
         dst_map: 99,
         dst_x: 62,
         dst_y: 55,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 101,
@@ -223,6 +257,8 @@ const GATES: &[Gate] = &[
         dst_map: 100,
         dst_x: 23,
         dst_y: 16,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 100,
@@ -235,6 +271,8 @@ const GATES: &[Gate] = &[
         dst_map: 101,
         dst_x: 78,
         dst_y: 62,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 0,
@@ -247,6 +285,8 @@ const GATES: &[Gate] = &[
         dst_map: 108,
         dst_x: 40,
         dst_y: 48,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 108,
@@ -259,6 +299,8 @@ const GATES: &[Gate] = &[
         dst_map: 0,
         dst_x: 265,
         dst_y: 360,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 0,
@@ -271,6 +313,8 @@ const GATES: &[Gate] = &[
         dst_map: 157,
         dst_x: 60,
         dst_y: 97,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 157,
@@ -283,6 +327,8 @@ const GATES: &[Gate] = &[
         dst_map: 0,
         dst_x: 405,
         dst_y: 574,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 157,
@@ -295,6 +341,8 @@ const GATES: &[Gate] = &[
         dst_map: 168,
         dst_x: 69,
         dst_y: 16,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 168,
@@ -307,6 +355,8 @@ const GATES: &[Gate] = &[
         dst_map: 157,
         dst_x: 32,
         dst_y: 23,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 0,
@@ -319,6 +369,8 @@ const GATES: &[Gate] = &[
         dst_map: 170,
         dst_x: 5,
         dst_y: 97,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 170,
@@ -331,6 +383,8 @@ const GATES: &[Gate] = &[
         dst_map: 0,
         dst_x: 524,
         dst_y: 447,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 170,
@@ -343,6 +397,8 @@ const GATES: &[Gate] = &[
         dst_map: 171,
         dst_x: 20,
         dst_y: 44,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 171,
@@ -355,6 +411,8 @@ const GATES: &[Gate] = &[
         dst_map: 170,
         dst_x: 86,
         dst_y: 12,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 0,
@@ -367,6 +425,8 @@ const GATES: &[Gate] = &[
         dst_map: 180,
         dst_x: 6,
         dst_y: 30,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 0,
@@ -379,6 +439,8 @@ const GATES: &[Gate] = &[
         dst_map: 181,
         dst_x: 6,
         dst_y: 30,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 0,
@@ -391,6 +453,8 @@ const GATES: &[Gate] = &[
         dst_map: 182,
         dst_x: 6,
         dst_y: 30,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 0,
@@ -403,6 +467,8 @@ const GATES: &[Gate] = &[
         dst_map: 183,
         dst_x: 6,
         dst_y: 30,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 0,
@@ -415,6 +481,8 @@ const GATES: &[Gate] = &[
         dst_map: 184,
         dst_x: 6,
         dst_y: 30,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 0,
@@ -427,6 +495,8 @@ const GATES: &[Gate] = &[
         dst_map: 185,
         dst_x: 6,
         dst_y: 30,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 0,
@@ -439,6 +509,8 @@ const GATES: &[Gate] = &[
         dst_map: 186,
         dst_x: 6,
         dst_y: 30,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 0,
@@ -451,6 +523,8 @@ const GATES: &[Gate] = &[
         dst_map: 187,
         dst_x: 6,
         dst_y: 30,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 0,
@@ -463,6 +537,8 @@ const GATES: &[Gate] = &[
         dst_map: 188,
         dst_x: 6,
         dst_y: 30,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 0,
@@ -475,6 +551,8 @@ const GATES: &[Gate] = &[
         dst_map: 189,
         dst_x: 6,
         dst_y: 30,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 0,
@@ -487,6 +565,8 @@ const GATES: &[Gate] = &[
         dst_map: 190,
         dst_x: 6,
         dst_y: 30,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 0,
@@ -499,6 +579,8 @@ const GATES: &[Gate] = &[
         dst_map: 191,
         dst_x: 6,
         dst_y: 30,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 0,
@@ -511,6 +593,8 @@ const GATES: &[Gate] = &[
         dst_map: 192,
         dst_x: 6,
         dst_y: 30,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 0,
@@ -523,6 +607,8 @@ const GATES: &[Gate] = &[
         dst_map: 193,
         dst_x: 6,
         dst_y: 30,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 0,
@@ -535,6 +621,8 @@ const GATES: &[Gate] = &[
         dst_map: 194,
         dst_x: 6,
         dst_y: 30,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 0,
@@ -547,6 +635,8 @@ const GATES: &[Gate] = &[
         dst_map: 120,
         dst_x: 38,
         dst_y: 58,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 120,
@@ -559,6 +649,8 @@ const GATES: &[Gate] = &[
         dst_map: 0,
         dst_x: 507,
         dst_y: 26,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 120,
@@ -571,6 +663,8 @@ const GATES: &[Gate] = &[
         dst_map: 121,
         dst_x: 8,
         dst_y: 57,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 121,
@@ -583,6 +677,8 @@ const GATES: &[Gate] = &[
         dst_map: 120,
         dst_x: 7,
         dst_y: 22,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 121,
@@ -595,6 +691,8 @@ const GATES: &[Gate] = &[
         dst_map: 122,
         dst_x: 17,
         dst_y: 17,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 122,
@@ -607,6 +705,8 @@ const GATES: &[Gate] = &[
         dst_map: 121,
         dst_x: 60,
         dst_y: 57,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 0,
@@ -619,6 +719,8 @@ const GATES: &[Gate] = &[
         dst_map: 179,
         dst_x: 56,
         dst_y: 54,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 179,
@@ -631,6 +733,8 @@ const GATES: &[Gate] = &[
         dst_map: 0,
         dst_x: 356,
         dst_y: 700,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 0,
@@ -643,6 +747,8 @@ const GATES: &[Gate] = &[
         dst_map: 154,
         dst_x: 40,
         dst_y: 81,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 154,
@@ -655,6 +761,8 @@ const GATES: &[Gate] = &[
         dst_map: 0,
         dst_x: 286,
         dst_y: 43,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 154,
@@ -667,6 +775,8 @@ const GATES: &[Gate] = &[
         dst_map: 169,
         dst_x: 53,
         dst_y: 61,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 169,
@@ -679,6 +789,8 @@ const GATES: &[Gate] = &[
         dst_map: 154,
         dst_x: 19,
         dst_y: 103,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 154,
@@ -691,6 +803,8 @@ const GATES: &[Gate] = &[
         dst_map: 155,
         dst_x: 34,
         dst_y: 42,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 155,
@@ -703,6 +817,8 @@ const GATES: &[Gate] = &[
         dst_map: 154,
         dst_x: 41,
         dst_y: 6,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 0,
@@ -715,6 +831,8 @@ const GATES: &[Gate] = &[
         dst_map: 111,
         dst_x: 51,
         dst_y: 16,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 111,
@@ -727,6 +845,8 @@ const GATES: &[Gate] = &[
         dst_map: 0,
         dst_x: 321,
         dst_y: 216,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 111,
@@ -739,6 +859,8 @@ const GATES: &[Gate] = &[
         dst_map: 112,
         dst_x: 52,
         dst_y: 45,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 112,
@@ -751,6 +873,8 @@ const GATES: &[Gate] = &[
         dst_map: 111,
         dst_x: 11,
         dst_y: 56,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 0,
@@ -763,6 +887,8 @@ const GATES: &[Gate] = &[
         dst_map: 104,
         dst_x: 77,
         dst_y: 60,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 104,
@@ -775,6 +901,8 @@ const GATES: &[Gate] = &[
         dst_map: 0,
         dst_x: 417,
         dst_y: 216,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 104,
@@ -787,6 +915,8 @@ const GATES: &[Gate] = &[
         dst_map: 105,
         dst_x: 105,
         dst_y: 23,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 105,
@@ -799,6 +929,8 @@ const GATES: &[Gate] = &[
         dst_map: 104,
         dst_x: 6,
         dst_y: 35,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 0,
@@ -811,6 +943,8 @@ const GATES: &[Gate] = &[
         dst_map: 116,
         dst_x: 80,
         dst_y: 60,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 116,
@@ -823,6 +957,8 @@ const GATES: &[Gate] = &[
         dst_map: 0,
         dst_x: 424,
         dst_y: 627,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 116,
@@ -835,6 +971,8 @@ const GATES: &[Gate] = &[
         dst_map: 117,
         dst_x: 5,
         dst_y: 32,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 117,
@@ -847,6 +985,8 @@ const GATES: &[Gate] = &[
         dst_map: 116,
         dst_x: 16,
         dst_y: 92,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 116,
@@ -859,6 +999,8 @@ const GATES: &[Gate] = &[
         dst_map: 118,
         dst_x: 83,
         dst_y: 19,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 118,
@@ -871,6 +1013,8 @@ const GATES: &[Gate] = &[
         dst_map: 116,
         dst_x: 61,
         dst_y: 79,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 0,
@@ -883,6 +1027,8 @@ const GATES: &[Gate] = &[
         dst_map: 125,
         dst_x: 21,
         dst_y: 5,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 125,
@@ -895,6 +1041,8 @@ const GATES: &[Gate] = &[
         dst_map: 0,
         dst_x: 602,
         dst_y: 316,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 125,
@@ -907,6 +1055,8 @@ const GATES: &[Gate] = &[
         dst_map: 126,
         dst_x: 13,
         dst_y: 10,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 126,
@@ -919,6 +1069,8 @@ const GATES: &[Gate] = &[
         dst_map: 125,
         dst_x: 35,
         dst_y: 78,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 126,
@@ -931,6 +1083,8 @@ const GATES: &[Gate] = &[
         dst_map: 127,
         dst_x: 29,
         dst_y: 8,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 127,
@@ -943,6 +1097,8 @@ const GATES: &[Gate] = &[
         dst_map: 126,
         dst_x: 7,
         dst_y: 79,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 127,
@@ -955,6 +1111,8 @@ const GATES: &[Gate] = &[
         dst_map: 128,
         dst_x: 30,
         dst_y: 6,
+        item_unique: 7917,
+        item_num: 1,
     },
     Gate {
         src_map: 128,
@@ -967,6 +1125,8 @@ const GATES: &[Gate] = &[
         dst_map: 127,
         dst_x: 11,
         dst_y: 82,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 128,
@@ -979,6 +1139,8 @@ const GATES: &[Gate] = &[
         dst_map: 129,
         dst_x: 5,
         dst_y: 10,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 129,
@@ -991,6 +1153,8 @@ const GATES: &[Gate] = &[
         dst_map: 128,
         dst_x: 77,
         dst_y: 80,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 129,
@@ -1003,6 +1167,8 @@ const GATES: &[Gate] = &[
         dst_map: 130,
         dst_x: 19,
         dst_y: 14,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 130,
@@ -1015,6 +1181,8 @@ const GATES: &[Gate] = &[
         dst_map: 129,
         dst_x: 8,
         dst_y: 61,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 130,
@@ -1027,6 +1195,8 @@ const GATES: &[Gate] = &[
         dst_map: 131,
         dst_x: 77,
         dst_y: 5,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 131,
@@ -1039,6 +1209,8 @@ const GATES: &[Gate] = &[
         dst_map: 130,
         dst_x: 49,
         dst_y: 71,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 131,
@@ -1051,6 +1223,8 @@ const GATES: &[Gate] = &[
         dst_map: 132,
         dst_x: 11,
         dst_y: 14,
+        item_unique: 7917,
+        item_num: 2,
     },
     Gate {
         src_map: 132,
@@ -1063,6 +1237,8 @@ const GATES: &[Gate] = &[
         dst_map: 131,
         dst_x: 53,
         dst_y: 45,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 132,
@@ -1075,6 +1251,8 @@ const GATES: &[Gate] = &[
         dst_map: 133,
         dst_x: 80,
         dst_y: 19,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 133,
@@ -1087,6 +1265,8 @@ const GATES: &[Gate] = &[
         dst_map: 132,
         dst_x: 80,
         dst_y: 8,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 133,
@@ -1099,6 +1279,8 @@ const GATES: &[Gate] = &[
         dst_map: 134,
         dst_x: 11,
         dst_y: 77,
+        item_unique: 7917,
+        item_num: 3,
     },
     Gate {
         src_map: 134,
@@ -1111,6 +1293,8 @@ const GATES: &[Gate] = &[
         dst_map: 133,
         dst_x: 11,
         dst_y: 80,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 0,
@@ -1123,6 +1307,8 @@ const GATES: &[Gate] = &[
         dst_map: 135,
         dst_x: 15,
         dst_y: 80,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 135,
@@ -1135,6 +1321,8 @@ const GATES: &[Gate] = &[
         dst_map: 0,
         dst_x: 579,
         dst_y: 177,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 135,
@@ -1147,6 +1335,8 @@ const GATES: &[Gate] = &[
         dst_map: 136,
         dst_x: 15,
         dst_y: 69,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 136,
@@ -1159,6 +1349,8 @@ const GATES: &[Gate] = &[
         dst_map: 135,
         dst_x: 25,
         dst_y: 15,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 136,
@@ -1171,6 +1363,8 @@ const GATES: &[Gate] = &[
         dst_map: 137,
         dst_x: 48,
         dst_y: 130,
+        item_unique: 7917,
+        item_num: 1,
     },
     Gate {
         src_map: 137,
@@ -1183,6 +1377,8 @@ const GATES: &[Gate] = &[
         dst_map: 136,
         dst_x: 17,
         dst_y: 12,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 137,
@@ -1195,6 +1391,8 @@ const GATES: &[Gate] = &[
         dst_map: 138,
         dst_x: 26,
         dst_y: 82,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 138,
@@ -1207,6 +1405,8 @@ const GATES: &[Gate] = &[
         dst_map: 137,
         dst_x: 34,
         dst_y: 8,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 137,
@@ -1219,6 +1419,8 @@ const GATES: &[Gate] = &[
         dst_map: 139,
         dst_x: 17,
         dst_y: 82,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 139,
@@ -1231,6 +1433,8 @@ const GATES: &[Gate] = &[
         dst_map: 137,
         dst_x: 66,
         dst_y: 8,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 138,
@@ -1243,6 +1447,8 @@ const GATES: &[Gate] = &[
         dst_map: 139,
         dst_x: 49,
         dst_y: 58,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 139,
@@ -1255,6 +1461,8 @@ const GATES: &[Gate] = &[
         dst_map: 138,
         dst_x: 76,
         dst_y: 40,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 138,
@@ -1267,6 +1475,8 @@ const GATES: &[Gate] = &[
         dst_map: 140,
         dst_x: 15,
         dst_y: 130,
+        item_unique: 7917,
+        item_num: 2,
     },
     Gate {
         src_map: 140,
@@ -1279,6 +1489,8 @@ const GATES: &[Gate] = &[
         dst_map: 138,
         dst_x: 32,
         dst_y: 12,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 139,
@@ -1291,6 +1503,8 @@ const GATES: &[Gate] = &[
         dst_map: 140,
         dst_x: 67,
         dst_y: 126,
+        item_unique: 7917,
+        item_num: 2,
     },
     Gate {
         src_map: 140,
@@ -1303,6 +1517,8 @@ const GATES: &[Gate] = &[
         dst_map: 139,
         dst_x: 27,
         dst_y: 16,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 140,
@@ -1315,6 +1531,8 @@ const GATES: &[Gate] = &[
         dst_map: 141,
         dst_x: 50,
         dst_y: 133,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 141,
@@ -1327,6 +1545,8 @@ const GATES: &[Gate] = &[
         dst_map: 140,
         dst_x: 17,
         dst_y: 17,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 140,
@@ -1339,6 +1559,8 @@ const GATES: &[Gate] = &[
         dst_map: 142,
         dst_x: 15,
         dst_y: 132,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 142,
@@ -1351,6 +1573,8 @@ const GATES: &[Gate] = &[
         dst_map: 140,
         dst_x: 81,
         dst_y: 17,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 140,
@@ -1363,6 +1587,8 @@ const GATES: &[Gate] = &[
         dst_map: 143,
         dst_x: 48,
         dst_y: 126,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 143,
@@ -1375,6 +1601,8 @@ const GATES: &[Gate] = &[
         dst_map: 140,
         dst_x: 49,
         dst_y: 17,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 143,
@@ -1387,6 +1615,8 @@ const GATES: &[Gate] = &[
         dst_map: 144,
         dst_x: 40,
         dst_y: 130,
+        item_unique: 7917,
+        item_num: 3,
     },
     Gate {
         src_map: 144,
@@ -1399,6 +1629,8 @@ const GATES: &[Gate] = &[
         dst_map: 143,
         dst_x: 44,
         dst_y: 17,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 0,
@@ -1411,6 +1643,8 @@ const GATES: &[Gate] = &[
         dst_map: 103,
         dst_x: 10,
         dst_y: 25,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 103,
@@ -1423,6 +1657,8 @@ const GATES: &[Gate] = &[
         dst_map: 0,
         dst_x: 257,
         dst_y: 446,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 300,
@@ -1435,6 +1671,8 @@ const GATES: &[Gate] = &[
         dst_map: 97,
         dst_x: 60,
         dst_y: 130,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 300,
@@ -1447,6 +1685,8 @@ const GATES: &[Gate] = &[
         dst_map: 301,
         dst_x: 62,
         dst_y: 70,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 301,
@@ -1459,6 +1699,8 @@ const GATES: &[Gate] = &[
         dst_map: 300,
         dst_x: 86,
         dst_y: 12,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 301,
@@ -1471,6 +1713,8 @@ const GATES: &[Gate] = &[
         dst_map: 302,
         dst_x: 105,
         dst_y: 23,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 302,
@@ -1483,6 +1727,8 @@ const GATES: &[Gate] = &[
         dst_map: 301,
         dst_x: 61,
         dst_y: 13,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 302,
@@ -1495,6 +1741,8 @@ const GATES: &[Gate] = &[
         dst_map: 303,
         dst_x: 80,
         dst_y: 60,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 303,
@@ -1507,6 +1755,8 @@ const GATES: &[Gate] = &[
         dst_map: 302,
         dst_x: 10,
         dst_y: 80,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 303,
@@ -1519,6 +1769,8 @@ const GATES: &[Gate] = &[
         dst_map: 304,
         dst_x: 8,
         dst_y: 57,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 304,
@@ -1531,6 +1783,8 @@ const GATES: &[Gate] = &[
         dst_map: 303,
         dst_x: 16,
         dst_y: 92,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 304,
@@ -1543,6 +1797,8 @@ const GATES: &[Gate] = &[
         dst_map: 305,
         dst_x: 73,
         dst_y: 12,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 305,
@@ -1555,6 +1811,8 @@ const GATES: &[Gate] = &[
         dst_map: 304,
         dst_x: 60,
         dst_y: 57,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 305,
@@ -1567,6 +1825,8 @@ const GATES: &[Gate] = &[
         dst_map: 306,
         dst_x: 80,
         dst_y: 11,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 306,
@@ -1579,6 +1839,8 @@ const GATES: &[Gate] = &[
         dst_map: 305,
         dst_x: 12,
         dst_y: 80,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 0,
@@ -1591,6 +1853,8 @@ const GATES: &[Gate] = &[
         dst_map: 163,
         dst_x: 103,
         dst_y: 84,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 163,
@@ -1603,6 +1867,8 @@ const GATES: &[Gate] = &[
         dst_map: 0,
         dst_x: 552,
         dst_y: 546,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 163,
@@ -1615,6 +1881,8 @@ const GATES: &[Gate] = &[
         dst_map: 164,
         dst_x: 22,
         dst_y: 8,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 164,
@@ -1627,6 +1895,8 @@ const GATES: &[Gate] = &[
         dst_map: 163,
         dst_x: 56,
         dst_y: 80,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 0,
@@ -1639,6 +1909,8 @@ const GATES: &[Gate] = &[
         dst_map: 320,
         dst_x: 21,
         dst_y: 53,
+        item_unique: 24107,
+        item_num: 1,
     },
     Gate {
         src_map: 0,
@@ -1651,6 +1923,8 @@ const GATES: &[Gate] = &[
         dst_map: 95,
         dst_x: 51,
         dst_y: 64,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 95,
@@ -1663,6 +1937,8 @@ const GATES: &[Gate] = &[
         dst_map: 0,
         dst_x: 270,
         dst_y: 355,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 96,
@@ -1675,6 +1951,8 @@ const GATES: &[Gate] = &[
         dst_map: 158,
         dst_x: 27,
         dst_y: 87,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 164,
@@ -1687,6 +1965,8 @@ const GATES: &[Gate] = &[
         dst_map: 165,
         dst_x: 12,
         dst_y: 121,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 165,
@@ -1699,6 +1979,8 @@ const GATES: &[Gate] = &[
         dst_map: 164,
         dst_x: 46,
         dst_y: 169,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 165,
@@ -1711,6 +1993,8 @@ const GATES: &[Gate] = &[
         dst_map: 166,
         dst_x: 77,
         dst_y: 155,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 166,
@@ -1723,6 +2007,8 @@ const GATES: &[Gate] = &[
         dst_map: 165,
         dst_x: 46,
         dst_y: 28,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 0,
@@ -1735,6 +2021,8 @@ const GATES: &[Gate] = &[
         dst_map: 172,
         dst_x: 126,
         dst_y: 28,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 172,
@@ -1747,6 +2035,8 @@ const GATES: &[Gate] = &[
         dst_map: 0,
         dst_x: 690,
         dst_y: 245,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 172,
@@ -1759,6 +2049,8 @@ const GATES: &[Gate] = &[
         dst_map: 173,
         dst_x: 33,
         dst_y: 44,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 173,
@@ -1771,6 +2063,8 @@ const GATES: &[Gate] = &[
         dst_map: 172,
         dst_x: 10,
         dst_y: 34,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 173,
@@ -1783,6 +2077,8 @@ const GATES: &[Gate] = &[
         dst_map: 174,
         dst_x: 61,
         dst_y: 13,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 174,
@@ -1795,6 +2091,8 @@ const GATES: &[Gate] = &[
         dst_map: 173,
         dst_x: 95,
         dst_y: 29,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 356,
@@ -1807,6 +2105,8 @@ const GATES: &[Gate] = &[
         dst_map: 0,
         dst_x: 305,
         dst_y: 350,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 356,
@@ -1819,6 +2119,8 @@ const GATES: &[Gate] = &[
         dst_map: 357,
         dst_x: 50,
         dst_y: 60,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 356,
@@ -1831,6 +2133,8 @@ const GATES: &[Gate] = &[
         dst_map: 358,
         dst_x: 55,
         dst_y: 50,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 356,
@@ -1843,6 +2147,8 @@ const GATES: &[Gate] = &[
         dst_map: 359,
         dst_x: 68,
         dst_y: 50,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 356,
@@ -1855,6 +2161,8 @@ const GATES: &[Gate] = &[
         dst_map: 360,
         dst_x: 51,
         dst_y: 61,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 361,
@@ -1867,6 +2175,8 @@ const GATES: &[Gate] = &[
         dst_map: 0,
         dst_x: 290,
         dst_y: 356,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 362,
@@ -1879,6 +2189,8 @@ const GATES: &[Gate] = &[
         dst_map: 0,
         dst_x: 290,
         dst_y: 356,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 363,
@@ -1891,6 +2203,8 @@ const GATES: &[Gate] = &[
         dst_map: 0,
         dst_x: 290,
         dst_y: 356,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 364,
@@ -1903,6 +2217,8 @@ const GATES: &[Gate] = &[
         dst_map: 0,
         dst_x: 290,
         dst_y: 356,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 365,
@@ -1915,6 +2231,8 @@ const GATES: &[Gate] = &[
         dst_map: 0,
         dst_x: 290,
         dst_y: 356,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 0,
@@ -1927,6 +2245,8 @@ const GATES: &[Gate] = &[
         dst_map: 380,
         dst_x: 49,
         dst_y: 57,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 380,
@@ -1939,6 +2259,8 @@ const GATES: &[Gate] = &[
         dst_map: 0,
         dst_x: 313,
         dst_y: 341,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 380,
@@ -1951,6 +2273,8 @@ const GATES: &[Gate] = &[
         dst_map: 0,
         dst_x: 313,
         dst_y: 341,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 380,
@@ -1963,6 +2287,8 @@ const GATES: &[Gate] = &[
         dst_map: 0,
         dst_x: 313,
         dst_y: 341,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 380,
@@ -1975,6 +2301,8 @@ const GATES: &[Gate] = &[
         dst_map: 0,
         dst_x: 313,
         dst_y: 341,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 385,
@@ -1987,6 +2315,8 @@ const GATES: &[Gate] = &[
         dst_map: 0,
         dst_x: 292,
         dst_y: 351,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 385,
@@ -1999,6 +2329,8 @@ const GATES: &[Gate] = &[
         dst_map: 102,
         dst_x: 46,
         dst_y: 16,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 102,
@@ -2011,6 +2343,8 @@ const GATES: &[Gate] = &[
         dst_map: 385,
         dst_x: 32,
         dst_y: 24,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 386,
@@ -2023,6 +2357,8 @@ const GATES: &[Gate] = &[
         dst_map: 0,
         dst_x: 292,
         dst_y: 351,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 386,
@@ -2035,6 +2371,8 @@ const GATES: &[Gate] = &[
         dst_map: 123,
         dst_x: 46,
         dst_y: 16,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 123,
@@ -2047,6 +2385,8 @@ const GATES: &[Gate] = &[
         dst_map: 386,
         dst_x: 32,
         dst_y: 24,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 387,
@@ -2059,6 +2399,8 @@ const GATES: &[Gate] = &[
         dst_map: 0,
         dst_x: 292,
         dst_y: 351,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 387,
@@ -2071,6 +2413,8 @@ const GATES: &[Gate] = &[
         dst_map: 124,
         dst_x: 46,
         dst_y: 16,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 124,
@@ -2083,6 +2427,8 @@ const GATES: &[Gate] = &[
         dst_map: 387,
         dst_x: 32,
         dst_y: 24,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 0,
@@ -2095,6 +2441,8 @@ const GATES: &[Gate] = &[
         dst_map: 366,
         dst_x: 72,
         dst_y: 28,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 366,
@@ -2107,6 +2455,8 @@ const GATES: &[Gate] = &[
         dst_map: 0,
         dst_x: 785,
         dst_y: 210,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 366,
@@ -2119,6 +2469,8 @@ const GATES: &[Gate] = &[
         dst_map: 367,
         dst_x: 55,
         dst_y: 103,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 367,
@@ -2131,6 +2483,8 @@ const GATES: &[Gate] = &[
         dst_map: 366,
         dst_x: 82,
         dst_y: 97,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 367,
@@ -2143,6 +2497,8 @@ const GATES: &[Gate] = &[
         dst_map: 368,
         dst_x: 64,
         dst_y: 98,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 368,
@@ -2155,6 +2511,8 @@ const GATES: &[Gate] = &[
         dst_map: 367,
         dst_x: 100,
         dst_y: 58,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 97,
@@ -2167,6 +2525,8 @@ const GATES: &[Gate] = &[
         dst_map: 0,
         dst_x: 288,
         dst_y: 354,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 0,
@@ -2179,6 +2539,8 @@ const GATES: &[Gate] = &[
         dst_map: 373,
         dst_x: 6,
         dst_y: 30,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 0,
@@ -2191,6 +2553,8 @@ const GATES: &[Gate] = &[
         dst_map: 375,
         dst_x: 86,
         dst_y: 11,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 375,
@@ -2203,6 +2567,8 @@ const GATES: &[Gate] = &[
         dst_map: 0,
         dst_x: 326,
         dst_y: 633,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 375,
@@ -2215,6 +2581,8 @@ const GATES: &[Gate] = &[
         dst_map: 375,
         dst_x: 114,
         dst_y: 52,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 375,
@@ -2227,6 +2595,8 @@ const GATES: &[Gate] = &[
         dst_map: 375,
         dst_x: 11,
         dst_y: 20,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 375,
@@ -2239,6 +2609,8 @@ const GATES: &[Gate] = &[
         dst_map: 376,
         dst_x: 68,
         dst_y: 120,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 376,
@@ -2251,6 +2623,8 @@ const GATES: &[Gate] = &[
         dst_map: 375,
         dst_x: 3,
         dst_y: 27,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 376,
@@ -2263,6 +2637,8 @@ const GATES: &[Gate] = &[
         dst_map: 376,
         dst_x: 34,
         dst_y: 9,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 376,
@@ -2275,6 +2651,8 @@ const GATES: &[Gate] = &[
         dst_map: 376,
         dst_x: 73,
         dst_y: 76,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 376,
@@ -2287,6 +2665,8 @@ const GATES: &[Gate] = &[
         dst_map: 377,
         dst_x: 43,
         dst_y: 43,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 377,
@@ -2299,6 +2679,8 @@ const GATES: &[Gate] = &[
         dst_map: 376,
         dst_x: 55,
         dst_y: 48,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 329,
@@ -2311,6 +2693,8 @@ const GATES: &[Gate] = &[
         dst_map: 0,
         dst_x: 288,
         dst_y: 354,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 98,
@@ -2323,6 +2707,8 @@ const GATES: &[Gate] = &[
         dst_map: 0,
         dst_x: 288,
         dst_y: 354,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 0,
@@ -2335,6 +2721,8 @@ const GATES: &[Gate] = &[
         dst_map: 98,
         dst_x: 3,
         dst_y: 47,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 0,
@@ -2347,6 +2735,8 @@ const GATES: &[Gate] = &[
         dst_map: 382,
         dst_x: 13,
         dst_y: 122,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 382,
@@ -2359,6 +2749,8 @@ const GATES: &[Gate] = &[
         dst_map: 0,
         dst_x: 524,
         dst_y: 146,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 382,
@@ -2371,6 +2763,8 @@ const GATES: &[Gate] = &[
         dst_map: 383,
         dst_x: 15,
         dst_y: 115,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 383,
@@ -2383,6 +2777,8 @@ const GATES: &[Gate] = &[
         dst_map: 382,
         dst_x: 53,
         dst_y: 17,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 383,
@@ -2395,6 +2791,8 @@ const GATES: &[Gate] = &[
         dst_map: 384,
         dst_x: 117,
         dst_y: 105,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 384,
@@ -2407,6 +2805,8 @@ const GATES: &[Gate] = &[
         dst_map: 383,
         dst_x: 13,
         dst_y: 26,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 0,
@@ -2419,6 +2819,8 @@ const GATES: &[Gate] = &[
         dst_map: 400,
         dst_x: 6,
         dst_y: 33,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 400,
@@ -2431,6 +2833,8 @@ const GATES: &[Gate] = &[
         dst_map: 0,
         dst_x: 641,
         dst_y: 533,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 400,
@@ -2443,6 +2847,8 @@ const GATES: &[Gate] = &[
         dst_map: 401,
         dst_x: 6,
         dst_y: 49,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 401,
@@ -2455,6 +2861,8 @@ const GATES: &[Gate] = &[
         dst_map: 400,
         dst_x: 78,
         dst_y: 21,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 401,
@@ -2467,6 +2875,8 @@ const GATES: &[Gate] = &[
         dst_map: 402,
         dst_x: 20,
         dst_y: 22,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 402,
@@ -2479,6 +2889,8 @@ const GATES: &[Gate] = &[
         dst_map: 401,
         dst_x: 69,
         dst_y: 21,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 384,
@@ -2491,6 +2903,8 @@ const GATES: &[Gate] = &[
         dst_map: 403,
         dst_x: 8,
         dst_y: 65,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 403,
@@ -2503,6 +2917,8 @@ const GATES: &[Gate] = &[
         dst_map: 384,
         dst_x: 173,
         dst_y: 68,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 403,
@@ -2515,6 +2931,8 @@ const GATES: &[Gate] = &[
         dst_map: 404,
         dst_x: 4,
         dst_y: 97,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 404,
@@ -2527,6 +2945,8 @@ const GATES: &[Gate] = &[
         dst_map: 403,
         dst_x: 95,
         dst_y: 20,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 404,
@@ -2539,6 +2959,8 @@ const GATES: &[Gate] = &[
         dst_map: 405,
         dst_x: 10,
         dst_y: 125,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 405,
@@ -2551,6 +2973,8 @@ const GATES: &[Gate] = &[
         dst_map: 404,
         dst_x: 53,
         dst_y: 13,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 406,
@@ -2563,6 +2987,8 @@ const GATES: &[Gate] = &[
         dst_map: 0,
         dst_x: 293,
         dst_y: 337,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 407,
@@ -2575,6 +3001,8 @@ const GATES: &[Gate] = &[
         dst_map: 0,
         dst_x: 293,
         dst_y: 337,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 408,
@@ -2587,6 +3015,8 @@ const GATES: &[Gate] = &[
         dst_map: 0,
         dst_x: 293,
         dst_y: 337,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 409,
@@ -2599,6 +3029,8 @@ const GATES: &[Gate] = &[
         dst_map: 0,
         dst_x: 293,
         dst_y: 337,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 412,
@@ -2611,6 +3043,8 @@ const GATES: &[Gate] = &[
         dst_map: 0,
         dst_x: 292,
         dst_y: 351,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 412,
@@ -2623,6 +3057,8 @@ const GATES: &[Gate] = &[
         dst_map: 410,
         dst_x: 46,
         dst_y: 16,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 410,
@@ -2635,6 +3071,8 @@ const GATES: &[Gate] = &[
         dst_map: 412,
         dst_x: 32,
         dst_y: 24,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 413,
@@ -2647,6 +3085,8 @@ const GATES: &[Gate] = &[
         dst_map: 0,
         dst_x: 292,
         dst_y: 351,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 413,
@@ -2659,6 +3099,8 @@ const GATES: &[Gate] = &[
         dst_map: 411,
         dst_x: 46,
         dst_y: 16,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 411,
@@ -2671,6 +3113,8 @@ const GATES: &[Gate] = &[
         dst_map: 413,
         dst_x: 32,
         dst_y: 24,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 414,
@@ -2683,6 +3127,8 @@ const GATES: &[Gate] = &[
         dst_map: 0,
         dst_x: 290,
         dst_y: 356,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 0,
@@ -2695,6 +3141,8 @@ const GATES: &[Gate] = &[
         dst_map: 415,
         dst_x: 12,
         dst_y: 22,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 415,
@@ -2707,6 +3155,8 @@ const GATES: &[Gate] = &[
         dst_map: 0,
         dst_x: 727,
         dst_y: 579,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 415,
@@ -2719,6 +3169,8 @@ const GATES: &[Gate] = &[
         dst_map: 417,
         dst_x: 38,
         dst_y: 9,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 417,
@@ -2731,6 +3183,8 @@ const GATES: &[Gate] = &[
         dst_map: 417,
         dst_x: 38,
         dst_y: 9,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 417,
@@ -2743,6 +3197,8 @@ const GATES: &[Gate] = &[
         dst_map: 418,
         dst_x: 37,
         dst_y: 4,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 418,
@@ -2755,6 +3211,8 @@ const GATES: &[Gate] = &[
         dst_map: 419,
         dst_x: 64,
         dst_y: 4,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 0,
@@ -2767,6 +3225,8 @@ const GATES: &[Gate] = &[
         dst_map: 423,
         dst_x: 7,
         dst_y: 22,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 423,
@@ -2779,6 +3239,8 @@ const GATES: &[Gate] = &[
         dst_map: 0,
         dst_x: 780,
         dst_y: 644,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 423,
@@ -2791,6 +3253,8 @@ const GATES: &[Gate] = &[
         dst_map: 424,
         dst_x: 65,
         dst_y: 27,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 424,
@@ -2803,6 +3267,8 @@ const GATES: &[Gate] = &[
         dst_map: 423,
         dst_x: 133,
         dst_y: 70,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 0,
@@ -2815,6 +3281,8 @@ const GATES: &[Gate] = &[
         dst_map: 428,
         dst_x: 104,
         dst_y: 120,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 428,
@@ -2827,6 +3295,8 @@ const GATES: &[Gate] = &[
         dst_map: 0,
         dst_x: 503,
         dst_y: 710,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 428,
@@ -2839,6 +3309,8 @@ const GATES: &[Gate] = &[
         dst_map: 429,
         dst_x: 3,
         dst_y: 132,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 429,
@@ -2851,6 +3323,8 @@ const GATES: &[Gate] = &[
         dst_map: 428,
         dst_x: 123,
         dst_y: 95,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 94,
@@ -2863,6 +3337,8 @@ const GATES: &[Gate] = &[
         dst_map: 447,
         dst_x: 14,
         dst_y: 61,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 447,
@@ -2875,6 +3351,8 @@ const GATES: &[Gate] = &[
         dst_map: 94,
         dst_x: 35,
         dst_y: 72,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 0,
@@ -2887,6 +3365,8 @@ const GATES: &[Gate] = &[
         dst_map: 451,
         dst_x: 130,
         dst_y: 70,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 451,
@@ -2899,6 +3379,8 @@ const GATES: &[Gate] = &[
         dst_map: 0,
         dst_x: 212,
         dst_y: 502,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 451,
@@ -2911,6 +3393,8 @@ const GATES: &[Gate] = &[
         dst_map: 452,
         dst_x: 55,
         dst_y: 93,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 452,
@@ -2923,6 +3407,8 @@ const GATES: &[Gate] = &[
         dst_map: 451,
         dst_x: 62,
         dst_y: 11,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 453,
@@ -2935,6 +3421,8 @@ const GATES: &[Gate] = &[
         dst_map: 452,
         dst_x: 45,
         dst_y: 9,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 452,
@@ -2947,6 +3435,8 @@ const GATES: &[Gate] = &[
         dst_map: 453,
         dst_x: 96,
         dst_y: 81,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 428,
@@ -2959,6 +3449,8 @@ const GATES: &[Gate] = &[
         dst_map: 454,
         dst_x: 22,
         dst_y: 36,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 418,
@@ -2971,6 +3463,8 @@ const GATES: &[Gate] = &[
         dst_map: 419,
         dst_x: 7,
         dst_y: 79,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 419,
@@ -2983,6 +3477,8 @@ const GATES: &[Gate] = &[
         dst_map: 418,
         dst_x: 37,
         dst_y: 76,
+        item_unique: 0,
+        item_num: 0,
     },
     Gate {
         src_map: 0,
@@ -2995,6 +3491,8 @@ const GATES: &[Gate] = &[
         dst_map: 425,
         dst_x: 60,
         dst_y: 60,
+        item_unique: 0,
+        item_num: 0,
     },
 ];
 
@@ -3733,6 +4231,33 @@ async fn warp_through_gate(
     live: &mut LiveFrames<'_>,
     gate: &Gate,
 ) -> Result<(), AnyError> {
+    // The entry requirement first, exactly where the legacy checks it
+    // (`char.cpp:9123-9133`) — before anything moves, and without consuming the item.
+    if gate.item_unique > 0 && gate.item_num > 0 {
+        let character_id = live
+            .character
+            .as_ref()
+            .ok_or("gate entry before the character row is loaded")?
+            .character_id;
+        let have: i64 = live
+            .items
+            .list(character_id)
+            .await?
+            .iter()
+            .filter(|row| row.item_unique == gate.item_unique)
+            .map(|row| i64::from(row.count))
+            .sum();
+        if have < i64::from(gate.item_num) {
+            logln!(
+                "game: gate {} -> map {} refused: needs item {} x{}, character {character_id} has {have}",
+                gate.src_map,
+                gate.dst_map,
+                gate.item_unique,
+                gate.item_num
+            );
+            return Ok(());
+        }
+    }
     let warp = apply_gate_move(
         characters,
         registry,
@@ -4036,8 +4561,29 @@ mod tests {
                 );
             }
         }
+        // The entry requirement, straight off the gate rows: exactly eight gates in the
+        // file carry one, and the Raccoon Lair (row 561, anchor map 0 (224,314)) is the
+        // one a player meets first — item 24107, one of them (`char.cpp:9123-9133`).
+        let lair = gate_at(0, 224, 314).expect("the Raccoon Lair gate");
+        assert_eq!(
+            (lair.dst_map, lair.item_unique, lair.item_num),
+            (320, 24107, 1)
+        );
+        let gated = GATES
+            .iter()
+            .filter(|g| g.item_unique > 0 && g.item_num > 0)
+            .count();
+        assert_eq!(gated, 8, "the file's gated rows");
+        // Hanyang's exits and the mine take nothing.
+        for (map, x, y) in [(158, 14, 90), (158, 28, 101), (158, 41, 90), (0, 402, 580)] {
+            let gate = gate_at(map, x, y).unwrap_or_else(|| panic!("({map}, {x}, {y})"));
+            assert_eq!(
+                (gate.item_unique, gate.item_num),
+                (0, 0),
+                "({map}, {x}, {y}) must be free"
+            );
+        }
     }
-
     /// The destinations are inside the 10-bit fields the record packs, and the
     /// client's map index for them is the map id itself
     /// (`gz_proto::game::client_map_index`).

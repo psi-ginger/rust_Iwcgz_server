@@ -322,6 +322,10 @@ foreach ($line in [System.IO.File]::ReadAllLines($gateFile, [System.Text.Encodin
         DstMap  = $dstMap
         DstX    = $nums[9]
         DstY    = $nums[10]
+        # Columns 4 and 5: the item the gate requires, and how many. The legacy checks
+        # them before warping and never consumes them (`char.cpp:9123-9133`).
+        ItemUnique = $nums[3]
+        ItemNum    = $nums[4]
     })
 }
 if ($gates.Count -eq 0) { throw "no gate rows found in $gateFile" }
@@ -342,10 +346,12 @@ $gateBody = @($gateSorted | ForEach-Object {
         "        dst_map: $($_.DstMap),",
         "        dst_x: $($_.DstX),",
         "        dst_y: $($_.DstY),",
+        "        item_unique: $($_.ItemUnique),",
+        "        item_num: $($_.ItemNum),",
         "    },"
     )
 })
-$gateGenerated = @($gateSorted | ForEach-Object { '{0}/{1}/{2}/{3}/{4}/{5}/{6}/{7}/{8}/{9}' -f $_.SrcMap, $_.SrcX, $_.SrcY, $_.Xsize, $_.Ysize, $_.CenterX, $_.CenterY, $_.DstMap, $_.DstX, $_.DstY })
+$gateGenerated = @($gateSorted | ForEach-Object { '{0}/{1}/{2}/{3}/{4}/{5}/{6}/{7}/{8}/{9}/{10}/{11}' -f $_.SrcMap, $_.SrcX, $_.SrcY, $_.Xsize, $_.Ysize, $_.CenterX, $_.CenterY, $_.DstMap, $_.DstX, $_.DstY, $_.ItemUnique, $_.ItemNum })
 
 if ($Check) {
     if ($Table -ne 'gate') {
@@ -380,14 +386,14 @@ if ($Check) {
             'const GATES: &\[Gate\] = &\[(.*?)\];',
             [System.Text.RegularExpressions.RegexOptions]::Singleline)
         if (-not $tableMatch.Success) { throw "no GATES table found in $GateRustPath" }
-        $pattern = 'Gate\s*\{\s*src_map:\s*(-?\d+)\s*,\s*src_x:\s*(\d+)\s*,\s*src_y:\s*(\d+)\s*,\s*xsize:\s*(\d+)\s*,\s*ysize:\s*(\d+)\s*,\s*center_x:\s*(-?\d+)\s*,\s*center_y:\s*(-?\d+)\s*,\s*dst_map:\s*(-?\d+)\s*,\s*dst_x:\s*(\d+)\s*,\s*dst_y:\s*(\d+)\s*,?\s*\}'
+        $pattern = 'Gate\s*\{\s*src_map:\s*(-?\d+)\s*,\s*src_x:\s*(\d+)\s*,\s*src_y:\s*(\d+)\s*,\s*xsize:\s*(\d+)\s*,\s*ysize:\s*(\d+)\s*,\s*center_x:\s*(-?\d+)\s*,\s*center_y:\s*(-?\d+)\s*,\s*dst_map:\s*(-?\d+)\s*,\s*dst_x:\s*(\d+)\s*,\s*dst_y:\s*(\d+)\s*,\s*item_unique:\s*(\d+)\s*,\s*item_num:\s*(\d+)\s*,?\s*\}'
         $committed = @([regex]::Matches(
                 $tableMatch.Groups[1].Value,
                 $pattern,
                 [System.Text.RegularExpressions.RegexOptions]::Singleline) | ForEach-Object {
-            '{0}/{1}/{2}/{3}/{4}/{5}/{6}/{7}/{8}/{9}' -f $_.Groups[1].Value, $_.Groups[2].Value, $_.Groups[3].Value,
+            '{0}/{1}/{2}/{3}/{4}/{5}/{6}/{7}/{8}/{9}/{10}/{11}' -f $_.Groups[1].Value, $_.Groups[2].Value, $_.Groups[3].Value,
                 $_.Groups[4].Value, $_.Groups[5].Value, $_.Groups[6].Value, $_.Groups[7].Value,
-                $_.Groups[8].Value, $_.Groups[9].Value, $_.Groups[10].Value
+                $_.Groups[8].Value, $_.Groups[9].Value, $_.Groups[10].Value, $_.Groups[11].Value, $_.Groups[12].Value
         })
         if (($gateGenerated -join ';') -ne ($committed -join ';')) {
             throw "GATES is stale: $($gateGenerated.Count) generated vs $($committed.Count) committed. Re-run without -Check and paste the block."
