@@ -506,19 +506,24 @@ foreach ($line in [System.IO.File]::ReadAllLines($mapTypeFile, [System.Text.Enco
     $typeNameOfUnique[$unique] = $fields[1].Trim()
 }
 
-# map type name -> centre (MapTypeInfo_Village.txt: MapUniqueString, MapAttb, CenterX, CenterY, ...)
+# map type name -> centre and gate (MapTypeInfo_Village.txt:
+#   MapUniqueString, MapAttb, CenterX, CenterY, GateX, GateY, Cost, Level, Slots...)
 $centerOfTypeName = @{}
 $inData = $false
 foreach ($line in [System.IO.File]::ReadAllLines($villageTypeFile, [System.Text.Encoding]::Unicode)) {
     if ($line -match '^\s*<Data>') { $inData = $true; continue }
     if (-not $inData) { continue }
     $fields = $line -split "`t"
-    if ($fields.Count -lt 4) { continue }
-    $cx = 0
-    $cy = 0
-    if (-not [int]::TryParse($fields[2].Trim(), [ref]$cx)) { continue }
-    if (-not [int]::TryParse($fields[3].Trim(), [ref]$cy)) { continue }
-    $centerOfTypeName[$fields[0].Trim()] = @($cx, $cy)
+    if ($fields.Count -lt 6) { continue }
+    $values = @()
+    $ok = $true
+    foreach ($index in @(2, 3, 4, 5)) {
+        $value = 0
+        if (-not [int]::TryParse($fields[$index].Trim(), [ref]$value)) { $ok = $false; break }
+        $values += $value
+    }
+    if (-not $ok) { continue }
+    $centerOfTypeName[$fields[0].Trim()] = $values
 }
 
 $villages = New-Object 'System.Collections.Generic.List[object]'
@@ -566,6 +571,10 @@ foreach ($line in [System.IO.File]::ReadAllLines($villageFile, [System.Text.Enco
         DstMap  = $dstMap
         DstX    = $centre[0]
         DstY    = $centre[1]
+        # `GateX`/`GateY` of the village's map type: the gate *inside* the town, which is
+        # what a character walks to in order to leave it again.
+        ExitX   = $centre[2]
+        ExitY   = $centre[3]
     })
 }
 if ($villages.Count -eq 0) { throw "no village rows found in $villageFile" }
@@ -583,10 +592,12 @@ $villageBody = @($villageSorted | ForEach-Object {
         "        dst_map: $($_.DstMap),",
         "        dst_x: $($_.DstX),",
         "        dst_y: $($_.DstY),",
+        "        exit_x: $($_.ExitX),",
+        "        exit_y: $($_.ExitY),",
         "    },"
     )
 })
-$villageGenerated = @($villageSorted | ForEach-Object { '{0}/{1}/{2}/{3}/{4}/{5}/{6}/{7}/{8}/{9}' -f $_.Unique, $_.SrcX, $_.SrcY, $_.Xsize, $_.Ysize, $_.CenterX, $_.CenterY, $_.DstMap, $_.DstX, $_.DstY })
+$villageGenerated = @($villageSorted | ForEach-Object { '{0}/{1}/{2}/{3}/{4}/{5}/{6}/{7}/{8}/{9}/{10}/{11}' -f $_.Unique, $_.SrcX, $_.SrcY, $_.Xsize, $_.Ysize, $_.CenterX, $_.CenterY, $_.DstMap, $_.DstX, $_.DstY, $_.ExitX, $_.ExitY })
 
 if ($Check) {
     if ($Table -ne 'gate') {
@@ -643,14 +654,14 @@ if ($Check) {
             'const VILLAGES: &\[Village\] = &\[(.*?)\];',
             [System.Text.RegularExpressions.RegexOptions]::Singleline)
         if (-not $tableMatch.Success) { throw "no VILLAGES table found in $GateRustPath" }
-        $pattern = 'Village\s*\{\s*unique:\s*(\d+)\s*,\s*src_x:\s*(\d+)\s*,\s*src_y:\s*(\d+)\s*,\s*xsize:\s*(\d+)\s*,\s*ysize:\s*(\d+)\s*,\s*center_x:\s*(-?\d+)\s*,\s*center_y:\s*(-?\d+)\s*,\s*dst_map:\s*(\d+)\s*,\s*dst_x:\s*(\d+)\s*,\s*dst_y:\s*(\d+)\s*,?\s*\}'
+        $pattern = 'Village\s*\{\s*unique:\s*(\d+)\s*,\s*src_x:\s*(\d+)\s*,\s*src_y:\s*(\d+)\s*,\s*xsize:\s*(\d+)\s*,\s*ysize:\s*(\d+)\s*,\s*center_x:\s*(-?\d+)\s*,\s*center_y:\s*(-?\d+)\s*,\s*dst_map:\s*(\d+)\s*,\s*dst_x:\s*(\d+)\s*,\s*dst_y:\s*(\d+)\s*,\s*exit_x:\s*(\d+)\s*,\s*exit_y:\s*(\d+)\s*,?\s*\}'
         $committed = @([regex]::Matches(
                 $tableMatch.Groups[1].Value,
                 $pattern,
                 [System.Text.RegularExpressions.RegexOptions]::Singleline) | ForEach-Object {
-            '{0}/{1}/{2}/{3}/{4}/{5}/{6}/{7}/{8}/{9}' -f $_.Groups[1].Value, $_.Groups[2].Value, $_.Groups[3].Value,
+            '{0}/{1}/{2}/{3}/{4}/{5}/{6}/{7}/{8}/{9}/{10}/{11}' -f $_.Groups[1].Value, $_.Groups[2].Value, $_.Groups[3].Value,
                 $_.Groups[4].Value, $_.Groups[5].Value, $_.Groups[6].Value, $_.Groups[7].Value,
-                $_.Groups[8].Value, $_.Groups[9].Value, $_.Groups[10].Value
+                $_.Groups[8].Value, $_.Groups[9].Value, $_.Groups[10].Value, $_.Groups[11].Value, $_.Groups[12].Value
         })
         if (($villageGenerated -join ';') -ne ($committed -join ';')) {
             throw "VILLAGES is stale: $($villageGenerated.Count) generated vs $($committed.Count) committed. Re-run without -Check and paste the block."

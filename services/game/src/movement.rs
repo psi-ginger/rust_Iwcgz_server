@@ -3466,6 +3466,8 @@ const VILLAGES: &[Village] = &[
         dst_map: 1,
         dst_x: 24,
         dst_y: 22,
+        exit_x: 23,
+        exit_y: 18,
     },
     Village {
         unique: 2,
@@ -3478,6 +3480,8 @@ const VILLAGES: &[Village] = &[
         dst_map: 2,
         dst_x: 24,
         dst_y: 22,
+        exit_x: 23,
+        exit_y: 18,
     },
     Village {
         unique: 3,
@@ -3490,6 +3494,8 @@ const VILLAGES: &[Village] = &[
         dst_map: 3,
         dst_x: 24,
         dst_y: 22,
+        exit_x: 23,
+        exit_y: 18,
     },
     Village {
         unique: 4,
@@ -3502,6 +3508,8 @@ const VILLAGES: &[Village] = &[
         dst_map: 4,
         dst_x: 24,
         dst_y: 22,
+        exit_x: 23,
+        exit_y: 18,
     },
     Village {
         unique: 5,
@@ -3514,6 +3522,8 @@ const VILLAGES: &[Village] = &[
         dst_map: 5,
         dst_x: 24,
         dst_y: 22,
+        exit_x: 23,
+        exit_y: 18,
     },
     Village {
         unique: 6,
@@ -3526,6 +3536,8 @@ const VILLAGES: &[Village] = &[
         dst_map: 6,
         dst_x: 24,
         dst_y: 22,
+        exit_x: 23,
+        exit_y: 18,
     },
     Village {
         unique: 7,
@@ -3538,6 +3550,8 @@ const VILLAGES: &[Village] = &[
         dst_map: 7,
         dst_x: 24,
         dst_y: 22,
+        exit_x: 23,
+        exit_y: 18,
     },
     Village {
         unique: 8,
@@ -3550,6 +3564,8 @@ const VILLAGES: &[Village] = &[
         dst_map: 8,
         dst_x: 24,
         dst_y: 22,
+        exit_x: 23,
+        exit_y: 18,
     },
     Village {
         unique: 9,
@@ -3562,6 +3578,8 @@ const VILLAGES: &[Village] = &[
         dst_map: 9,
         dst_x: 24,
         dst_y: 22,
+        exit_x: 23,
+        exit_y: 18,
     },
     Village {
         unique: 10,
@@ -3574,6 +3592,8 @@ const VILLAGES: &[Village] = &[
         dst_map: 10,
         dst_x: 24,
         dst_y: 22,
+        exit_x: 23,
+        exit_y: 18,
     },
     Village {
         unique: 11,
@@ -3586,6 +3606,8 @@ const VILLAGES: &[Village] = &[
         dst_map: 11,
         dst_x: 24,
         dst_y: 22,
+        exit_x: 23,
+        exit_y: 18,
     },
     Village {
         unique: 12,
@@ -3598,6 +3620,8 @@ const VILLAGES: &[Village] = &[
         dst_map: 12,
         dst_x: 24,
         dst_y: 22,
+        exit_x: 23,
+        exit_y: 18,
     },
     Village {
         unique: 13,
@@ -3610,6 +3634,8 @@ const VILLAGES: &[Village] = &[
         dst_map: 13,
         dst_x: 24,
         dst_y: 22,
+        exit_x: 23,
+        exit_y: 18,
     },
     Village {
         unique: 14,
@@ -3622,6 +3648,8 @@ const VILLAGES: &[Village] = &[
         dst_map: 14,
         dst_x: 24,
         dst_y: 22,
+        exit_x: 23,
+        exit_y: 18,
     },
     Village {
         unique: 15,
@@ -3634,6 +3662,8 @@ const VILLAGES: &[Village] = &[
         dst_map: 15,
         dst_x: 24,
         dst_y: 22,
+        exit_x: 23,
+        exit_y: 18,
     },
     Village {
         unique: 16,
@@ -3646,6 +3676,8 @@ const VILLAGES: &[Village] = &[
         dst_map: 16,
         dst_x: 24,
         dst_y: 22,
+        exit_x: 23,
+        exit_y: 18,
     },
     Village {
         unique: 17,
@@ -3658,6 +3690,8 @@ const VILLAGES: &[Village] = &[
         dst_map: 17,
         dst_x: 24,
         dst_y: 22,
+        exit_x: 23,
+        exit_y: 18,
     },
     Village {
         unique: 18,
@@ -3670,6 +3704,8 @@ const VILLAGES: &[Village] = &[
         dst_map: 18,
         dst_x: 24,
         dst_y: 22,
+        exit_x: 23,
+        exit_y: 18,
     },
     Village {
         unique: 19,
@@ -3682,6 +3718,8 @@ const VILLAGES: &[Village] = &[
         dst_map: 19,
         dst_x: 24,
         dst_y: 22,
+        exit_x: 23,
+        exit_y: 18,
     },
     Village {
         unique: 20,
@@ -3694,6 +3732,8 @@ const VILLAGES: &[Village] = &[
         dst_map: 20,
         dst_x: 24,
         dst_y: 22,
+        exit_x: 23,
+        exit_y: 18,
     },
     Village {
         unique: 21,
@@ -3706,6 +3746,8 @@ const VILLAGES: &[Village] = &[
         dst_map: 21,
         dst_x: 24,
         dst_y: 22,
+        exit_x: 23,
+        exit_y: 18,
     },
     Village {
         unique: 22,
@@ -3718,6 +3760,8 @@ const VILLAGES: &[Village] = &[
         dst_map: 22,
         dst_x: 24,
         dst_y: 22,
+        exit_x: 23,
+        exit_y: 18,
     },
     Village {
         unique: 23,
@@ -3730,6 +3774,8 @@ const VILLAGES: &[Village] = &[
         dst_map: 23,
         dst_x: 24,
         dst_y: 22,
+        exit_x: 23,
+        exit_y: 18,
     },
     Village {
         unique: 24,
@@ -3742,6 +3788,8 @@ const VILLAGES: &[Village] = &[
         dst_map: 24,
         dst_x: 24,
         dst_y: 22,
+        exit_x: 23,
+        exit_y: 18,
     },
     Village {
         unique: 25,
@@ -3754,6 +3802,8 @@ const VILLAGES: &[Village] = &[
         dst_map: 25,
         dst_x: 24,
         dst_y: 22,
+        exit_x: 23,
+        exit_y: 18,
     },
     Village {
         unique: 26,
@@ -3766,6 +3816,8 @@ const VILLAGES: &[Village] = &[
         dst_map: 26,
         dst_x: 24,
         dst_y: 22,
+        exit_x: 23,
+        exit_y: 18,
     },
     Village {
         unique: 27,
@@ -3778,6 +3830,8 @@ const VILLAGES: &[Village] = &[
         dst_map: 27,
         dst_x: 24,
         dst_y: 22,
+        exit_x: 23,
+        exit_y: 18,
     },
     Village {
         unique: 28,
@@ -3790,6 +3844,8 @@ const VILLAGES: &[Village] = &[
         dst_map: 28,
         dst_x: 24,
         dst_y: 22,
+        exit_x: 23,
+        exit_y: 18,
     },
     Village {
         unique: 29,
@@ -3802,6 +3858,8 @@ const VILLAGES: &[Village] = &[
         dst_map: 29,
         dst_x: 24,
         dst_y: 22,
+        exit_x: 23,
+        exit_y: 18,
     },
     Village {
         unique: 30,
@@ -3814,6 +3872,8 @@ const VILLAGES: &[Village] = &[
         dst_map: 30,
         dst_x: 24,
         dst_y: 22,
+        exit_x: 23,
+        exit_y: 18,
     },
     Village {
         unique: 31,
@@ -3826,6 +3886,8 @@ const VILLAGES: &[Village] = &[
         dst_map: 31,
         dst_x: 24,
         dst_y: 22,
+        exit_x: 23,
+        exit_y: 18,
     },
     Village {
         unique: 32,
@@ -3838,6 +3900,8 @@ const VILLAGES: &[Village] = &[
         dst_map: 32,
         dst_x: 24,
         dst_y: 22,
+        exit_x: 23,
+        exit_y: 18,
     },
     Village {
         unique: 33,
@@ -3850,6 +3914,8 @@ const VILLAGES: &[Village] = &[
         dst_map: 33,
         dst_x: 24,
         dst_y: 22,
+        exit_x: 23,
+        exit_y: 18,
     },
     Village {
         unique: 34,
@@ -3862,6 +3928,8 @@ const VILLAGES: &[Village] = &[
         dst_map: 34,
         dst_x: 24,
         dst_y: 22,
+        exit_x: 23,
+        exit_y: 18,
     },
     Village {
         unique: 35,
@@ -3874,6 +3942,8 @@ const VILLAGES: &[Village] = &[
         dst_map: 35,
         dst_x: 24,
         dst_y: 22,
+        exit_x: 23,
+        exit_y: 18,
     },
     Village {
         unique: 36,
@@ -3886,6 +3956,8 @@ const VILLAGES: &[Village] = &[
         dst_map: 36,
         dst_x: 24,
         dst_y: 22,
+        exit_x: 23,
+        exit_y: 18,
     },
     Village {
         unique: 37,
@@ -3898,6 +3970,8 @@ const VILLAGES: &[Village] = &[
         dst_map: 37,
         dst_x: 24,
         dst_y: 22,
+        exit_x: 23,
+        exit_y: 18,
     },
     Village {
         unique: 38,
@@ -3910,6 +3984,8 @@ const VILLAGES: &[Village] = &[
         dst_map: 38,
         dst_x: 24,
         dst_y: 22,
+        exit_x: 23,
+        exit_y: 18,
     },
     Village {
         unique: 39,
@@ -3922,6 +3998,8 @@ const VILLAGES: &[Village] = &[
         dst_map: 39,
         dst_x: 24,
         dst_y: 22,
+        exit_x: 23,
+        exit_y: 18,
     },
     Village {
         unique: 40,
@@ -3934,6 +4012,8 @@ const VILLAGES: &[Village] = &[
         dst_map: 40,
         dst_x: 24,
         dst_y: 22,
+        exit_x: 23,
+        exit_y: 18,
     },
     Village {
         unique: 41,
@@ -3946,6 +4026,8 @@ const VILLAGES: &[Village] = &[
         dst_map: 41,
         dst_x: 24,
         dst_y: 22,
+        exit_x: 23,
+        exit_y: 18,
     },
     Village {
         unique: 42,
@@ -3958,6 +4040,8 @@ const VILLAGES: &[Village] = &[
         dst_map: 42,
         dst_x: 24,
         dst_y: 22,
+        exit_x: 23,
+        exit_y: 18,
     },
 ];
 
@@ -4159,6 +4243,12 @@ struct Village {
     dst_x: i32,
     /// That map type's `CenterY` (`char.cpp:9012`).
     dst_y: i32,
+    /// That map type's `GateX` — the gate *inside* the town (`MapTypeInfo_Village.txt`'s
+    /// column of the same name). A character walks there to leave again; `GateInfoE.txt`
+    /// has no row with a source in 1..42, so this tile is the only exit the data names.
+    exit_x: i32,
+    /// See [`Village::exit_x`].
+    exit_y: i32,
 }
 
 /// The village whose entrance is `(map_id, x, y)`, if any.
@@ -4175,17 +4265,52 @@ impl Village {
         let top = self.src_y + self.center_y - self.ysize + 1;
         (left, top, left + self.xsize - 1, top + self.ysize - 1)
     }
-
-    /// Whether `(x, y)` is one of the entrance's cells.
-    pub(crate) const fn covers(&self, x: i32, y: i32) -> bool {
-        let (left, top, _, _) = self.block();
-        x >= left && x < left + self.xsize && y >= top && y < top + self.ysize
-    }
 }
 
+/// How far outside a village entrance a click still counts, in tiles.
+///
+/// The entrance object is 8×8 and its cells are impassable (`FOATB_VILLAGE` →
+/// `BLOCK_NORMAL`, `MapCommon.cpp:654-657`), so a player aiming at a town gate often lands
+/// a few cells off it and the client sends that other cell. The legacy matches the ordered
+/// cell exactly; this widening is deliberate, and it is measured against the block, so the
+/// accepted area becomes 16×16 instead of 8×8.
+pub(crate) const VILLAGE_CLICK_TOLERANCE: i32 = 4;
+
+/// Whether `(x, y)` is close enough to `village`'s entrance to count as a click on it.
+fn entrance_reach(village: &Village, x: i32, y: i32) -> bool {
+    let (left, top, right, bottom) = village.block();
+    let dx = (left - x).max(x - right).max(0);
+    let dy = (top - y).max(y - bottom).max(0);
+    dx.max(dy) <= VILLAGE_CLICK_TOLERANCE
+}
+
+/// Where a character leaving `village` arrives back on map 0: the first cell south of the
+/// entrance block, on the road the player walked in from (the block itself is impassable).
+fn entrance_landing(village: &Village) -> (i32, i32) {
+    let (left, _, right, bottom) = village.block();
+    ((left + right) / 2, bottom + 1)
+}
+
+/// The village whose entrance `(map_id, x, y)` reaches, if any.
+///
+/// Uses [`entrance_reach`], not the bare block, so a click a few tiles off a town gate still
+/// enters — the client resolves the object under the cursor (`FindVillage`,
+/// `UnderMouseObject.cpp:310-327`) and sends that cell as a plain move order
+/// (`MouseOperation.cpp:3333-3338`).
 fn village_at(map_id: i32, x: i32, y: i32) -> Option<&'static Village> {
     (map_id == 0).then_some(())?;
-    VILLAGES.iter().find(|v| v.covers(x, y))
+    VILLAGES.iter().find(|v| entrance_reach(v, x, y))
+}
+
+/// The exit a character on a village map steps on or orders to, and where it lands.
+///
+/// `GateX`/`GateY` of the village's map type name the gate inside the town; the same
+/// tolerance applies, since the same object is being aimed at from the other side.
+fn village_exit(map_id: i32, x: i32, y: i32) -> Option<(&'static Village, (i32, i32))> {
+    let village = VILLAGES.iter().find(|v| v.dst_map == map_id)?;
+    let dx = (village.exit_x - x).abs();
+    let dy = (village.exit_y - y).abs();
+    (dx.max(dy) <= VILLAGE_CLICK_TOLERANCE).then(|| (village, entrance_landing(village)))
 }
 
 /// The village entrance nearest `(map_id, x, y)` within `radius`, and how far it is.
@@ -4215,19 +4340,25 @@ fn village_within(map_id: i32, x: i32, y: i32, radius: i32) -> Option<(&'static 
 /// `:9014` for the gate family). The synthesised row carries no entry item, so the gate
 /// path's own item check stays out of the way.
 fn village_warp_gate(from_map: i32, village: &Village) -> Gate {
+    warp_gate_to(from_map, village.dst_map, village.dst_x, village.dst_y)
+}
+
+/// A gate-shaped warp to anywhere: the village entry and exit and the revive path all end in
+/// the same `SetWarpInfo`/`Warp` pair and differ only in how the destination is chosen.
+fn warp_gate_to(from_map: i32, dst_map: i32, dst_x: i32, dst_y: i32) -> Gate {
     Gate {
         src_map: from_map,
-        src_x: village.src_x,
-        src_y: village.src_y,
+        src_x: 0,
+        src_y: 0,
         xsize: 1,
         ysize: 1,
         center_x: 0,
         center_y: 0,
         item_unique: 0,
         item_num: 0,
-        dst_map: village.dst_map,
-        dst_x: village.dst_x,
-        dst_y: village.dst_y,
+        dst_map,
+        dst_x,
+        dst_y,
     }
 }
 
@@ -4639,10 +4770,30 @@ pub(crate) async fn step_movement(
     // without a step.
     let stepped_gate = gate_at(mv.map_id, x, y);
     let stepped_village = village_at(mv.map_id, x, y);
+    let stepped_exit = village_exit(mv.map_id, x, y);
     let stepped_map = mv.map_id;
-    if mv.arrived() || stepped_gate.is_some() || stepped_village.is_some() {
+    if mv.arrived() || stepped_gate.is_some() || stepped_village.is_some() || stepped_exit.is_some()
+    {
         mv.deadline = None;
         *movement = None;
+    }
+    if let Some((village, landing)) = stepped_exit {
+        logln!(
+            "game: village {} exit on foot: map {stepped_map} ({x}, {y}) -> map 0 at {landing:?}",
+            village.unique
+        );
+        let gate = warp_gate_to(stepped_map, 0, landing.0, landing.1);
+        warp_through_gate(
+            stream,
+            outbound,
+            characters,
+            registry,
+            session_key,
+            live,
+            &gate,
+        )
+        .await?;
+        return Ok(());
     }
     if let Some(village) = stepped_village {
         logln!(
@@ -4872,6 +5023,30 @@ pub(crate) async fn handle_userorder(
     // legacy checks them (`char-order.cpp:173` → `CharServerMoveByGate(x, y)`), and
     // a gate hit replaces the walk with a warp — so this has to run before the
     // destination is persisted as a position.
+    // Leaving a town: on a village map, the type's `GateX`/`GateY` names the gate inside it
+    // (`MapTypeInfo_Village.txt`), and `GateInfoE.txt` has no row that leaves a village, so
+    // this tile is the only exit the data names. The character comes back out on the road
+    // just south of the entrance block on map 0.
+    if let Some((village, landing)) = village_exit(map_id, dest.0, dest.1) {
+        logln!(
+            "game: village {} exit: map {map_id} ({}, {}) -> map 0 at {landing:?}",
+            village.unique,
+            village.exit_x,
+            village.exit_y
+        );
+        let gate = warp_gate_to(map_id, 0, landing.0, landing.1);
+        warp_through_gate(
+            stream,
+            outbound,
+            characters,
+            registry,
+            session_key,
+            live,
+            &gate,
+        )
+        .await?;
+        return Ok(None);
+    }
     // The village entrances are checked on the same seam, and before the gates: the
     // legacy runs one object lookup over the ordered cell and dispatches on its type
     // (`char.cpp:8975-8983` village, `:9028` gate).
@@ -5455,11 +5630,33 @@ mod tests {
         assert_eq!((left, top, right, bottom), (270, 322, 277, 329));
         let (left, top, right, bottom) = talasha.block();
         assert_eq!((left, top, right, bottom), (242, 300, 249, 307));
-        // A click anywhere in a town's entrance counts, one cell outside it does not.
+        // A click anywhere in a town's entrance, or up to four tiles off it, counts; five
+        // off does not. The block itself is x[270..277] y[322..329].
         assert!(village_at(0, 270, 322).is_some());
         assert!(village_at(0, 277, 329).is_some());
-        assert!(village_at(0, 269, 325).is_none());
-        assert!(village_at(0, 278, 330).is_none());
+        assert!(
+            village_at(0, 269, 325).is_some(),
+            "the text marker is within reach"
+        );
+        assert!(
+            village_at(0, 266, 318).is_some(),
+            "four tiles off still counts"
+        );
+        assert!(village_at(0, 265, 318).is_none(), "five tiles off does not");
+        assert!(
+            village_at(0, 278, 330).is_some(),
+            "one past the corner is within four"
+        );
+        // Leaving: Ankaran's map type puts the inner gate at (23,18), and the exit lands on
+        // the road just south of the entrance block, at (273, 330).
+        let (village, landing) = village_exit(1, 23, 18).expect("the village gate");
+        assert_eq!(village.unique, 1);
+        assert_eq!(landing, (273, 330));
+        assert!(village_exit(1, 23, 25).is_none(), "not at the gate");
+        assert!(
+            village_exit(0, 23, 18).is_none(),
+            "map 0 is not a village map"
+        );
         // The diagnostic measures to the block: (268,324) is two tiles left of it.
         let (near, distance) = village_within(0, 268, 324, 3).expect("two tiles away");
         assert_eq!((near.unique, distance), (1, 2));
