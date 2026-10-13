@@ -4273,47 +4273,29 @@ impl Village {
     }
 }
 
-/// How close a character has to arrive to a village's entrance for the entrance to take —
-/// the long-distance interaction range.
+/// How close a character has to be to a village's *inner* gate for it to send them back out —
+/// the exit's own reach.
 ///
-/// The entrance block itself stays exactly what the map file stamps (8×8, measured), and so
-/// does the legacy rule that an order *onto* the block warps at once ([`village_at`]). What
-/// this adds is the arrival case: a player who clicks the town from across the field gets a
-/// move order toward it, the client paths to the nearest cell it can stand on — the block's
-/// own cells are impassable, `FOATB_VILLAGE` → `BLOCK_NORMAL` (`MapCommon.cpp:654-657`) — and
-/// the walk ends *beside* the entrance. When the committed tile lands within this many tiles
-/// of the block, the entrance takes.
+/// This one is an approximation and is labelled as such: the exit is a design requirement
+/// (`MapTypeInfo_Village.txt`'s `GateX`/`GateY` names the gate inside the town), the inner
+/// map's own stamped block is not measured, and the column gives a single tile rather than a
+/// footprint. Six tiles keeps the walk-out comfortable. It is used *only* for the exit; the
+/// entrance side follows the client's own rule exactly, see [`village_at`].
+pub(crate) const VILLAGE_EXIT_REACH: i32 = 6;
+
+/// The village whose entrance `(map_id, x, y)` covers, if any.
 ///
-/// Six tiles, so a click that lands on the road or the apron outside the walls still leads
-/// in; measured to the block, so the reach is symmetric on all four sides.
-pub(crate) const VILLAGE_CLICK_RANGE: i32 = 6;
-
-/// The distance in tiles from `(x, y)` to `village`'s entrance block; 0 inside it.
-fn entrance_distance(village: &Village, x: i32, y: i32) -> i32 {
-    let (left, top, right, bottom) = village.block();
-    let dx = (left - x).max(x - right).max(0);
-    let dy = (top - y).max(y - bottom).max(0);
-    dx.max(dy)
-}
-
-/// The village whose entrance `(map_id, x, y)` is *inside*, if any — the ordered-cell rule,
-/// unchanged from the legacy (`GetFieldObjectPara(x, y)`, `char.cpp:8986`).
+/// This is the legacy's rule, cell for cell: the client sends the *cell under the cursor* as
+/// an ordinary `ORDER_MOVE` — a hovered village only sets `MOUSEMODE_MOVE` and the gate
+/// cursor (`MouseOperation.cpp:3333-3338`), the move path builds the order from
+/// `clMouseObject` (`:5408-5439`), and every order leaves through
+/// `cltClient::OrderOperation` (`Client.cpp:3284-3304`) with that same cell, whether the
+/// click was adjacent or across the field. The server then resolves the field object on that
+/// cell (`char.cpp:8975-8986`). There is no range anywhere in the client — a click from far
+/// away already names the entrance's own cell — so none is invented here.
 fn village_at(map_id: i32, x: i32, y: i32) -> Option<&'static Village> {
     (map_id == 0).then_some(())?;
     VILLAGES.iter().find(|v| v.covers(x, y))
-}
-
-/// The village a character *arriving* at `(map_id, x, y)` should enter, and how far away the
-/// entrance was — the long-distance half, used where a committed step lands.
-fn village_arrival(map_id: i32, x: i32, y: i32) -> Option<(&'static Village, i32)> {
-    if map_id != 0 {
-        return None;
-    }
-    VILLAGES
-        .iter()
-        .map(|v| (v, entrance_distance(v, x, y)))
-        .filter(|(_, distance)| *distance <= VILLAGE_CLICK_RANGE)
-        .min_by_key(|(_, distance)| *distance)
 }
 
 /// Where a character leaving `village` arrives back on map 0: the first cell south of the
@@ -4331,7 +4313,7 @@ fn village_exit(map_id: i32, x: i32, y: i32) -> Option<(&'static Village, (i32, 
     let village = VILLAGES.iter().find(|v| v.dst_map == map_id)?;
     let dx = (village.exit_x - x).abs();
     let dy = (village.exit_y - y).abs();
-    (dx.max(dy) <= VILLAGE_CLICK_RANGE).then(|| (village, entrance_landing(village)))
+    (dx.max(dy) <= VILLAGE_EXIT_REACH).then(|| (village, entrance_landing(village)))
 }
 
 /// The village entrance nearest `(map_id, x, y)` within `radius`, and how far it is.
@@ -4790,7 +4772,7 @@ pub(crate) async fn step_movement(
     // check in `handle_userorder` stays first, so a direct order still leaves
     // without a step.
     let stepped_gate = gate_at(mv.map_id, x, y);
-    let stepped_village = village_arrival(mv.map_id, x, y);
+    let stepped_village = village_at(mv.map_id, x, y);
     let stepped_exit = village_exit(mv.map_id, x, y);
     let stepped_map = mv.map_id;
     if mv.arrived() || stepped_gate.is_some() || stepped_village.is_some() || stepped_exit.is_some()
@@ -4816,9 +4798,9 @@ pub(crate) async fn step_movement(
         .await?;
         return Ok(());
     }
-    if let Some((village, distance)) = stepped_village {
+    if let Some(village) = stepped_village {
         logln!(
-            "game: village {} entered on foot: map {stepped_map} ({x}, {y}), {distance} tile(s) from the entrance",
+            "game: village {} entered on foot: map {stepped_map} ({x}, {y})",
             village.unique
         );
         let gate = village_warp_gate(stepped_map, village);
@@ -5658,22 +5640,16 @@ mod tests {
             "one cell outside the block"
         );
         assert!(village_at(0, 278, 330).is_none(), "and past the far corner");
-        // Arriving is where the range applies: a distant click starts a walk that ends
-        // beside the block, and a committed step within VILLAGE_CLICK_RANGE enters.
-        let (village, distance) = village_arrival(0, 269, 325).expect("one outside, arriving");
-        assert_eq!((village.unique, distance), (1, 1));
-        assert_eq!(village_arrival(0, 266, 318).map(|(_, d)| d), Some(4));
-        assert_eq!(village_arrival(0, 264, 316).map(|(_, d)| d), Some(6));
+        // No range is invented on top: the client sends the cell under the cursor and nothing
+        // else (see `village_at`'s doc for the file:line trail), so the rule is the block, cell
+        // for cell, however far away the character stood when the click happened.
         assert!(
-            village_arrival(0, 263, 315).is_none(),
-            "seven tiles is out of range"
+            village_at(0, 266, 318).is_none(),
+            "four tiles off is not the entrance"
         );
+        assert!(village_at(0, 264, 316).is_none(), "nor six");
         assert!(
-            village_arrival(0, 270, 322).is_some_and(|(_, d)| d == 0),
-            "standing on the block is distance zero"
-        );
-        assert!(
-            village_arrival(158, 269, 325).is_none(),
+            village_at(158, 269, 325).is_none(),
             "villages live on map 0"
         );
         // Leaving: Ankaran's map type puts the inner gate at (23,18), and the exit lands on
