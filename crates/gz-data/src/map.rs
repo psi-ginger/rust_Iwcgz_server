@@ -19,6 +19,16 @@
 //! [`MapFile::read`] fails unless that is exactly the file's length, so a file that does not
 //! follow this layout is refused rather than mis-read.
 //!
+//! One discrepancy this loader reports but does not hide: in the shipped `MainMap.map`
+//! the two grids disagree about one cell by (7, 3). `FieldObjectMap` places the palace
+//! gate's object at (291, 350) - unique 49, matching the legacy gate table's own block
+//! x[291..299] y[350..353] - while `FieldObjectMapPara`, read at the offset this layout
+//! computes, carries id 306 for x[284..292] y[347..350], 9628 bytes' worth of cells
+//! earlier. Both grids are dense and the file's total length fits the layout exactly, so
+//! the section boundaries are right and the difference has to come from how the shipped
+//! writer indexes rows (`YOff`). Until that is pinned, the two accessors are verified for
+//! content and unverified for absolute alignment against each other.
+//!
 //! The header's fields are placed by the class in `map.h:176-194`: `Version` (u32), `Unique`
 //! (u32), `Text[128]` (wchar_t, so 256 bytes), `Reserved0` (u32), `MapXsize`/`MapYsize` (u16
 //! each), `MapType` (i32), `TileSet1` (i32), `bWeatherSwitch` (u8), `TileSet2` (i16),
@@ -30,9 +40,26 @@
 
 use std::fmt;
 
-/// Size of `cltMapHeader` as the legacy writes it (`map.h:176-194`, `sizeof` in
-/// `map-save.cpp:44`).
-pub const HEADER_SIZE: usize = 324;
+/// Size of `cltMapHeader` in the ANSI revision that shipped: `TCHAR` is `char`, so
+/// `Text[128]` is 128 bytes and the class lands on 176 bytes, with `MapXsize` at 140 and
+/// `MapYsize` at 142. Verified against the shipped data: every file's size is exactly
+/// `176 + W*H*23 + 16392`, and the client-side inspection `blueprint/client-data/
+/// inspect_map.out.txt` computes the same section table from this header.
+pub const HEADER_SIZE_ANSI: usize = 176;
+
+/// Size of `cltMapHeader` in the Unicode revision this tree's server sources are built with:
+/// `TCHAR` is `wchar_t`, so `Text[128]` is 256 bytes, the class is 324 bytes, and
+/// `MapXsize`/`MapYsize` sit at 268/270 (`map.h:176-194`, `sizeof` in `map-save.cpp:44`).
+pub const HEADER_SIZE_UNICODE: usize = 324;
+
+/// Which `cltMapHeader` layout a file uses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HeaderRevision {
+    /// 176-byte header, dimensions at 140/142 — what the shipped `.map` files carry.
+    Ansi,
+    /// 324-byte header, dimensions at 268/270 — the layout the 2010 sources describe.
+    Unicode,
+}
 
 /// `MAX_GEO_NUMBER` (`map.h:258`).
 pub const MAX_GEO_NUMBER: usize = 256;
@@ -260,7 +287,8 @@ impl MapFile {
     pub fn read(bytes: &[u8]) -> Result<Self, MapReadError> {
         let mut c = Cursor::new(bytes);
 
-        let header = Self::read_header(&mut c)?;
+        let revision = Self::header_revision(bytes)?;
+        let header = Self::read_header(&mut c, revision)?;
         let cells = cells(header.map_xsize, header.map_ysize)?;
 
         let id_map = c.u16s("IDMap", cells)?;
@@ -302,23 +330,86 @@ impl MapFile {
         })
     }
 
-    fn read_header(c: &mut Cursor<'_>) -> Result<MapHeader, MapReadError> {
-        let raw = c.take("header", HEADER_SIZE)?;
+    /// Which header layout the file carries: the ANSI revision keeps the dimensions at 140/142,
+    /// the Unicode one at 268/270. Both are checked for sanity before one is chosen, and the
+    /// choice is confirmed by the file's own length at the end of [`MapFile::read`].
+    fn header_revision(bytes: &[u8]) -> Result<HeaderRevision, MapReadError> {
+        if bytes.len() < HEADER_SIZE_ANSI {
+            return Err(MapReadError::TooShort {
+                section: "header",
+                at: 0,
+                needed: HEADER_SIZE_ANSI,
+            });
+        }
+        let plausible = |at: usize| -> bool {
+            let x = u16::from_le_bytes([bytes[at], bytes[at + 1]]);
+            let y = u16::from_le_bytes([bytes[at + 2], bytes[at + 3]]);
+            x > 0 && y > 0 && x <= 10_000 && y <= 10_000
+        };
+        if plausible(140) {
+            return Ok(HeaderRevision::Ansi);
+        }
+        if bytes.len() >= HEADER_SIZE_UNICODE && plausible(268) {
+            return Ok(HeaderRevision::Unicode);
+        }
+        Ok(HeaderRevision::Ansi)
+    }
+
+    fn read_header(
+        c: &mut Cursor<'_>,
+        revision: HeaderRevision,
+    ) -> Result<MapHeader, MapReadError> {
+        let (size, text_range, at_x, at_reserved0, at_map_type, at_weather, at_tile_set2) =
+            match revision {
+                HeaderRevision::Ansi => (HEADER_SIZE_ANSI, 8..136, 140, 136, 144, 152, 154),
+                HeaderRevision::Unicode => (HEADER_SIZE_UNICODE, 8..264, 268, 264, 272, 280, 282),
+            };
+        let raw = c.take("header", size)?;
         let version = u32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]);
         let unique = u32::from_le_bytes([raw[4], raw[5], raw[6], raw[7]]);
-        let text = raw[8..264]
-            .as_chunks::<2>()
-            .0
-            .iter()
-            .map(|c| u16::from_le_bytes(*c))
-            .collect();
-        let reserved0 = u32::from_le_bytes([raw[264], raw[265], raw[266], raw[267]]);
-        let map_xsize = u16::from_le_bytes([raw[268], raw[269]]);
-        let map_ysize = u16::from_le_bytes([raw[270], raw[271]]);
-        let map_type = i32::from_le_bytes([raw[272], raw[273], raw[274], raw[275]]);
-        let tile_set1 = i32::from_le_bytes([raw[276], raw[277], raw[278], raw[279]]);
-        let weather = raw[280] != 0;
-        let tile_set2 = i16::from_le_bytes([raw[282], raw[283]]);
+        fn decode_text(bytes: &[u8], wide: bool) -> Vec<u16> {
+            if wide {
+                bytes
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .map(|c| u16::from_le_bytes(*c))
+                    .filter(|unit| *unit != 0)
+                    .collect()
+            } else {
+                bytes
+                    .iter()
+                    .map(|b| u16::from(*b))
+                    .filter(|unit| *unit != 0)
+                    .collect()
+            }
+        }
+        let text = decode_text(
+            &raw[text_range],
+            matches!(revision, HeaderRevision::Unicode),
+        );
+        let reserved0 = u32::from_le_bytes([
+            raw[at_reserved0],
+            raw[at_reserved0 + 1],
+            raw[at_reserved0 + 2],
+            raw[at_reserved0 + 3],
+        ]);
+        let map_xsize = u16::from_le_bytes([raw[at_x], raw[at_x + 1]]);
+        let map_ysize = u16::from_le_bytes([raw[at_x + 2], raw[at_x + 3]]);
+        let map_type = i32::from_le_bytes([
+            raw[at_map_type],
+            raw[at_map_type + 1],
+            raw[at_map_type + 2],
+            raw[at_map_type + 3],
+        ]);
+        let tile_set1 = i32::from_le_bytes([
+            raw[at_map_type + 4],
+            raw[at_map_type + 5],
+            raw[at_map_type + 6],
+            raw[at_map_type + 7],
+        ]);
+        let weather = raw[at_weather] != 0;
+        let tile_set2 = i16::from_le_bytes([raw[at_tile_set2], raw[at_tile_set2 + 1]]);
         // The legacy refuses a header with these dimensions itself (`MapManager.cpp:657`), so a
         // file that gets here but cannot be a `cltMapCommon` map is reported, not guessed at.
         if map_xsize == 0 || map_ysize == 0 || map_xsize > 10_000 || map_ysize > 10_000 {
@@ -416,24 +507,24 @@ impl MapFile {
 mod tests {
     use super::*;
 
-    /// Build a file exactly as `SaveMap` writes one, for a tiny map.
+    /// Build a file exactly as the shipped (ANSI) revision writes one, for a tiny map.
     fn synthetic(xsize: u16, ysize: u16) -> Vec<u8> {
         let cells = usize::from(xsize) * usize::from(ysize);
         let mut out = Vec::new();
-        // header: Version, Unique, Text[128], Reserved0, X, Y, MapType, TileSet1, weather,
-        // TileSet2, Reserved[19] — padded to HEADER_SIZE.
-        let mut header = vec![0u8; HEADER_SIZE];
+        // ANSI cltMapHeader: Version, Unique, Text[128] (one byte each), Reserved0, X, Y,
+        // MapType, TileSet1, weather, TileSet2, Reserved[19] — 176 bytes.
+        let mut header = vec![0u8; HEADER_SIZE_ANSI];
         header[0..4].copy_from_slice(&2u32.to_le_bytes());
         header[4..8].copy_from_slice(&7u32.to_le_bytes());
-        for (i, unit) in "Test".encode_utf16().enumerate() {
-            header[8 + i * 2..10 + i * 2].copy_from_slice(&unit.to_le_bytes());
+        for (i, byte) in b"Test".iter().enumerate() {
+            header[8 + i] = *byte;
         }
-        header[268..270].copy_from_slice(&xsize.to_le_bytes());
-        header[270..272].copy_from_slice(&ysize.to_le_bytes());
-        header[272..276].copy_from_slice(&14i32.to_le_bytes());
-        header[276..280].copy_from_slice(&3i32.to_le_bytes());
-        header[280] = 1;
-        header[282..284].copy_from_slice(&5i16.to_le_bytes());
+        header[140..142].copy_from_slice(&xsize.to_le_bytes());
+        header[142..144].copy_from_slice(&ysize.to_le_bytes());
+        header[144..148].copy_from_slice(&14i32.to_le_bytes());
+        header[148..152].copy_from_slice(&3i32.to_le_bytes());
+        header[152] = 1;
+        header[154..156].copy_from_slice(&5i16.to_le_bytes());
         out.extend_from_slice(&header);
 
         for cell in 0..cells {
@@ -556,11 +647,10 @@ mod tests {
     }
 
     #[test]
-    fn a_file_that_is_not_a_cltmapcommon_map_says_so() {
-        // What the shipped `New Era Live` files look like at this offset: the later build keeps
-        // the dimensions elsewhere (measured u16 at 140 and 142), so the legacy header read
-        // yields zeros and the file must be refused, not parsed at the wrong offsets.
+    fn a_header_with_no_usable_dimensions_says_so() {
         let mut bytes = synthetic(4, 4);
+        bytes[140..142].copy_from_slice(&0u16.to_le_bytes());
+        bytes[142..144].copy_from_slice(&0u16.to_le_bytes());
         bytes[268..270].copy_from_slice(&0u16.to_le_bytes());
         bytes[270..272].copy_from_slice(&0u16.to_le_bytes());
         assert_eq!(
@@ -570,5 +660,72 @@ mod tests {
                 map_ysize: 0
             }
         );
+    }
+
+    /// The shipped file, read end to end, with the gate and village blocks answered straight
+    /// from the parsed grid.
+    ///
+    /// The ANSI header moves the whole grid 9628 bytes later than the anchor an earlier session
+    /// had derived, which shifts every cell by seven columns and three rows: the shipped bytes
+    /// put village 1 at x[263..270] y[319..327] and gate 306 at x[284..347] y[347..350]. These
+    /// are the numbers the file itself yields — that is the point of reading it instead of a
+    /// hand-maintained table.
+    #[test]
+    fn loads_the_shipped_main_map_and_answers_grid_lookups() {
+        let path =
+            std::path::Path::new("C:/Data/04_Server_Goonzu/New Era Live/Map/MainMap/MainMap.map");
+        if !path.exists() {
+            return; // the game data is not part of this repository
+        }
+        let bytes = std::fs::read(path).expect("readable");
+        let map = MapFile::read(&bytes).expect("the shipped file parses as the ANSI revision");
+        assert_eq!((map.xsize(), map.ysize()), (800, 800));
+        assert_eq!(
+            map.consumed,
+            bytes.len(),
+            "every byte of the file is accounted for"
+        );
+        assert_eq!(map.header.version, 2);
+
+        let mut village_one = Vec::new();
+        let mut gate_306 = Vec::new();
+        for y in 0..map.ysize() as i32 {
+            for x in 0..map.xsize() as i32 {
+                match map.get_field_object_para(x, y) {
+                    1 => village_one.push((x, y)),
+                    306 => gate_306.push((x, y)),
+                    _ => {}
+                }
+            }
+        }
+        let bbox = |cells: &[(i32, i32)]| {
+            (
+                cells.iter().map(|c| c.0).min().unwrap(),
+                cells.iter().map(|c| c.0).max().unwrap(),
+                cells.iter().map(|c| c.1).min().unwrap(),
+                cells.iter().map(|c| c.1).max().unwrap(),
+            )
+        };
+        assert_eq!(
+            village_one.len(),
+            65,
+            "the measured 65-cell entrance footprint"
+        );
+        assert_eq!(bbox(&village_one), (263, 270, 319, 327));
+        assert_eq!(gate_306.len(), 36, "the palace gate's stamped cells");
+        assert_eq!(bbox(&gate_306), (284, 292, 347, 350));
+
+        // The unique grid answers too, and out-of-area is the legacy's 0.
+        // The unique grid's own view of the palace gate: its object sits at (291,350) with
+        // unique 49, the block the legacy gate table records (x[291..299] y[350..353]). The
+        // two grid reads disagree about that cell by (7,3) - see this module's header.
+        assert_eq!(map.field_object_cell(291, 350).unique(), 49);
+        // The bitfield decode against shipped bytes: this object is 9 wide and 4 tall.
+        let tall = map.field_object_cell(284, 347);
+        assert_eq!(tall.unique(), 49);
+        assert_eq!(tall.length_to_right(), 8, "9 columns");
+        assert_eq!(tall.length_to_bottom(), 3, "4 rows");
+        assert_eq!(map.get_field_object_para(-1, 0), 0);
+        assert_eq!(map.get_field_object_unique(800, 0), 0);
     }
 }
