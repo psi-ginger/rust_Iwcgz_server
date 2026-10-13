@@ -169,20 +169,100 @@ $body = @($sorted | ForEach-Object {
     )
 })
 
-# --- gates on the served maps ---------------------------------------------------
+# --- gates: every row, with the block its field object stamps -------------------
 #
 # `GateInfoE.txt` columns: Unique, TxtNum, FOUnique, ItemUnique, ItemNum, SrcMap,
-# SrcX, SrcY, DstMap, DstX, DstY, PKAreaGate, then a comment. A gate is emitted
-# only when **both** ends are maps this port serves: the file also carries every
-# other city's field-to-dungeon links, and pulling those in would add hundreds of
-# rows for maps nothing can reach yet. The served set grows with the maps we
-# serve, one line here.
+# SrcX, SrcY, DstMap, DstX, DstY, PKAreaGate, then a comment. Every row in the file is
+# emitted now, not just the ones between maps this port serves: the gate network is
+# data, a lookup is keyed by `(map, x, y)`, and a row for a map nothing reaches yet
+# costs a comparison and nothing else.
+#
+# The footprint is not in this file. A gate's `FOUnique` names a field object
+# (`FieldObjectSetInfo.txt`), and the object's own detail file carries
+# `TileXsize TileYsize TileCenterX TileCenterY` — the numbers
+# `cltFieldObjectInfo::LoadDetailInfo` reads (`FieldObject.cpp:325-399`) and
+# `cltMapCommon::PutFieldObject` (`Map-FieldObject.cpp:66-130`) stamps as
+#     x = anchor + TileCenterX - TileXsize + 1 + j,  j in 0..TileXsize
+#     y = anchor + TileCenterY - TileYsize + 1 + i,  i in 0..TileYsize
+# The detail file sits either beside the archive as `<name>/<name>.txt` or inside
+# `FieldObject/<zip>.mz` under that same path.
 $servedMaps = @(0, $MapIndex)
 $gateFile = Join-Path $DataRoot 'Data\GateInfoE.txt'
 if (-not (Test-Path $gateFile)) { throw "gate table not found: '$gateFile' (set -DataRoot)" }
+$foSetFile = Join-Path $DataRoot 'Data\FieldObjectSetInfo.txt'
+if (-not (Test-Path $foSetFile)) { throw "field-object set not found: '$foSetFile' (set -DataRoot)" }
+
+Add-Type -AssemblyName System.IO.Compression.FileSystem | Out-Null
+
+# FOUnique -> @{ Name; Zip } from the set file (UTF-16, like every data file here).
+$foNames = @{}
+foreach ($line in [System.IO.File]::ReadAllLines($foSetFile, [System.Text.Encoding]::Unicode)) {
+    $fields = $line -split "`t"
+    if ($fields.Count -lt 8) { continue }
+    $unique = 0
+    if (-not [int]::TryParse($fields[0].Trim(), [ref]$unique)) { continue }
+    $foNames[$unique] = @{ Name = $fields[3].Trim(); Zip = $fields[7].Trim() }
+}
+if ($foNames.Count -eq 0) { throw "$($foSetFile): no field-object rows parsed" }
+
+$footprintCache = @{}
+function Get-FieldObjectFootprint([int]$unique) {
+    if ($footprintCache.ContainsKey($unique)) { return $footprintCache[$unique] }
+    if (-not $foNames.ContainsKey($unique)) {
+        throw "field object $unique is not in FieldObjectSetInfo.txt"
+    }
+    $name = $foNames[$unique].Name
+    $zip = $foNames[$unique].Zip
+    $text = $null
+    $plain = Join-Path $DataRoot "FieldObject\$name\$name.txt"
+    if (Test-Path $plain) {
+        $text = [System.IO.File]::ReadAllText($plain, [System.Text.Encoding]::Default)
+    }
+    else {
+        foreach ($archive in @($zip, $name)) {
+            $mz = Join-Path $DataRoot "FieldObject\$archive.mz"
+            if (-not (Test-Path $mz)) { continue }
+            $zipFile = [System.IO.Compression.ZipFile]::OpenRead($mz)
+            try {
+                $entry = $zipFile.Entries | Where-Object { $_.FullName -ieq "$name/$name.txt" } | Select-Object -First 1
+                if ($null -eq $entry) {
+                    $entry = $zipFile.Entries | Where-Object { $_.FullName -ilike "$name*.txt" } | Select-Object -First 1
+                }
+                if ($null -ne $entry) {
+                    $reader = New-Object System.IO.StreamReader($entry.Open(), [System.Text.Encoding]::Default)
+                    try { $text = $reader.ReadToEnd() } finally { $reader.Dispose() }
+                }
+            }
+            finally { $zipFile.Dispose() }
+            if ($text) { break }
+        }
+    }
+    if (-not $text) { throw "field object $unique ($name): no detail file in $name/ or $zip.mz" }
+
+    # The data line is the first whose first four whitespace fields are all integers;
+    # the header (`TileXsize TileYsize …`) and the model name never are.
+    $footprint = $null
+    foreach ($detail in $text -split "`r?`n") {
+        $parts = @($detail -split '\s+' | Where-Object { $_ -ne '' })
+        if ($parts.Count -lt 4) { continue }
+        $nums = @()
+        $ok = $true
+        foreach ($part in $parts[0..3]) {
+            $value = 0
+            if (-not [int]::TryParse($part, [ref]$value)) { $ok = $false; break }
+            $nums += $value
+        }
+        if ($ok -and $nums[0] -gt 0 -and $nums[1] -gt 0) { $footprint = $nums; break }
+    }
+    if ($null -eq $footprint) { throw "field object $unique ($name): no `TileXsize …` data line" }
+    $footprintCache[$unique] = $footprint
+    return $footprint
+}
 
 $gates = New-Object 'System.Collections.Generic.List[object]'
+$gateSkipped = New-Object 'System.Collections.Generic.List[string]'
 $gateSeenTiles = @{}
+$gateSeenCells = @{}
 $inData = $false
 foreach ($line in [System.IO.File]::ReadAllLines($gateFile, [System.Text.Encoding]::Unicode)) {
     if ($line -match '^\s*<Data>') { $inData = $true; continue }
@@ -198,22 +278,53 @@ foreach ($line in [System.IO.File]::ReadAllLines($gateFile, [System.Text.Encodin
     if ($nums.Count -lt 11) { continue }
     $srcMap = $nums[5]
     $dstMap = $nums[8]
-    if (($servedMaps -notcontains $srcMap) -or ($servedMaps -notcontains $dstMap)) { continue }
-    $tileKey = "$srcMap/$($nums[6])/$($nums[7])"
-    if ($gateSeenTiles.ContainsKey($tileKey)) {
-        throw "$($gateFile): two gate rows claim source tile $tileKey"
+
+    $footprint = Get-FieldObjectFootprint $nums[2]
+    $xsize = $footprint[0]
+    $ysize = $footprint[1]
+    $centerX = $footprint[2]
+    $centerY = $footprint[3]
+
+    # `PutFieldObject` refuses a block that overlaps one already stamped
+    # (`Map-FieldObject.cpp:88-97`), and the client's gate table is keyed by unique
+    # (`IsEnterGate`, `Client.cpp:8128`), so two rows cannot both own a cell. The file
+    # holds exactly one such tie - unique 670, map 418 (32,78), two destinations
+    # ("Tower 3->4" and "Tower 4->3") - and the map builder's own order decides:
+    # the first row wins, the rest are reported and skipped.
+    $cells = @()
+    $overlap = $null
+    for ($i = 0; $i -lt $ysize; $i++) {
+        for ($j = 0; $j -lt $xsize; $j++) {
+            $x = $nums[6] + $centerX - $xsize + 1 + $j
+            $y = $nums[7] + $centerY - $ysize + 1 + $i
+            $cellKey = "$srcMap/$x/$y"
+            if ($gateSeenCells.ContainsKey($cellKey)) { $overlap = "$($gateSeenCells[$cellKey]) at $cellKey"; break }
+            $cells += $cellKey
+        }
+        if ($overlap) { break }
     }
+    if ($overlap) {
+        $gateSkipped.Add("gate $($nums[0]) at $srcMap/$($nums[6])/$($nums[7]) -> $dstMap/$($nums[9])/$($nums[10]): block already claimed by $overlap")
+        continue
+    }
+    $tileKey = "$srcMap/$($nums[6])/$($nums[7])"
     $gateSeenTiles[$tileKey] = $true
+    foreach ($cellKey in $cells) { $gateSeenCells[$cellKey] = $nums[0] }
+
     $gates.Add([pscustomobject]@{
-        SrcMap = $srcMap
-        SrcX   = $nums[6]
-        SrcY   = $nums[7]
-        DstMap = $dstMap
-        DstX   = $nums[9]
-        DstY   = $nums[10]
+        SrcMap  = $srcMap
+        SrcX    = $nums[6]
+        SrcY    = $nums[7]
+        Xsize   = $xsize
+        Ysize   = $ysize
+        CenterX = $centerX
+        CenterY = $centerY
+        DstMap  = $dstMap
+        DstX    = $nums[9]
+        DstY    = $nums[10]
     })
 }
-if ($gates.Count -eq 0) { throw "no gate rows found between maps $($servedMaps -join ', ')" }
+if ($gates.Count -eq 0) { throw "no gate rows found in $gateFile" }
 # Kept in `GateInfoE.txt` order (no sort): that order is the one the table's own
 # doc documents, and it is deterministic by itself.
 $gateSorted = $gates.ToArray()
@@ -224,13 +335,17 @@ $gateBody = @($gateSorted | ForEach-Object {
         "        src_map: $($_.SrcMap),",
         "        src_x: $($_.SrcX),",
         "        src_y: $($_.SrcY),",
+        "        xsize: $($_.Xsize),",
+        "        ysize: $($_.Ysize),",
+        "        center_x: $($_.CenterX),",
+        "        center_y: $($_.CenterY),",
         "        dst_map: $($_.DstMap),",
         "        dst_x: $($_.DstX),",
         "        dst_y: $($_.DstY),",
         "    },"
     )
 })
-$gateGenerated = @($gateSorted | ForEach-Object { '{0}/{1}/{2}/{3}/{4}/{5}' -f $_.SrcMap, $_.SrcX, $_.SrcY, $_.DstMap, $_.DstX, $_.DstY })
+$gateGenerated = @($gateSorted | ForEach-Object { '{0}/{1}/{2}/{3}/{4}/{5}/{6}/{7}/{8}/{9}' -f $_.SrcMap, $_.SrcX, $_.SrcY, $_.Xsize, $_.Ysize, $_.CenterX, $_.CenterY, $_.DstMap, $_.DstX, $_.DstY })
 
 if ($Check) {
     if ($Table -ne 'gate') {
@@ -265,18 +380,19 @@ if ($Check) {
             'const GATES: &\[Gate\] = &\[(.*?)\];',
             [System.Text.RegularExpressions.RegexOptions]::Singleline)
         if (-not $tableMatch.Success) { throw "no GATES table found in $GateRustPath" }
-        $pattern = 'Gate\s*\{\s*src_map:\s*(-?\d+)\s*,\s*src_x:\s*(\d+)\s*,\s*src_y:\s*(\d+)\s*,\s*dst_map:\s*(-?\d+)\s*,\s*dst_x:\s*(\d+)\s*,\s*dst_y:\s*(\d+)\s*,?\s*\}'
+        $pattern = 'Gate\s*\{\s*src_map:\s*(-?\d+)\s*,\s*src_x:\s*(\d+)\s*,\s*src_y:\s*(\d+)\s*,\s*xsize:\s*(\d+)\s*,\s*ysize:\s*(\d+)\s*,\s*center_x:\s*(-?\d+)\s*,\s*center_y:\s*(-?\d+)\s*,\s*dst_map:\s*(-?\d+)\s*,\s*dst_x:\s*(\d+)\s*,\s*dst_y:\s*(\d+)\s*,?\s*\}'
         $committed = @([regex]::Matches(
                 $tableMatch.Groups[1].Value,
                 $pattern,
                 [System.Text.RegularExpressions.RegexOptions]::Singleline) | ForEach-Object {
-            '{0}/{1}/{2}/{3}/{4}/{5}' -f $_.Groups[1].Value, $_.Groups[2].Value, $_.Groups[3].Value,
-                $_.Groups[4].Value, $_.Groups[5].Value, $_.Groups[6].Value
+            '{0}/{1}/{2}/{3}/{4}/{5}/{6}/{7}/{8}/{9}' -f $_.Groups[1].Value, $_.Groups[2].Value, $_.Groups[3].Value,
+                $_.Groups[4].Value, $_.Groups[5].Value, $_.Groups[6].Value, $_.Groups[7].Value,
+                $_.Groups[8].Value, $_.Groups[9].Value, $_.Groups[10].Value
         })
         if (($gateGenerated -join ';') -ne ($committed -join ';')) {
             throw "GATES is stale: $($gateGenerated.Count) generated vs $($committed.Count) committed. Re-run without -Check and paste the block."
         }
-        Write-Host "GATES is current: $($gateGenerated.Count) row(s) between maps $($servedMaps -join ', ')"
+        Write-Host "GATES is current: $($gateGenerated.Count) row(s), $($gateSeenCells.Count) covered cell(s), $($footprintCache.Count) field object(s)"
     }
     exit 0
 }
@@ -290,6 +406,10 @@ if ($Table -ne 'gate') {
     @("pub const NPC_PLACEMENTS: &[NpcPlacement] = &[") + $body + @("];")
 }
 if ($Table -ne 'npc') {
-    Write-Host "# $($gateSorted.Count) gate row(s) between maps $($servedMaps -join ', ')" -ForegroundColor Cyan
+    Write-Host "# $($gateSorted.Count) gate row(s) covering $($gateSeenCells.Count) cell(s), $($footprintCache.Count) field object(s)" -ForegroundColor Cyan
+    if ($gateSkipped.Count -gt 0) {
+        Write-Host "# skipped $($gateSkipped.Count) gate row(s) whose block was already claimed:" -ForegroundColor Yellow
+        foreach ($entry in $gateSkipped) { Write-Host "#   $entry" -ForegroundColor Yellow }
+    }
     @("const GATES: &[Gate] = &[") + $gateBody + @("];")
 }
