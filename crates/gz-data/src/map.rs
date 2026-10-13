@@ -19,24 +19,27 @@
 //! [`MapFile::read`] fails unless that is exactly the file's length, so a file that does not
 //! follow this layout is refused rather than mis-read.
 //!
-//! One discrepancy this loader reports but does not hide: in the shipped `MainMap.map`
-//! the two grids disagree about one cell by (7, 3). `FieldObjectMap` places the palace
-//! gate's object at (291, 350) - unique 49, matching the legacy gate table's own block
-//! x[291..299] y[350..353] - while `FieldObjectMapPara`, read at the offset this layout
-//! computes, carries id 306 for x[284..292] y[347..350], 9628 bytes' worth of cells
-//! earlier. Both grids are dense and the file's total length fits the layout exactly, so
-//! the section boundaries are right and the difference has to come from how the shipped
-//! writer indexes rows (`YOff`). Until that is pinned, the two accessors are verified for
-//! content and unverified for absolute alignment against each other.
+//! Cell indexing is the legacy's: `MapCommon.cpp:55` builds the row offsets as
+//! `YOff[i] = i * MH.MapXsize`, so a cell is simply `x + y * Xsize` with no padding and no
+//! constant offset, and `Map-FieldObject.cpp:253` reads the para grid through it. The grids
+//! agree cell for cell: the palace gate's `ValidSwitch` cell is (291,350) — the editor's
+//! marker — and its 9x4 stamp covers exactly the para grid's x[284..292] y[347..350].
+//!
+//! An earlier session had derived the para grid's start by hand, as
+//! `12631712 - 4*(291 + 350*800)`, taking that marker cell for the block's first cell. The
+//! layout above (header + 18*W*H) puts it 9628 bytes later — three rows and seven cells — and
+//! every measured block moves with it: the mine's gate is x[400..403] y[577..581], not
+//! x[407..410], and Ankaran's entrance x[263..270] y[319..326], not x[270..277].
 //!
 //! The header's fields are placed by the class in `map.h:176-194`: `Version` (u32), `Unique`
-//! (u32), `Text[128]` (wchar_t, so 256 bytes), `Reserved0` (u32), `MapXsize`/`MapYsize` (u16
-//! each), `MapType` (i32), `TileSet1` (i32), `bWeatherSwitch` (u8), `TileSet2` (i16),
-//! `Reserved[19]` (wchar_t) — which lands on 324 bytes with the compiler's 4-byte alignment,
-//! matching the header size measured in the shipped files. The later build that wrote
-//! `New Era Live\Map\MainMap\MainMap.map` stores the dimensions elsewhere (measured: u16 at
-//! offsets 140 and 142) and lays its sections out differently, so that file is rejected with
-//! [`MapReadError::BadHeader`] rather than parsed with the wrong offsets.
+//! (u32), `Text[128]`, `Reserved0` (u32), `MapXsize`/`MapYsize` (u16 each), `MapType` (i32),
+//! `TileSet1` (i32), `bWeatherSwitch` (u8), `TileSet2` (i16), `Reserved[19]`. `TCHAR` decides
+//! its size: the shipped files are ANSI builds, where `TCHAR` is one byte, so `Text[128]` is
+//! 128 bytes, the header is 176 bytes and the dimensions sit at 140/142
+//! ([`HeaderRevision::Ansi`]); the Unicode build is 324 bytes with them at 268/270
+//! ([`HeaderRevision::Unicode`]). Both are read, and which one a file uses is settled by the
+//! dimensions themselves and confirmed by the file's own length — a file that matches neither
+//! is refused with [`MapReadError::BadHeader`] rather than parsed at the wrong offsets.
 
 use std::fmt;
 
@@ -665,11 +668,10 @@ mod tests {
     /// The shipped file, read end to end, with the gate and village blocks answered straight
     /// from the parsed grid.
     ///
-    /// The ANSI header moves the whole grid 9628 bytes later than the anchor an earlier session
-    /// had derived, which shifts every cell by seven columns and three rows: the shipped bytes
-    /// put village 1 at x[263..270] y[319..327] and gate 306 at x[284..347] y[347..350]. These
-    /// are the numbers the file itself yields — that is the point of reading it instead of a
-    /// hand-maintained table.
+    /// Cell indexing is `x + y * Xsize` (`MapCommon.cpp:55`), so the para grid starts exactly
+    /// `header + 18 * W * H` bytes in — 11520176 for this file. An earlier session's hand-derived
+    /// anchor sat 9628 bytes (2407 cells, three rows and seven columns) before that and shifted
+    /// every measured block by (7, 3); these are the numbers the file itself yields.
     #[test]
     fn loads_the_shipped_main_map_and_answers_grid_lookups() {
         let path =
@@ -715,11 +717,14 @@ mod tests {
         assert_eq!(gate_306.len(), 36, "the palace gate's stamped cells");
         assert_eq!(bbox(&gate_306), (284, 292, 347, 350));
 
-        // The unique grid answers too, and out-of-area is the legacy's 0.
-        // The unique grid's own view of the palace gate: its object sits at (291,350) with
-        // unique 49, the block the legacy gate table records (x[291..299] y[350..353]). The
-        // two grid reads disagree about that cell by (7,3) - see this module's header.
+        // The two grids agree, cell for cell: the stamp's `ValidSwitch` cell (291,350) — the
+        // editor's marker — sits inside the footprint x[284..292] y[347..350] that the para
+        // grid carries for id 306.
         assert_eq!(map.field_object_cell(291, 350).unique(), 49);
+        assert!(
+            map.field_object_cell(291, 350).valid(),
+            "the marker cell carries the ValidSwitch"
+        );
         // The bitfield decode against shipped bytes: this object is 9 wide and 4 tall.
         let tall = map.field_object_cell(284, 347);
         assert_eq!(tall.unique(), 49);

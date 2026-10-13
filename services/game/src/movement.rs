@@ -30,7 +30,7 @@ use crate::{
 /// | rows | FOUnique | source | destination |
 /// |---|---|---|---|
 /// | 307, 308, 309 | 7023 | map 158 at (14,90), (28,101), (41,90) | map 0 at (288,354) |
-/// | 306 | 49 | map 0 at (291,350) | map 158 at (27,87) |
+/// | 306 | 49 | map 0 at x[284..292] y[347..350] | map 158 at (27,87) |
 ///
 /// Hanyang's three gates are the map's exits — `FOTYPE_GATE` field objects whose
 /// hover name is text 254, "Move outside" — and the reverse row lands on the tile
@@ -80,8 +80,8 @@ struct Gate {
 const GATES: &[Gate] = &[
     Gate {
         src_map: 0,
-        src_x: 298,
-        src_y: 353,
+        src_x: 291,
+        src_y: 350,
         xsize: 9,
         ysize: 4,
         center_x: 1,
@@ -136,8 +136,8 @@ const GATES: &[Gate] = &[
     },
     Gate {
         src_map: 0,
-        src_x: 261,
-        src_y: 606,
+        src_x: 254,
+        src_y: 603,
         xsize: 5,
         ysize: 5,
         center_x: 0,
@@ -192,8 +192,8 @@ const GATES: &[Gate] = &[
     },
     Gate {
         src_map: 0,
-        src_x: 324,
-        src_y: 426,
+        src_x: 317,
+        src_y: 423,
         xsize: 5,
         ysize: 5,
         center_x: 3,
@@ -276,8 +276,8 @@ const GATES: &[Gate] = &[
     },
     Gate {
         src_map: 0,
-        src_x: 272,
-        src_y: 363,
+        src_x: 265,
+        src_y: 360,
         xsize: 4,
         ysize: 4,
         center_x: 1,
@@ -304,8 +304,8 @@ const GATES: &[Gate] = &[
     },
     Gate {
         src_map: 0,
-        src_x: 409,
-        src_y: 583,
+        src_x: 402,
+        src_y: 580,
         xsize: 4,
         ysize: 5,
         center_x: 1,
@@ -360,8 +360,8 @@ const GATES: &[Gate] = &[
     },
     Gate {
         src_map: 0,
-        src_x: 529,
-        src_y: 449,
+        src_x: 522,
+        src_y: 446,
         xsize: 5,
         ysize: 5,
         center_x: 0,
@@ -416,8 +416,8 @@ const GATES: &[Gate] = &[
     },
     Gate {
         src_map: 0,
-        src_x: 173,
-        src_y: 127,
+        src_x: 166,
+        src_y: 124,
         xsize: 4,
         ysize: 10,
         center_x: 0,
@@ -430,8 +430,8 @@ const GATES: &[Gate] = &[
     },
     Gate {
         src_map: 0,
-        src_x: 188,
-        src_y: 325,
+        src_x: 181,
+        src_y: 322,
         xsize: 4,
         ysize: 10,
         center_x: 0,
@@ -444,8 +444,8 @@ const GATES: &[Gate] = &[
     },
     Gate {
         src_map: 0,
-        src_x: 247,
-        src_y: 653,
+        src_x: 240,
+        src_y: 650,
         xsize: 4,
         ysize: 10,
         center_x: 0,
@@ -458,8 +458,8 @@ const GATES: &[Gate] = &[
     },
     Gate {
         src_map: 0,
-        src_x: 259,
-        src_y: 700,
+        src_x: 252,
+        src_y: 697,
         xsize: 4,
         ysize: 10,
         center_x: 0,
@@ -472,8 +472,8 @@ const GATES: &[Gate] = &[
     },
     Gate {
         src_map: 0,
-        src_x: 484,
-        src_y: 668,
+        src_x: 477,
+        src_y: 665,
         xsize: 4,
         ysize: 10,
         center_x: 0,
@@ -486,8 +486,8 @@ const GATES: &[Gate] = &[
     },
     Gate {
         src_map: 0,
-        src_x: 405,
-        src_y: 710,
+        src_x: 398,
+        src_y: 707,
         xsize: 4,
         ysize: 10,
         center_x: 0,
@@ -500,8 +500,8 @@ const GATES: &[Gate] = &[
     },
     Gate {
         src_map: 0,
-        src_x: 210,
-        src_y: 409,
+        src_x: 203,
+        src_y: 406,
         xsize: 4,
         ysize: 10,
         center_x: 0,
@@ -514,8 +514,8 @@ const GATES: &[Gate] = &[
     },
     Gate {
         src_map: 0,
-        src_x: 389,
-        src_y: 88,
+        src_x: 382,
+        src_y: 85,
         xsize: 4,
         ysize: 10,
         center_x: 0,
@@ -528,8 +528,8 @@ const GATES: &[Gate] = &[
     },
     Gate {
         src_map: 0,
-        src_x: 425,
-        src_y: 158,
+        src_x: 418,
+        src_y: 155,
         xsize: 4,
         ysize: 10,
         center_x: 0,
@@ -542,8 +542,8 @@ const GATES: &[Gate] = &[
     },
     Gate {
         src_map: 0,
-        src_x: 614,
-        src_y: 222,
+        src_x: 607,
+        src_y: 219,
         xsize: 4,
         ysize: 10,
         center_x: 0,
@@ -556,8 +556,8 @@ const GATES: &[Gate] = &[
     },
     Gate {
         src_map: 0,
-        src_x: 265,
-        src_y: 156,
+        src_x: 258,
+        src_y: 153,
         xsize: 4,
         ysize: 10,
         center_x: 0,
@@ -570,8 +570,8 @@ const GATES: &[Gate] = &[
     },
     Gate {
         src_map: 0,
-        src_x: 588,
-        src_y: 595,
+        src_x: 581,
+        src_y: 592,
         xsize: 4,
         ysize: 10,
         center_x: 0,
@@ -584,8 +584,8 @@ const GATES: &[Gate] = &[
     },
     Gate {
         src_map: 0,
-        src_x: 523,
-        src_y: 624,
+        src_x: 516,
+        src_y: 621,
         xsize: 4,
         ysize: 10,
         center_x: 0,
@@ -598,8 +598,8 @@ const GATES: &[Gate] = &[
     },
     Gate {
         src_map: 0,
-        src_x: 324,
-        src_y: 588,
+        src_x: 317,
+        src_y: 585,
         xsize: 4,
         ysize: 10,
         center_x: 0,
@@ -612,8 +612,8 @@ const GATES: &[Gate] = &[
     },
     Gate {
         src_map: 0,
-        src_x: 670,
-        src_y: 431,
+        src_x: 663,
+        src_y: 428,
         xsize: 4,
         ysize: 10,
         center_x: 0,
@@ -626,8 +626,8 @@ const GATES: &[Gate] = &[
     },
     Gate {
         src_map: 0,
-        src_x: 517,
-        src_y: 26,
+        src_x: 510,
+        src_y: 23,
         xsize: 5,
         ysize: 5,
         center_x: 0,
@@ -710,8 +710,8 @@ const GATES: &[Gate] = &[
     },
     Gate {
         src_map: 0,
-        src_x: 363,
-        src_y: 703,
+        src_x: 356,
+        src_y: 700,
         xsize: 4,
         ysize: 4,
         center_x: 0,
@@ -738,8 +738,8 @@ const GATES: &[Gate] = &[
     },
     Gate {
         src_map: 0,
-        src_x: 296,
-        src_y: 44,
+        src_x: 289,
+        src_y: 41,
         xsize: 6,
         ysize: 5,
         center_x: 0,
@@ -822,8 +822,8 @@ const GATES: &[Gate] = &[
     },
     Gate {
         src_map: 0,
-        src_x: 329,
-        src_y: 216,
+        src_x: 322,
+        src_y: 213,
         xsize: 5,
         ysize: 5,
         center_x: 0,
@@ -878,8 +878,8 @@ const GATES: &[Gate] = &[
     },
     Gate {
         src_map: 0,
-        src_x: 420,
-        src_y: 220,
+        src_x: 413,
+        src_y: 217,
         xsize: 3,
         ysize: 4,
         center_x: 0,
@@ -934,8 +934,8 @@ const GATES: &[Gate] = &[
     },
     Gate {
         src_map: 0,
-        src_x: 426,
-        src_y: 632,
+        src_x: 419,
+        src_y: 629,
         xsize: 6,
         ysize: 6,
         center_x: 0,
@@ -1018,8 +1018,8 @@ const GATES: &[Gate] = &[
     },
     Gate {
         src_map: 0,
-        src_x: 609,
-        src_y: 314,
+        src_x: 602,
+        src_y: 311,
         xsize: 4,
         ysize: 4,
         center_x: 0,
@@ -1298,8 +1298,8 @@ const GATES: &[Gate] = &[
     },
     Gate {
         src_map: 0,
-        src_x: 582,
-        src_y: 175,
+        src_x: 575,
+        src_y: 172,
         xsize: 4,
         ysize: 4,
         center_x: 0,
@@ -1634,8 +1634,8 @@ const GATES: &[Gate] = &[
     },
     Gate {
         src_map: 0,
-        src_x: 260,
-        src_y: 449,
+        src_x: 253,
+        src_y: 446,
         xsize: 5,
         ysize: 5,
         center_x: 0,
@@ -1844,8 +1844,8 @@ const GATES: &[Gate] = &[
     },
     Gate {
         src_map: 0,
-        src_x: 565,
-        src_y: 551,
+        src_x: 558,
+        src_y: 548,
         xsize: 5,
         ysize: 4,
         center_x: 0,
@@ -1900,8 +1900,8 @@ const GATES: &[Gate] = &[
     },
     Gate {
         src_map: 0,
-        src_x: 231,
-        src_y: 317,
+        src_x: 224,
+        src_y: 314,
         xsize: 6,
         ysize: 6,
         center_x: 0,
@@ -1914,8 +1914,8 @@ const GATES: &[Gate] = &[
     },
     Gate {
         src_map: 0,
-        src_x: 273,
-        src_y: 358,
+        src_x: 266,
+        src_y: 355,
         xsize: 4,
         ysize: 4,
         center_x: 0,
@@ -2012,8 +2012,8 @@ const GATES: &[Gate] = &[
     },
     Gate {
         src_map: 0,
-        src_x: 702,
-        src_y: 243,
+        src_x: 695,
+        src_y: 240,
         xsize: 5,
         ysize: 5,
         center_x: 0,
@@ -2236,8 +2236,8 @@ const GATES: &[Gate] = &[
     },
     Gate {
         src_map: 0,
-        src_x: 321,
-        src_y: 342,
+        src_x: 314,
+        src_y: 339,
         xsize: 4,
         ysize: 4,
         center_x: 0,
@@ -2432,8 +2432,8 @@ const GATES: &[Gate] = &[
     },
     Gate {
         src_map: 0,
-        src_x: 789,
-        src_y: 207,
+        src_x: 782,
+        src_y: 204,
         xsize: 5,
         ysize: 5,
         center_x: 0,
@@ -2530,8 +2530,8 @@ const GATES: &[Gate] = &[
     },
     Gate {
         src_map: 0,
-        src_x: 521,
-        src_y: 267,
+        src_x: 514,
+        src_y: 264,
         xsize: 4,
         ysize: 4,
         center_x: 1,
@@ -2544,8 +2544,8 @@ const GATES: &[Gate] = &[
     },
     Gate {
         src_map: 0,
-        src_x: 328,
-        src_y: 617,
+        src_x: 321,
+        src_y: 614,
         xsize: 4,
         ysize: 4,
         center_x: 0,
@@ -2712,8 +2712,8 @@ const GATES: &[Gate] = &[
     },
     Gate {
         src_map: 0,
-        src_x: 533,
-        src_y: 147,
+        src_x: 526,
+        src_y: 144,
         xsize: 5,
         ysize: 5,
         center_x: 0,
@@ -2796,8 +2796,8 @@ const GATES: &[Gate] = &[
     },
     Gate {
         src_map: 0,
-        src_x: 646,
-        src_y: 534,
+        src_x: 639,
+        src_y: 531,
         xsize: 5,
         ysize: 5,
         center_x: 1,
@@ -3118,8 +3118,8 @@ const GATES: &[Gate] = &[
     },
     Gate {
         src_map: 0,
-        src_x: 730,
-        src_y: 577,
+        src_x: 723,
+        src_y: 574,
         xsize: 4,
         ysize: 3,
         center_x: 1,
@@ -3202,8 +3202,8 @@ const GATES: &[Gate] = &[
     },
     Gate {
         src_map: 0,
-        src_x: 787,
-        src_y: 644,
+        src_x: 780,
+        src_y: 641,
         xsize: 4,
         ysize: 4,
         center_x: 0,
@@ -3258,8 +3258,8 @@ const GATES: &[Gate] = &[
     },
     Gate {
         src_map: 0,
-        src_x: 510,
-        src_y: 713,
+        src_x: 503,
+        src_y: 710,
         xsize: 6,
         ysize: 6,
         center_x: 0,
@@ -3457,8 +3457,8 @@ const GATES: &[Gate] = &[
 const VILLAGES: &[Village] = &[
     Village {
         unique: 1,
-        src_x: 276,
-        src_y: 328,
+        src_x: 269,
+        src_y: 325,
         xsize: 8,
         ysize: 8,
         center_x: 1,
@@ -3471,8 +3471,8 @@ const VILLAGES: &[Village] = &[
     },
     Village {
         unique: 2,
-        src_x: 221,
-        src_y: 349,
+        src_x: 214,
+        src_y: 346,
         xsize: 8,
         ysize: 8,
         center_x: 1,
@@ -3485,8 +3485,8 @@ const VILLAGES: &[Village] = &[
     },
     Village {
         unique: 3,
-        src_x: 248,
-        src_y: 306,
+        src_x: 241,
+        src_y: 303,
         xsize: 8,
         ysize: 8,
         center_x: 1,
@@ -3499,8 +3499,8 @@ const VILLAGES: &[Village] = &[
     },
     Village {
         unique: 4,
-        src_x: 284,
-        src_y: 622,
+        src_x: 277,
+        src_y: 619,
         xsize: 8,
         ysize: 8,
         center_x: 1,
@@ -3513,8 +3513,8 @@ const VILLAGES: &[Village] = &[
     },
     Village {
         unique: 5,
-        src_x: 483,
-        src_y: 135,
+        src_x: 476,
+        src_y: 132,
         xsize: 8,
         ysize: 8,
         center_x: 1,
@@ -3527,8 +3527,8 @@ const VILLAGES: &[Village] = &[
     },
     Village {
         unique: 6,
-        src_x: 287,
-        src_y: 408,
+        src_x: 280,
+        src_y: 405,
         xsize: 8,
         ysize: 8,
         center_x: 1,
@@ -3541,8 +3541,8 @@ const VILLAGES: &[Village] = &[
     },
     Village {
         unique: 7,
-        src_x: 297,
-        src_y: 217,
+        src_x: 290,
+        src_y: 214,
         xsize: 8,
         ysize: 8,
         center_x: 1,
@@ -3555,8 +3555,8 @@ const VILLAGES: &[Village] = &[
     },
     Village {
         unique: 8,
-        src_x: 384,
-        src_y: 664,
+        src_x: 377,
+        src_y: 661,
         xsize: 8,
         ysize: 8,
         center_x: 1,
@@ -3569,8 +3569,8 @@ const VILLAGES: &[Village] = &[
     },
     Village {
         unique: 9,
-        src_x: 432,
-        src_y: 55,
+        src_x: 425,
+        src_y: 52,
         xsize: 8,
         ysize: 8,
         center_x: 1,
@@ -3583,8 +3583,8 @@ const VILLAGES: &[Village] = &[
     },
     Village {
         unique: 10,
-        src_x: 455,
-        src_y: 501,
+        src_x: 448,
+        src_y: 498,
         xsize: 8,
         ysize: 8,
         center_x: 1,
@@ -3597,8 +3597,8 @@ const VILLAGES: &[Village] = &[
     },
     Village {
         unique: 11,
-        src_x: 570,
-        src_y: 241,
+        src_x: 563,
+        src_y: 238,
         xsize: 8,
         ysize: 8,
         center_x: 1,
@@ -3611,8 +3611,8 @@ const VILLAGES: &[Village] = &[
     },
     Village {
         unique: 12,
-        src_x: 598,
-        src_y: 365,
+        src_x: 591,
+        src_y: 362,
         xsize: 8,
         ysize: 8,
         center_x: 1,
@@ -3625,8 +3625,8 @@ const VILLAGES: &[Village] = &[
     },
     Village {
         unique: 13,
-        src_x: 482,
-        src_y: 416,
+        src_x: 475,
+        src_y: 413,
         xsize: 8,
         ysize: 8,
         center_x: 1,
@@ -3639,8 +3639,8 @@ const VILLAGES: &[Village] = &[
     },
     Village {
         unique: 14,
-        src_x: 444,
-        src_y: 243,
+        src_x: 437,
+        src_y: 240,
         xsize: 8,
         ysize: 8,
         center_x: 1,
@@ -3653,8 +3653,8 @@ const VILLAGES: &[Village] = &[
     },
     Village {
         unique: 15,
-        src_x: 287,
-        src_y: 697,
+        src_x: 280,
+        src_y: 694,
         xsize: 8,
         ysize: 8,
         center_x: 1,
@@ -3667,8 +3667,8 @@ const VILLAGES: &[Village] = &[
     },
     Village {
         unique: 16,
-        src_x: 248,
-        src_y: 412,
+        src_x: 241,
+        src_y: 409,
         xsize: 8,
         ysize: 8,
         center_x: 1,
@@ -3681,8 +3681,8 @@ const VILLAGES: &[Village] = &[
     },
     Village {
         unique: 17,
-        src_x: 471,
-        src_y: 725,
+        src_x: 464,
+        src_y: 722,
         xsize: 8,
         ysize: 8,
         center_x: 1,
@@ -3695,8 +3695,8 @@ const VILLAGES: &[Village] = &[
     },
     Village {
         unique: 18,
-        src_x: 259,
-        src_y: 95,
+        src_x: 252,
+        src_y: 92,
         xsize: 8,
         ysize: 8,
         center_x: 1,
@@ -3709,8 +3709,8 @@ const VILLAGES: &[Village] = &[
     },
     Village {
         unique: 19,
-        src_x: 657,
-        src_y: 379,
+        src_x: 650,
+        src_y: 376,
         xsize: 8,
         ysize: 8,
         center_x: 1,
@@ -3723,8 +3723,8 @@ const VILLAGES: &[Village] = &[
     },
     Village {
         unique: 20,
-        src_x: 648,
-        src_y: 556,
+        src_x: 641,
+        src_y: 553,
         xsize: 8,
         ysize: 8,
         center_x: 1,
@@ -3737,8 +3737,8 @@ const VILLAGES: &[Village] = &[
     },
     Village {
         unique: 21,
-        src_x: 31,
-        src_y: 632,
+        src_x: 24,
+        src_y: 629,
         xsize: 8,
         ysize: 8,
         center_x: 1,
@@ -3751,8 +3751,8 @@ const VILLAGES: &[Village] = &[
     },
     Village {
         unique: 22,
-        src_x: 761,
-        src_y: 133,
+        src_x: 754,
+        src_y: 130,
         xsize: 8,
         ysize: 8,
         center_x: 1,
@@ -3765,8 +3765,8 @@ const VILLAGES: &[Village] = &[
     },
     Village {
         unique: 23,
-        src_x: 465,
-        src_y: 575,
+        src_x: 458,
+        src_y: 572,
         xsize: 8,
         ysize: 8,
         center_x: 1,
@@ -3779,8 +3779,8 @@ const VILLAGES: &[Village] = &[
     },
     Village {
         unique: 24,
-        src_x: 480,
-        src_y: 596,
+        src_x: 473,
+        src_y: 593,
         xsize: 8,
         ysize: 8,
         center_x: 1,
@@ -3793,8 +3793,8 @@ const VILLAGES: &[Village] = &[
     },
     Village {
         unique: 25,
-        src_x: 419,
-        src_y: 658,
+        src_x: 412,
+        src_y: 655,
         xsize: 8,
         ysize: 8,
         center_x: 1,
@@ -3807,8 +3807,8 @@ const VILLAGES: &[Village] = &[
     },
     Village {
         unique: 26,
-        src_x: 465,
-        src_y: 663,
+        src_x: 458,
+        src_y: 660,
         xsize: 8,
         ysize: 8,
         center_x: 1,
@@ -3821,8 +3821,8 @@ const VILLAGES: &[Village] = &[
     },
     Village {
         unique: 27,
-        src_x: 403,
-        src_y: 594,
+        src_x: 396,
+        src_y: 591,
         xsize: 8,
         ysize: 8,
         center_x: 1,
@@ -3835,8 +3835,8 @@ const VILLAGES: &[Village] = &[
     },
     Village {
         unique: 28,
-        src_x: 422,
-        src_y: 553,
+        src_x: 415,
+        src_y: 550,
         xsize: 8,
         ysize: 8,
         center_x: 1,
@@ -3849,8 +3849,8 @@ const VILLAGES: &[Village] = &[
     },
     Village {
         unique: 29,
-        src_x: 531,
-        src_y: 517,
+        src_x: 524,
+        src_y: 514,
         xsize: 8,
         ysize: 8,
         center_x: 1,
@@ -3863,8 +3863,8 @@ const VILLAGES: &[Village] = &[
     },
     Village {
         unique: 30,
-        src_x: 623,
-        src_y: 503,
+        src_x: 616,
+        src_y: 500,
         xsize: 8,
         ysize: 8,
         center_x: 1,
@@ -3877,8 +3877,8 @@ const VILLAGES: &[Village] = &[
     },
     Village {
         unique: 31,
-        src_x: 432,
-        src_y: 441,
+        src_x: 425,
+        src_y: 438,
         xsize: 8,
         ysize: 8,
         center_x: 1,
@@ -3891,8 +3891,8 @@ const VILLAGES: &[Village] = &[
     },
     Village {
         unique: 32,
-        src_x: 456,
-        src_y: 414,
+        src_x: 449,
+        src_y: 411,
         xsize: 8,
         ysize: 8,
         center_x: 1,
@@ -3905,8 +3905,8 @@ const VILLAGES: &[Village] = &[
     },
     Village {
         unique: 33,
-        src_x: 647,
-        src_y: 284,
+        src_x: 640,
+        src_y: 281,
         xsize: 8,
         ysize: 8,
         center_x: 1,
@@ -3919,8 +3919,8 @@ const VILLAGES: &[Village] = &[
     },
     Village {
         unique: 34,
-        src_x: 195,
-        src_y: 182,
+        src_x: 188,
+        src_y: 179,
         xsize: 8,
         ysize: 8,
         center_x: 1,
@@ -3933,8 +3933,8 @@ const VILLAGES: &[Village] = &[
     },
     Village {
         unique: 35,
-        src_x: 276,
-        src_y: 246,
+        src_x: 269,
+        src_y: 243,
         xsize: 8,
         ysize: 8,
         center_x: 1,
@@ -3947,8 +3947,8 @@ const VILLAGES: &[Village] = &[
     },
     Village {
         unique: 36,
-        src_x: 305,
-        src_y: 302,
+        src_x: 298,
+        src_y: 299,
         xsize: 8,
         ysize: 8,
         center_x: 1,
@@ -3961,8 +3961,8 @@ const VILLAGES: &[Village] = &[
     },
     Village {
         unique: 37,
-        src_x: 259,
-        src_y: 481,
+        src_x: 252,
+        src_y: 478,
         xsize: 8,
         ysize: 8,
         center_x: 1,
@@ -3975,8 +3975,8 @@ const VILLAGES: &[Village] = &[
     },
     Village {
         unique: 38,
-        src_x: 309,
-        src_y: 450,
+        src_x: 302,
+        src_y: 447,
         xsize: 8,
         ysize: 8,
         center_x: 1,
@@ -3989,8 +3989,8 @@ const VILLAGES: &[Village] = &[
     },
     Village {
         unique: 39,
-        src_x: 344,
-        src_y: 485,
+        src_x: 337,
+        src_y: 482,
         xsize: 8,
         ysize: 8,
         center_x: 1,
@@ -4003,8 +4003,8 @@ const VILLAGES: &[Village] = &[
     },
     Village {
         unique: 40,
-        src_x: 364,
-        src_y: 413,
+        src_x: 357,
+        src_y: 410,
         xsize: 8,
         ysize: 8,
         center_x: 1,
@@ -4017,8 +4017,8 @@ const VILLAGES: &[Village] = &[
     },
     Village {
         unique: 41,
-        src_x: 279,
-        src_y: 525,
+        src_x: 272,
+        src_y: 522,
         xsize: 8,
         ysize: 8,
         center_x: 1,
@@ -4031,8 +4031,8 @@ const VILLAGES: &[Village] = &[
     },
     Village {
         unique: 42,
-        src_x: 306,
-        src_y: 663,
+        src_x: 299,
+        src_y: 660,
         xsize: 8,
         ysize: 8,
         center_x: 1,
@@ -5506,9 +5506,9 @@ mod tests {
             .filter(|g| g.item_unique > 0 && g.item_num > 0)
             .count();
         assert_eq!(gated, 8, "the file's gated rows");
-        // Hanyang's exits and the mine take nothing. The mine is looked up in its
-        // measured block (the text marker (402,580) is a few cells off it).
-        for (map, x, y) in [(158, 14, 90), (158, 28, 101), (158, 41, 90), (0, 407, 580)] {
+        // Hanyang's exits and the mine take nothing. The mine is looked up in its stamped
+        // block, which holds the editor's marker (402,580).
+        for (map, x, y) in [(158, 14, 90), (158, 28, 101), (158, 41, 90), (0, 402, 580)] {
             let gate = gate_at(map, x, y).unwrap_or_else(|| panic!("({map}, {x}, {y})"));
             assert_eq!(
                 (gate.item_unique, gate.item_num),
@@ -5569,8 +5569,9 @@ mod tests {
         assert_eq!(revive_target(9, 158), REVIVE_PALACE);
         // At or above it, a dungeon returns to the map that gate-enters it
         // (`char.cpp:4914-4917`): the Lair to its mouth on map 0, the mine likewise.
-        // Read the row rather than hard-coding: the anchor is the *stamped* block's,
-        // measured from the map file, not the text file's editor marker.
+        // Read the row rather than hard-coding: the anchor is the *stamped* block's, measured
+        // from the map file — the cell `GateInfoE.txt` names is the same one, the block's
+        // `ValidSwitch` cell.
         for map_id in [320, 157] {
             let entrance = GATES
                 .iter()
@@ -5590,14 +5591,14 @@ mod tests {
         assert_eq!(revive_target(30, 999), REVIVE_PALACE);
     }
 
-    /// The village table: village 1 (Ankaran) enters from map 0 (269,325) and village 3
-    /// (Talasha) from (241,303) — `villageinfoE.txt:12,14` — and both land on their own
-    /// map at the centre of map type `MAPTYPE_VILLAGE1`, which is (24,22)
-    /// (`MapTypeInfo_Village.txt`; the chain is `mapinfoE.txt`'s type column →
-    /// `MapTypeInfo.txt:24`).
+    /// The village table: village 1 (Ankaran) is stamped at x[263..270] y[319..326] around the
+    /// marker (269,325) and village 3 (Talasha) at x[235..242] y[297..304] around (241,303)
+    /// — `villageinfoE.txt:12,14` — and both land on their own map at the centre of map type
+    /// `MAPTYPE_VILLAGE1`, which is (24,22) (`MapTypeInfo_Village.txt`; the chain is
+    /// `mapinfoE.txt`'s type column → `MapTypeInfo.txt:24`).
     #[test]
     fn a_village_entrance_warps_to_its_own_map_centre() {
-        let ankaran = village_at(0, 270, 322).expect("Ankaran's entrance");
+        let ankaran = village_at(0, 263, 319).expect("Ankaran's entrance");
         assert_eq!(
             (
                 ankaran.unique,
@@ -5607,7 +5608,7 @@ mod tests {
             ),
             (1, 1, 24, 22)
         );
-        let talasha = village_at(0, 242, 300).expect("Talasha's entrance");
+        let talasha = village_at(0, 235, 297).expect("Talasha's entrance");
         assert_eq!(
             (
                 talasha.unique,
@@ -5626,61 +5627,66 @@ mod tests {
         assert!(VILLAGES.len() >= 4, "only {} villages", VILLAGES.len());
         // Villages live on the world map, so nothing else answers.
         assert!(village_at(158, 269, 325).is_none());
-        // The measured blocks from MainMap.map's para grid: Ankaran's entrance occupies
-        // x[270..277] y[322..329], Talasha's x[242..249] y[300..307].
+        // The blocks the shipped `MainMap.map` stamps: Ankaran's entrance is x[263..270]
+        // y[319..326] with the editor's marker (269,325) inside it, Talasha's x[235..242]
+        // y[297..304].
         let (left, top, right, bottom) = ankaran.block();
-        assert_eq!((left, top, right, bottom), (270, 322, 277, 329));
+        assert_eq!((left, top, right, bottom), (263, 319, 270, 326));
         let (left, top, right, bottom) = talasha.block();
-        assert_eq!((left, top, right, bottom), (242, 300, 249, 307));
+        assert_eq!((left, top, right, bottom), (235, 297, 242, 304));
         // The ordered-cell rule stays exact: only the block's own cells.
-        assert!(village_at(0, 270, 322).is_some());
-        assert!(village_at(0, 277, 329).is_some());
+        assert!(village_at(0, 263, 319).is_some());
+        assert!(village_at(0, 270, 326).is_some());
         assert!(
-            village_at(0, 269, 325).is_none(),
+            village_at(0, 262, 322).is_none(),
             "one cell outside the block"
         );
-        assert!(village_at(0, 278, 330).is_none(), "and past the far corner");
+        assert!(village_at(0, 271, 327).is_none(), "and past the far corner");
         // No range is invented on top: the client sends the cell under the cursor and nothing
         // else (see `village_at`'s doc for the file:line trail), so the rule is the block, cell
         // for cell, however far away the character stood when the click happened.
         assert!(
-            village_at(0, 266, 318).is_none(),
+            village_at(0, 259, 315).is_none(),
             "four tiles off is not the entrance"
         );
-        assert!(village_at(0, 264, 316).is_none(), "nor six");
+        assert!(village_at(0, 257, 313).is_none(), "nor six");
         assert!(
             village_at(158, 269, 325).is_none(),
             "villages live on map 0"
         );
         // Leaving: Ankaran's map type puts the inner gate at (23,18), and the exit lands on
-        // the road just south of the entrance block, at (273, 330).
+        // the road just south of the entrance block, at (266, 327).
         let (village, landing) = village_exit(1, 23, 18).expect("the village gate");
         assert_eq!(village.unique, 1);
-        assert_eq!(landing, (273, 330));
+        assert_eq!(landing, (266, 327));
         assert!(village_exit(1, 23, 25).is_none(), "not at the gate");
         assert!(
             village_exit(0, 23, 18).is_none(),
             "map 0 is not a village map"
         );
-        // The diagnostic measures to the block: (268,324) is two tiles left of it.
-        let (near, distance) = village_within(0, 268, 324, 3).expect("two tiles away");
+        // The diagnostic measures to the block: (261,322) is two tiles left of it.
+        let (near, distance) = village_within(0, 261, 322, 3).expect("two tiles away");
         assert_eq!((near.unique, distance), (1, 2));
         assert!(village_within(158, 270, 322, 3).is_none());
     }
 
-    /// The mine's gate is the case that failed live: `GateInfoE.txt:19` declares its
-    /// source at (402,580), while the shipped `MainMap.map` stamps the object at
-    /// x[407..410] y[580..584]. The table now carries the measured anchor, so a click on
-    /// the block is a gate and the old text cell is not.
+    /// The mine's gate: `GateInfoE.txt:19` names the source cell (402,580), and the shipped
+    /// `MainMap.map` stamps the object's block at x[400..403] y[577..581] — the named cell is
+    /// the block's `ValidSwitch` cell, inside it. The table carries the measured anchor, so a
+    /// click anywhere in the block is the gate.
     #[test]
-    fn the_mine_gate_uses_the_measured_block_not_the_text_marker() {
-        let gate = gate_at(0, 407, 580).expect("the measured block");
+    fn the_mine_gate_is_the_block_the_map_stamps() {
+        let gate = gate_at(0, 402, 580).expect("the stamp block");
         assert_eq!((gate.dst_map, gate.dst_x, gate.dst_y), (157, 60, 97));
         let (left, top, right, bottom) = gate.block();
-        assert_eq!((left, top, right, bottom), (407, 580, 410, 584));
+        assert_eq!((left, top, right, bottom), (400, 577, 403, 581));
         assert!(
-            gate_at(0, 402, 580).is_none(),
-            "the editor's marker is not the object"
+            gate_at(0, 400, 577).is_some(),
+            "the block's other corner is a gate too"
+        );
+        assert!(
+            gate_at(0, 403, 582).is_none(),
+            "one cell past the far corner is not"
         );
     }
 

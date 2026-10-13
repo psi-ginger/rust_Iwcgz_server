@@ -260,27 +260,52 @@ function Get-FieldObjectFootprint([int]$unique) {
 
 # --- map 0's stamped blocks, read from the map file --------------------------
 #
-# `GateInfoE.txt`'s `SrcX`/`SrcY` is the map editor's marker, not the cell
-# `PutFieldObject` stamped first: reading the shipped `MainMap.map` shows the marker sitting
-# anywhere from +1 to +5 cells inside the block, which is why the mine's gate (text 402,580)
-# never matched a click in-game. The stamped block itself is in the map's field-object grid:
+# `GateInfoE.txt`'s `SrcX`/`SrcY` is the map editor's marker for the object, not the cell
+# `PutFieldObject` stamped first: the marker sits inside the block, and the `ValidSwitch` bit in
+# `FieldObjectMap` sits exactly on it (`Map-FieldObject.cpp:102-127`). The stamped block itself
+# is in the map's field-object grid:
 #
-#   `map-save.cpp:44-55` is the file order - header (324 B, `map.h:176-194`), IDMap
-#   (2*W*H), CollMap (2*W*H), layer 0, layer 1, FieldObjectMap (4*W*H),
-#   **FieldObjectMapPara** (4*W*H), geometry. `Map-FieldObject.cpp:253` reads the para grid
-#   as `pFieldObjectMapPara[x + YOff[y]]`.
+#   `MapCommon.cpp:55` builds the row offsets as `YOff[i] = i * MH.MapXsize`, so cell (x, y) is
+#   index `x + y * Xsize` - no padding, no constant offset - and `Map-FieldObject.cpp:253` reads
+#   the para grid as `pFieldObjectMapPara[x + YOff[y]]`. `map-save.cpp:44-55` writes the sections
+#   in order: header, IDMap (2*W*H), CollMap (2*W*H), layer 0 (4*W*H + W*H), layer 1
+#   (4*W*H + W*H), FieldObjectMap (4*W*H), **FieldObjectMapPara** (4*W*H), geometry
+#   (8 + 16384 + W*H), every size driven by the header's own dimensions.
 #
-# W, H and the grid's start are measured from the file and self-checked below: gate 306's
-# block shows up as runs of 9 going right and 4 down, giving 3200 bytes per row (W = 800),
-# and its first hit at cell (291,350) fixes `para_start = 12631712 - 4*(291 + 350*800)`.
+# The header revision decides the header's size: the shipped files are ANSI builds, where
+# `TCHAR` is one byte, so `cltMapHeader` is 176 bytes and `MapXsize`/`MapYsize` sit at 140/142
+# (the Unicode build the 2010 sources describe is 324 bytes with them at 268/270). Its para
+# grid therefore starts at `headerSize + (2+2+5+5+4) * W * H`, and the total is checked against
+# the file's length below, so a wrong layout is refused rather than read at the wrong offset.
+#
+# An earlier session derived this start by hand as `12631712 - 4*(291 + 350*800)`, taking the
+# marker cell (291, 350) for the block's first cell. It is not - the marker is a cell inside the
+# block - and that start is 9628 bytes (2407 cells, three rows and seven cells) early, which
+# shifted every measured block by (7, 3) until the layout above replaced it.
 $MapFile = Join-Path $DataRoot 'Map\MainMap\MainMap.map'
 if (-not (Test-Path $MapFile)) { throw "map file not found: '$MapFile' (set -DataRoot)" }
-$MapWidth = 800
-$MapHeight = 1000
-$MapParaStart = 12631712 - 4 * (291 + 350 * $MapWidth)
 $mapBytes = [System.IO.File]::ReadAllBytes($MapFile)
-if ($mapBytes.Length -lt ($MapParaStart + 4 * $MapWidth * $MapHeight)) {
-    throw "$($MapFile): too short for an $MapWidth x $MapHeight para grid at $MapParaStart"
+if ($mapBytes.Length -lt 324) { throw "$($MapFile): shorter than a map header" }
+$ansiX = [System.BitConverter]::ToUInt16($mapBytes, 140)
+$ansiY = [System.BitConverter]::ToUInt16($mapBytes, 142)
+$uniX = [System.BitConverter]::ToUInt16($mapBytes, 268)
+$uniY = [System.BitConverter]::ToUInt16($mapBytes, 270)
+if ($ansiX -gt 0 -and $ansiY -gt 0) {
+    $MapHeaderSize = 176
+    $MapWidth = $ansiX
+    $MapHeight = $ansiY
+} elseif ($uniX -gt 0 -and $uniY -gt 0) {
+    $MapHeaderSize = 324
+    $MapWidth = $uniX
+    $MapHeight = $uniY
+} else {
+    throw "$($MapFile): neither header revision carries usable dimensions"
+}
+$MapParaStart = $MapHeaderSize + 18 * $MapWidth * $MapHeight
+$MapGeoStart = $MapParaStart + 4 * $MapWidth * $MapHeight
+$MapExpectedLength = $MapGeoStart + 8 + 16384 + $MapWidth * $MapHeight
+if ($mapBytes.Length -ne $MapExpectedLength) {
+    throw "$($MapFile): $($mapBytes.Length) bytes, but the ${MapWidth}x${MapHeight} layout needs $MapExpectedLength"
 }
 
 function Read-ParaCell([int]$x, [int]$y) {
