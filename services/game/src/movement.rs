@@ -3496,6 +3496,345 @@ const GATES: &[Gate] = &[
     },
 ];
 
+const VILLAGES: &[Village] = &[
+    Village {
+        unique: 1,
+        src_x: 269,
+        src_y: 325,
+        dst_map: 1,
+        dst_x: 24,
+        dst_y: 22,
+    },
+    Village {
+        unique: 2,
+        src_x: 214,
+        src_y: 346,
+        dst_map: 2,
+        dst_x: 24,
+        dst_y: 22,
+    },
+    Village {
+        unique: 3,
+        src_x: 241,
+        src_y: 303,
+        dst_map: 3,
+        dst_x: 24,
+        dst_y: 22,
+    },
+    Village {
+        unique: 4,
+        src_x: 277,
+        src_y: 619,
+        dst_map: 4,
+        dst_x: 24,
+        dst_y: 22,
+    },
+    Village {
+        unique: 5,
+        src_x: 476,
+        src_y: 132,
+        dst_map: 5,
+        dst_x: 24,
+        dst_y: 22,
+    },
+    Village {
+        unique: 6,
+        src_x: 280,
+        src_y: 405,
+        dst_map: 6,
+        dst_x: 24,
+        dst_y: 22,
+    },
+    Village {
+        unique: 7,
+        src_x: 290,
+        src_y: 214,
+        dst_map: 7,
+        dst_x: 24,
+        dst_y: 22,
+    },
+    Village {
+        unique: 8,
+        src_x: 377,
+        src_y: 661,
+        dst_map: 8,
+        dst_x: 24,
+        dst_y: 22,
+    },
+    Village {
+        unique: 9,
+        src_x: 425,
+        src_y: 52,
+        dst_map: 9,
+        dst_x: 24,
+        dst_y: 22,
+    },
+    Village {
+        unique: 10,
+        src_x: 448,
+        src_y: 498,
+        dst_map: 10,
+        dst_x: 24,
+        dst_y: 22,
+    },
+    Village {
+        unique: 11,
+        src_x: 563,
+        src_y: 238,
+        dst_map: 11,
+        dst_x: 24,
+        dst_y: 22,
+    },
+    Village {
+        unique: 12,
+        src_x: 591,
+        src_y: 362,
+        dst_map: 12,
+        dst_x: 24,
+        dst_y: 22,
+    },
+    Village {
+        unique: 13,
+        src_x: 475,
+        src_y: 413,
+        dst_map: 13,
+        dst_x: 24,
+        dst_y: 22,
+    },
+    Village {
+        unique: 14,
+        src_x: 437,
+        src_y: 240,
+        dst_map: 14,
+        dst_x: 24,
+        dst_y: 22,
+    },
+    Village {
+        unique: 15,
+        src_x: 280,
+        src_y: 694,
+        dst_map: 15,
+        dst_x: 24,
+        dst_y: 22,
+    },
+    Village {
+        unique: 16,
+        src_x: 241,
+        src_y: 409,
+        dst_map: 16,
+        dst_x: 24,
+        dst_y: 22,
+    },
+    Village {
+        unique: 17,
+        src_x: 464,
+        src_y: 722,
+        dst_map: 17,
+        dst_x: 24,
+        dst_y: 22,
+    },
+    Village {
+        unique: 18,
+        src_x: 252,
+        src_y: 92,
+        dst_map: 18,
+        dst_x: 24,
+        dst_y: 22,
+    },
+    Village {
+        unique: 19,
+        src_x: 650,
+        src_y: 376,
+        dst_map: 19,
+        dst_x: 24,
+        dst_y: 22,
+    },
+    Village {
+        unique: 20,
+        src_x: 641,
+        src_y: 553,
+        dst_map: 20,
+        dst_x: 24,
+        dst_y: 22,
+    },
+    Village {
+        unique: 21,
+        src_x: 24,
+        src_y: 629,
+        dst_map: 21,
+        dst_x: 24,
+        dst_y: 22,
+    },
+    Village {
+        unique: 22,
+        src_x: 754,
+        src_y: 130,
+        dst_map: 22,
+        dst_x: 24,
+        dst_y: 22,
+    },
+    Village {
+        unique: 23,
+        src_x: 458,
+        src_y: 572,
+        dst_map: 23,
+        dst_x: 24,
+        dst_y: 22,
+    },
+    Village {
+        unique: 24,
+        src_x: 473,
+        src_y: 593,
+        dst_map: 24,
+        dst_x: 24,
+        dst_y: 22,
+    },
+    Village {
+        unique: 25,
+        src_x: 412,
+        src_y: 655,
+        dst_map: 25,
+        dst_x: 24,
+        dst_y: 22,
+    },
+    Village {
+        unique: 26,
+        src_x: 458,
+        src_y: 660,
+        dst_map: 26,
+        dst_x: 24,
+        dst_y: 22,
+    },
+    Village {
+        unique: 27,
+        src_x: 396,
+        src_y: 591,
+        dst_map: 27,
+        dst_x: 24,
+        dst_y: 22,
+    },
+    Village {
+        unique: 28,
+        src_x: 415,
+        src_y: 550,
+        dst_map: 28,
+        dst_x: 24,
+        dst_y: 22,
+    },
+    Village {
+        unique: 29,
+        src_x: 524,
+        src_y: 514,
+        dst_map: 29,
+        dst_x: 24,
+        dst_y: 22,
+    },
+    Village {
+        unique: 30,
+        src_x: 616,
+        src_y: 500,
+        dst_map: 30,
+        dst_x: 24,
+        dst_y: 22,
+    },
+    Village {
+        unique: 31,
+        src_x: 425,
+        src_y: 438,
+        dst_map: 31,
+        dst_x: 24,
+        dst_y: 22,
+    },
+    Village {
+        unique: 32,
+        src_x: 449,
+        src_y: 411,
+        dst_map: 32,
+        dst_x: 24,
+        dst_y: 22,
+    },
+    Village {
+        unique: 33,
+        src_x: 640,
+        src_y: 281,
+        dst_map: 33,
+        dst_x: 24,
+        dst_y: 22,
+    },
+    Village {
+        unique: 34,
+        src_x: 188,
+        src_y: 179,
+        dst_map: 34,
+        dst_x: 24,
+        dst_y: 22,
+    },
+    Village {
+        unique: 35,
+        src_x: 269,
+        src_y: 243,
+        dst_map: 35,
+        dst_x: 24,
+        dst_y: 22,
+    },
+    Village {
+        unique: 36,
+        src_x: 298,
+        src_y: 299,
+        dst_map: 36,
+        dst_x: 24,
+        dst_y: 22,
+    },
+    Village {
+        unique: 37,
+        src_x: 252,
+        src_y: 478,
+        dst_map: 37,
+        dst_x: 24,
+        dst_y: 22,
+    },
+    Village {
+        unique: 38,
+        src_x: 302,
+        src_y: 447,
+        dst_map: 38,
+        dst_x: 24,
+        dst_y: 22,
+    },
+    Village {
+        unique: 39,
+        src_x: 337,
+        src_y: 482,
+        dst_map: 39,
+        dst_x: 24,
+        dst_y: 22,
+    },
+    Village {
+        unique: 40,
+        src_x: 357,
+        src_y: 410,
+        dst_map: 40,
+        dst_x: 24,
+        dst_y: 22,
+    },
+    Village {
+        unique: 41,
+        src_x: 272,
+        src_y: 522,
+        dst_map: 41,
+        dst_x: 24,
+        dst_y: 22,
+    },
+    Village {
+        unique: 42,
+        src_x: 299,
+        src_y: 660,
+        dst_map: 42,
+        dst_x: 24,
+        dst_y: 22,
+    },
+];
+
 /// The tile block one gate covers, `PutFieldObject`'s formula made explicit.
 impl Gate {
     /// Whether `(x, y)` is one of the cells this gate's object occupies.
@@ -3660,6 +3999,83 @@ pub(crate) async fn handle_revive(
         &gate,
     )
     .await
+}
+
+/// One village entrance on the world map — the `FOTYPE_VILLAGE` branch's data.
+///
+/// `cltCharServer::CharServerMoveByGate`'s village half (`char.cpp:8983-9027`) takes the
+/// village unique from the cell's field-object para (`:8986`) and warps to the village's
+/// own map at that map type's centre (`:9008-9015`). Every number comes from text data:
+/// `villageinfoE.txt` (`Unique`, `PosX`, `PosY`, `MapIndex`) → `mapinfoE.txt` (the map's
+/// type unique) → `MapTypeInfo.txt` (type name) → `MapTypeInfo_Village.txt`
+/// (`CenterX`/`CenterY`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Village {
+    /// `villageinfoE.txt`'s `Unique` — the value the client's click carries in the
+    /// field object's para.
+    unique: i32,
+    /// `PosX` on map 0.
+    src_x: i32,
+    /// `PosY` on map 0.
+    src_y: i32,
+    /// `MapIndex` — the village's own map (`siVillageUnique`, `char.cpp:9008`).
+    dst_map: i32,
+    /// That map type's `CenterX` (`char.cpp:9011`).
+    dst_x: i32,
+    /// That map type's `CenterY` (`char.cpp:9012`).
+    dst_y: i32,
+}
+
+/// The village whose entrance is `(map_id, x, y)`, if any.
+///
+/// The entrance's *footprint* is the one number no text file carries — it lives in the
+/// map's field-object grid, and unlike a gate row a village row names no object to read a
+/// size from. So this matches the entrance tile itself for now, and
+/// [`village_within`] reports the cells a player actually clicks so the block can be
+/// measured rather than guessed.
+fn village_at(map_id: i32, x: i32, y: i32) -> Option<&'static Village> {
+    (map_id == 0).then_some(())?;
+    VILLAGES.iter().find(|v| v.src_x == x && v.src_y == y)
+}
+
+/// The village entrance nearest `(map_id, x, y)` within `radius`, and how far it is.
+///
+/// Diagnostic only, in the same spirit as [`gate_within`]: until the entrance block is
+/// measured, a click that lands beside one must still be visible in the log.
+fn village_within(map_id: i32, x: i32, y: i32, radius: i32) -> Option<(&'static Village, i32)> {
+    if map_id != 0 {
+        return None;
+    }
+    VILLAGES
+        .iter()
+        .filter_map(|v| {
+            let distance = (v.src_x - x).abs().max((v.src_y - y).abs());
+            (distance <= radius).then_some((v, distance))
+        })
+        .min_by_key(|(_, distance)| *distance)
+}
+
+/// The gate-shaped warp a village entry becomes.
+///
+/// A village and a gate differ only in how the destination is chosen; both end in the
+/// same `SetWarpInfo`/`Warp` pair the client is told about (`char.cpp:9014-9015` versus
+/// `:9014` for the gate family). The synthesised row carries no entry item, so the gate
+/// path's own item check stays out of the way.
+fn village_warp_gate(from_map: i32, village: &Village) -> Gate {
+    Gate {
+        src_map: from_map,
+        src_x: village.src_x,
+        src_y: village.src_y,
+        xsize: 1,
+        ysize: 1,
+        center_x: 0,
+        center_y: 0,
+        item_unique: 0,
+        item_num: 0,
+        dst_map: village.dst_map,
+        dst_x: village.dst_x,
+        dst_y: village.dst_y,
+    }
 }
 
 /// The gate nearest `(map_id, x, y)` within `radius` tiles, and how far it is.
@@ -4069,10 +4485,30 @@ pub(crate) async fn step_movement(
     // check in `handle_userorder` stays first, so a direct order still leaves
     // without a step.
     let stepped_gate = gate_at(mv.map_id, x, y);
+    let stepped_village = village_at(mv.map_id, x, y);
     let stepped_map = mv.map_id;
-    if mv.arrived() || stepped_gate.is_some() {
+    if mv.arrived() || stepped_gate.is_some() || stepped_village.is_some() {
         mv.deadline = None;
         *movement = None;
+    }
+    if let Some(village) = stepped_village {
+        logln!(
+            "game: stepped onto the village {} entrance at ({x}, {y}) on map {stepped_map} -> map {}",
+            village.unique,
+            village.dst_map
+        );
+        let gate = village_warp_gate(stepped_map, village);
+        warp_through_gate(
+            stream,
+            outbound,
+            characters,
+            registry,
+            session_key,
+            live,
+            &gate,
+        )
+        .await?;
+        return Ok(());
     }
     if let Some(gate) = stepped_gate {
         logln!(
@@ -4283,6 +4719,42 @@ pub(crate) async fn handle_userorder(
     // legacy checks them (`char-order.cpp:173` → `CharServerMoveByGate(x, y)`), and
     // a gate hit replaces the walk with a warp — so this has to run before the
     // destination is persisted as a position.
+    // The village entrances are checked on the same seam, and before the gates: the
+    // legacy runs one object lookup over the ordered cell and dispatches on its type
+    // (`char.cpp:8975-8983` village, `:9028` gate).
+    if let Some(village) = village_at(map_id, dest.0, dest.1) {
+        logln!(
+            "game: village {} entered: map {map_id} ({}, {}) -> map {} at ({}, {})",
+            village.unique,
+            village.src_x,
+            village.src_y,
+            village.dst_map,
+            village.dst_x,
+            village.dst_y
+        );
+        let gate = village_warp_gate(map_id, village);
+        warp_through_gate(
+            stream,
+            outbound,
+            characters,
+            registry,
+            session_key,
+            live,
+            &gate,
+        )
+        .await?;
+        return Ok(None);
+    }
+    if let Some((village, distance)) = village_within(map_id, dest.0, dest.1, 3) {
+        logln!(
+            "game: move order to {dest:?} on map {map_id} is {distance} tile(s) from the village \
+             {} entrance at ({}, {}) — if the client sent this cell for a village click, the \
+             entrance's block is wider than the table",
+            village.unique,
+            village.src_x,
+            village.src_y
+        );
+    }
     if let Some(gate) = gate_at(map_id, dest.0, dest.1) {
         warp_through_gate(
             stream,
@@ -4772,6 +5244,49 @@ mod tests {
         assert_eq!(revive_target(30, 0), REVIVE_PALACE);
         // A map nothing enters falls back to the palace (`char.cpp:5007-5013`).
         assert_eq!(revive_target(30, 999), REVIVE_PALACE);
+    }
+
+    /// The village table: village 1 (Ankaran) enters from map 0 (269,325) and village 3
+    /// (Talasha) from (241,303) — `villageinfoE.txt:12,14` — and both land on their own
+    /// map at the centre of map type `MAPTYPE_VILLAGE1`, which is (24,22)
+    /// (`MapTypeInfo_Village.txt`; the chain is `mapinfoE.txt`'s type column →
+    /// `MapTypeInfo.txt:24`).
+    #[test]
+    fn a_village_entrance_warps_to_its_own_map_centre() {
+        let ankaran = village_at(0, 269, 325).expect("Ankaran's entrance");
+        assert_eq!(
+            (
+                ankaran.unique,
+                ankaran.dst_map,
+                ankaran.dst_x,
+                ankaran.dst_y
+            ),
+            (1, 1, 24, 22)
+        );
+        let talasha = village_at(0, 241, 303).expect("Talasha's entrance");
+        assert_eq!(
+            (
+                talasha.unique,
+                talasha.dst_map,
+                talasha.dst_x,
+                talasha.dst_y
+            ),
+            (3, 3, 24, 22)
+        );
+        // Every row is an entrance on map 0 with a destination that has a centre.
+        for village in VILLAGES {
+            assert!(village.src_x > 0 && village.src_y > 0, "{village:?}");
+            assert!(village.dst_map > 0, "{village:?}");
+            assert!(village.dst_x > 0 && village.dst_y > 0, "{village:?}");
+        }
+        assert!(VILLAGES.len() >= 4, "only {} villages", VILLAGES.len());
+        // Villages live on the world map, so nothing else answers.
+        assert!(village_at(158, 269, 325).is_none());
+        assert!(village_at(0, 268, 325).is_none());
+        // The diagnostic finds the entrance from a neighbouring cell.
+        let (near, distance) = village_within(0, 268, 324, 3).expect("one diagonal away");
+        assert_eq!((near.unique, distance), (1, 1));
+        assert!(village_within(158, 269, 325, 3).is_none());
     }
 
     #[test]

@@ -46,7 +46,6 @@ param(
     [int]$MapIndex = 158,
     [string]$RustPath = (Join-Path $PSScriptRoot '..\crates\gz-data\src\npc.rs'),
     [string]$GateRustPath = (Join-Path $PSScriptRoot '..\services\game\src\movement.rs'),
-    [ValidateSet('all', 'npc', 'gate')]
     [string]$Table = 'all',
     [switch]$Check
 )
@@ -353,6 +352,131 @@ $gateBody = @($gateSorted | ForEach-Object {
 })
 $gateGenerated = @($gateSorted | ForEach-Object { '{0}/{1}/{2}/{3}/{4}/{5}/{6}/{7}/{8}/{9}/{10}/{11}' -f $_.SrcMap, $_.SrcX, $_.SrcY, $_.Xsize, $_.Ysize, $_.CenterX, $_.CenterY, $_.DstMap, $_.DstX, $_.DstY, $_.ItemUnique, $_.ItemNum })
 
+# --- village entrances: the FOTYPE_VILLAGE branch's data ---------------------
+#
+# `cltCharServer::CharServerMoveByGate`'s village branch (`char.cpp:8983-9027`) takes the
+# village unique from the cell's field-object para (`:8986`), bounds it against
+# `MAX_VILLAGE_NUMBER` (`:8988`), and warps to
+#     `pclVillageInfo[villageunique]->siVillageUnique`         the village's own map (`:9008`)
+#     at `pclMapTypeInfo[maptypeunique]->siCenterX/siCenterY`  that map type's centre (`:9010-9012`)
+#     `cltWarpInfo(1, mapindex, false, false, centerx, centery, x, y); SetWarpInfo(..., 30)` (`:9014-9015`)
+# with `IsEnterLevel(villageunique, level)` as a gate this port does not model yet (`:9006`),
+# an enemy-castle refusal (`:8992`) and a prison silent-deny (`:8998`).
+#
+# Every number is text data:
+#   `villageinfoE.txt`        Unique, Province, TownName, PosX, PosY (the entrance on map 0),
+#                             MapIndex (the village's own map)
+#   `mapinfoE.txt`            that map row's third column is the map type unique
+#   `MapTypeInfo.txt`         map type unique -> MapUniqueString
+#   `MapTypeInfo_Village.txt` MapUniqueString -> CenterX, CenterY
+#
+# The entrance's *footprint* is the one number no text file carries: it lives in the map's
+# field-object grid, exactly as a gate's does, but a gate row names its object (`FOUnique`)
+# and a village row does not. So the table matches the entrance tile itself, and the runtime
+# logs any order landing within three tiles of it (`village_within`) - that is how the block
+# gets measured, from the first click.
+$villageFile = Join-Path $DataRoot 'Data\villageinfoE.txt'
+if (-not (Test-Path $villageFile)) { throw "village table not found: '$villageFile' (set -DataRoot)" }
+$mapInfoFile = Join-Path $DataRoot 'Data\mapinfoE.txt'
+$mapTypeFile = Join-Path $DataRoot 'Data\MapTypeInfo.txt'
+$villageTypeFile = Join-Path $DataRoot 'Data\MapTypeInfo_Village.txt'
+foreach ($needed in @($mapInfoFile, $mapTypeFile, $villageTypeFile)) {
+    if (-not (Test-Path $needed)) { throw "map data not found: '$needed' (set -DataRoot)" }
+}
+
+# map index -> map type unique (mapinfoE.txt column 3)
+$mapTypeOfMap = @{}
+$inData = $false
+foreach ($line in [System.IO.File]::ReadAllLines($mapInfoFile, [System.Text.Encoding]::Unicode)) {
+    if ($line -match '^\s*<Data>') { $inData = $true; continue }
+    if (-not $inData) { continue }
+    $fields = $line -split "`t"
+    if ($fields.Count -lt 3) { continue }
+    $mapId = 0
+    $typeUnique = 0
+    if (-not [int]::TryParse($fields[0].Trim(), [ref]$mapId)) { continue }
+    if (-not [int]::TryParse($fields[2].Trim(), [ref]$typeUnique)) { continue }
+    $mapTypeOfMap[$mapId] = $typeUnique
+}
+
+# map type unique -> name (MapTypeInfo.txt)
+$typeNameOfUnique = @{}
+$inData = $false
+foreach ($line in [System.IO.File]::ReadAllLines($mapTypeFile, [System.Text.Encoding]::Unicode)) {
+    if ($line -match '^\s*<Data>') { $inData = $true; continue }
+    if (-not $inData) { continue }
+    $fields = $line -split "`t"
+    if ($fields.Count -lt 2) { continue }
+    $unique = 0
+    if (-not [int]::TryParse($fields[0].Trim(), [ref]$unique)) { continue }
+    $typeNameOfUnique[$unique] = $fields[1].Trim()
+}
+
+# map type name -> centre (MapTypeInfo_Village.txt: MapUniqueString, MapAttb, CenterX, CenterY, ...)
+$centerOfTypeName = @{}
+$inData = $false
+foreach ($line in [System.IO.File]::ReadAllLines($villageTypeFile, [System.Text.Encoding]::Unicode)) {
+    if ($line -match '^\s*<Data>') { $inData = $true; continue }
+    if (-not $inData) { continue }
+    $fields = $line -split "`t"
+    if ($fields.Count -lt 4) { continue }
+    $cx = 0
+    $cy = 0
+    if (-not [int]::TryParse($fields[2].Trim(), [ref]$cx)) { continue }
+    if (-not [int]::TryParse($fields[3].Trim(), [ref]$cy)) { continue }
+    $centerOfTypeName[$fields[0].Trim()] = @($cx, $cy)
+}
+
+$villages = New-Object 'System.Collections.Generic.List[object]'
+$inData = $false
+foreach ($line in [System.IO.File]::ReadAllLines($villageFile, [System.Text.Encoding]::Unicode)) {
+    if ($line -match '^\s*<Data>') { $inData = $true; continue }
+    if (-not $inData) { continue }
+    $fields = $line -split "`t"
+    if ($fields.Count -lt 6) { continue }
+    $nums = @()
+    $ok = $true
+    foreach ($index in @(0, 3, 4, 5)) {
+        $value = 0
+        if (-not [int]::TryParse($fields[$index].Trim(), [ref]$value)) { $ok = $false; break }
+        $nums += $value
+    }
+    if (-not $ok) { continue }
+    $unique = $nums[0]
+    $srcX = $nums[1]
+    $srcY = $nums[2]
+    $dstMap = $nums[3]
+    if (-not $mapTypeOfMap.ContainsKey($dstMap)) { throw "village ${unique}: map $dstMap is not in mapinfoE.txt" }
+    $typeName = $typeNameOfUnique[$mapTypeOfMap[$dstMap]]
+    if (-not $typeName -or -not $centerOfTypeName.ContainsKey($typeName)) {
+        throw "village ${unique}: no centre for map $dstMap (type '$typeName')"
+    }
+    $centre = $centerOfTypeName[$typeName]
+    $villages.Add([pscustomobject]@{
+        Unique = $unique
+        SrcX   = $srcX
+        SrcY   = $srcY
+        DstMap = $dstMap
+        DstX   = $centre[0]
+        DstY   = $centre[1]
+    })
+}
+if ($villages.Count -eq 0) { throw "no village rows found in $villageFile" }
+$villageSorted = $villages.ToArray()
+$villageBody = @($villageSorted | ForEach-Object {
+    @(
+        "    Village {",
+        "        unique: $($_.Unique),",
+        "        src_x: $($_.SrcX),",
+        "        src_y: $($_.SrcY),",
+        "        dst_map: $($_.DstMap),",
+        "        dst_x: $($_.DstX),",
+        "        dst_y: $($_.DstY),",
+        "    },"
+    )
+})
+$villageGenerated = @($villageSorted | ForEach-Object { '{0}/{1}/{2}/{3}/{4}/{5}' -f $_.Unique, $_.SrcX, $_.SrcY, $_.DstMap, $_.DstX, $_.DstY })
+
 if ($Check) {
     if ($Table -ne 'gate') {
         if (-not (Test-Path $RustPath)) { throw "Rust source not found: '$RustPath' (set -RustPath)" }
@@ -400,6 +524,27 @@ if ($Check) {
         }
         Write-Host "GATES is current: $($gateGenerated.Count) row(s), $($gateSeenCells.Count) covered cell(s), $($footprintCache.Count) field object(s)"
     }
+    if ($Table -ne 'npc' -and $Table -ne 'gate') {
+        if (-not (Test-Path $GateRustPath)) { throw "Rust source not found: '$GateRustPath' (set -GateRustPath)" }
+        $text = Get-Content $GateRustPath -Raw
+        $tableMatch = [regex]::Match(
+            $text,
+            'const VILLAGES: &\[Village\] = &\[(.*?)\];',
+            [System.Text.RegularExpressions.RegexOptions]::Singleline)
+        if (-not $tableMatch.Success) { throw "no VILLAGES table found in $GateRustPath" }
+        $pattern = 'Village\s*\{\s*unique:\s*(\d+)\s*,\s*src_x:\s*(\d+)\s*,\s*src_y:\s*(\d+)\s*,\s*dst_map:\s*(\d+)\s*,\s*dst_x:\s*(\d+)\s*,\s*dst_y:\s*(\d+)\s*,?\s*\}'
+        $committed = @([regex]::Matches(
+                $tableMatch.Groups[1].Value,
+                $pattern,
+                [System.Text.RegularExpressions.RegexOptions]::Singleline) | ForEach-Object {
+            '{0}/{1}/{2}/{3}/{4}/{5}' -f $_.Groups[1].Value, $_.Groups[2].Value, $_.Groups[3].Value,
+                $_.Groups[4].Value, $_.Groups[5].Value, $_.Groups[6].Value
+        })
+        if (($villageGenerated -join ';') -ne ($committed -join ';')) {
+            throw "VILLAGES is stale: $($villageGenerated.Count) generated vs $($committed.Count) committed. Re-run without -Check and paste the block."
+        }
+        Write-Host "VILLAGES is current: $($villageGenerated.Count) entrance(s) on map 0"
+    }
     exit 0
 }
 
@@ -418,4 +563,8 @@ if ($Table -ne 'npc') {
         foreach ($entry in $gateSkipped) { Write-Host "#   $entry" -ForegroundColor Yellow }
     }
     @("const GATES: &[Gate] = &[") + $gateBody + @("];")
+}
+if ($Table -ne 'npc' -and $Table -ne 'gate') {
+    Write-Host "# $($villageSorted.Count) village entrance(s) on map 0" -ForegroundColor Cyan
+    @("const VILLAGES: &[Village] = &[") + $villageBody + @("];")
 }
