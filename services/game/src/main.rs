@@ -469,6 +469,7 @@ async fn handle_client(
                             &mut movement,
                             &registry,
                             session_key,
+                            &characters,
                         )
                         .await?;
                         // Re-arm the deadline from the (potentially updated) movement.

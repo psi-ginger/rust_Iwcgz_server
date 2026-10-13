@@ -99,6 +99,28 @@ fn gate_at(map_id: i32, x: i32, y: i32) -> Option<&'static Gate> {
         .iter()
         .find(|g| g.src_map == map_id && g.src_x == x && g.src_y == y)
 }
+
+/// The gate nearest `(map_id, x, y)` within `radius` tiles, and how far it is.
+///
+/// Diagnostic only. The live run of 2026-10-13 had the player clicking (26,100),
+/// (27,100), (26,101) and (28,99) while walking around the map-158 gate recorded at
+/// (28,101) — adjacent cells, never the recorded cell, so no order destination ever
+/// matched a gate. The client resolves a gate by the **field object** the player
+/// clicked (`IsEnterGate(siGateUnique)`, `MouseOperation.cpp:5517`) and sends that
+/// cell, so a gate object wider than one tile would explain it — but the object's
+/// footprint lives in the binary map data, which is not pinned here. This lets the
+/// next live run print the cell the client actually sent for a gate click, so the
+/// footprint is measured instead of guessed.
+fn gate_within(map_id: i32, x: i32, y: i32, radius: i32) -> Option<(&'static Gate, i32)> {
+    GATES
+        .iter()
+        .filter(|g| g.src_map == map_id)
+        .filter_map(|g| {
+            let distance = (g.src_x - x).abs().max((g.src_y - y).abs());
+            (distance <= radius).then_some((g, distance))
+        })
+        .min_by_key(|(_, distance)| *distance)
+}
 /// `MOVE_PERCENT_STEP` — the accumulator level at which the legacy commits a
 /// tile (`clMoveInfo.IncMovePercent(movedlength) >= 50`, `char-move.cpp:159`).
 const MOVE_PERCENT_STEP: i32 = 50;
@@ -453,6 +475,7 @@ pub(crate) async fn step_movement(
     movement: &mut Option<Movement>,
     registry: &Registry,
     session_key: SessionKey,
+    characters: &PgCharacterRepository,
 ) -> Result<(), AnyError> {
     let Some(mv) = movement.as_mut() else {
         return Ok(());
@@ -472,9 +495,39 @@ pub(crate) async fn step_movement(
         *movement = None;
         return Ok(());
     }
-    if mv.arrived() {
+    // Stepping *onto* a gate leaves the map too, not only ordering a move to one.
+    //
+    // The legacy checks the order's destination and nothing else
+    // (`char-order.cpp:173` → `CharServerMoveByGate(x, y)`), but a walk that merely
+    // passes across a gate cell never has it as a destination, and the client
+    // resolves a gate by the object the player clicked rather than by our tile
+    // table. Warping on the committed tile as well is a deliberate widening: it is
+    // what makes "walk out through the gate" work, and a gate tile is by
+    // definition somewhere the character was not meant to stay. The destination
+    // check in `handle_userorder` stays first, so a direct order still leaves
+    // without a step.
+    let stepped_gate = gate_at(mv.map_id, x, y);
+    let stepped_map = mv.map_id;
+    if mv.arrived() || stepped_gate.is_some() {
         mv.deadline = None;
         *movement = None;
+    }
+    if let Some(gate) = stepped_gate {
+        logln!(
+            "game: stepped onto the gate at ({x}, {y}) on map {stepped_map} -> map {}",
+            gate.dst_map
+        );
+        warp_through_gate(
+            stream,
+            outbound,
+            characters,
+            registry,
+            session_key,
+            live,
+            gate,
+        )
+        .await?;
+        return Ok(());
     }
     // The stepped tile is now the authoritative cell, and it has to become so
     // *before* anything is built from the row: `announce_nearby_characters`
@@ -682,6 +735,20 @@ pub(crate) async fn handle_userorder(
         // No step is armed: the character is not walking to that tile, it left the
         // map. The read loop drops the previous movement when this returns `None`.
         return Ok(None);
+    }
+    // Not a gate. If the order landed *near* one, say so: the client resolves a gate
+    // by the field object the player clicked and sends that cell, so a click on a
+    // gate we do not recognise is how a wider-than-one-tile gate would show up. See
+    // [`gate_within`].
+    if let Some((gate, distance)) = gate_within(map_id, dest.0, dest.1, 2) {
+        logln!(
+            "game: move order to {dest:?} on map {map_id} is {distance} tile(s) from the gate \
+             recorded at ({}, {}) -> map {} — if the client sent this cell for a gate click, the \
+             gate's footprint is wider than the table",
+            gate.src_x,
+            gate.src_y,
+            gate.dst_map
+        );
     }
 
     // Persist the destination, then mirror: a later 248 (resync) or a re-login
@@ -1010,6 +1077,38 @@ mod tests {
     /// The destinations are inside the 10-bit fields the record packs, and the
     /// client's map index for them is the map id itself
     /// (`gz_proto::game::client_map_index`).
+    /// The step-onto path and the near-gate diagnostic both hang off these two
+    /// lookups, so their semantics are pinned here.
+    #[test]
+    fn a_committed_tile_is_a_gate_only_on_the_recorded_cells() {
+        // The three map-158 exits, straight out of `GateInfoE.txt` (rows 307-309).
+        assert!(gate_at(158, 14, 90).is_some_and(|g| g.dst_map == 0));
+        assert!(gate_at(158, 28, 101).is_some_and(|g| g.dst_map == 0));
+        assert!(gate_at(158, 41, 90).is_some_and(|g| g.dst_map == 0));
+        // The cells the live run actually ordered to are *not* gates. Until the
+        // footprint is measured, one tile off is still one tile off.
+        for (x, y) in [(26, 100), (27, 100), (26, 101), (28, 99)] {
+            assert!(
+                gate_at(158, x, y).is_none(),
+                "({x}, {y}) must not be a gate"
+            );
+        }
+        // A gate on another map is not this map's gate.
+        assert!(gate_at(0, 14, 90).is_none());
+    }
+
+    #[test]
+    fn the_near_gate_diagnostic_reports_the_closest_row_within_radius() {
+        let (gate, distance) = gate_within(158, 27, 100, 2).expect("one tile from (28,101)");
+        assert_eq!((gate.src_x, gate.src_y), (28, 101));
+        assert_eq!(distance, 1);
+        // Diagonals count as one step, as they do in the walk itself.
+        assert_eq!(gate_within(158, 27, 100, 1).map(|(_, d)| d), Some(1));
+        // Outside the radius, or on a map with no gates, nothing is reported.
+        assert!(gate_within(158, 27, 96, 2).is_none());
+        assert!(gate_within(109, 28, 101, 2).is_none());
+    }
+
     #[test]
     fn every_gate_destination_fits_the_record() {
         for gate in GATES {
