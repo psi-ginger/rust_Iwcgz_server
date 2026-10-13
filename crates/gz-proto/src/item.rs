@@ -29,6 +29,21 @@ use crate::wire::{Reader, WireError};
 /// `sizeof(cltItem)` in the shipped wire format — see the module docs.
 pub const CLT_ITEM_SIZE: usize = 84;
 
+/// `cltItem.uiDateYear` / `.uiDateMonth` / `.uiDateDay` — three bytes at record
+/// offset 4, right after `siUnique` and `siItemNum` (`ItemUnit.h:1196-1201`).
+///
+/// *Sealed* is exactly "all three zero" (`cltItem::IsSealingUp`,
+/// `ItemUnit.cpp:3463-3467`).
+pub const ITEM_SEAL_DATE_OFFSET: usize = 4;
+
+/// `cltItem.uiDateUseDay` — the validity window in days. A `UI16` the compiler
+/// aligns to offset 8 rather than packing at 7.
+///
+/// Pinned from the dev characters' own records: the necklaces in slots 32-34 carry
+/// `14 00` there (`ItemUnit.h:1201`, filled by the lottery at
+/// `Server-Item.cpp:3844-3855`).
+pub const ITEM_USE_DAYS_OFFSET: usize = 8;
+
 /// `MAX_ITEM_PER_PERSON` (`ItemUnit.h:326`) — the length of `cltPItemInfo::clItem`.
 pub const MAX_ITEM_PER_PERSON: usize = 80;
 
@@ -188,6 +203,51 @@ impl Item {
     /// Overwrites `siItemNum`, leaving every other byte alone.
     pub fn set_count(&mut self, count: u16) {
         self.raw[2..4].copy_from_slice(&count.to_le_bytes());
+    }
+
+    /// `cltItem.uiDateYear` / `.uiDateMonth` / `.uiDateDay`, as `(y-2000, m, d)`.
+    ///
+    /// The three bytes sit at record offset 4, straight after `siUnique` and
+    /// `siItemNum` (`ItemUnit.h:1196-1201`), and the dev characters' own records pin
+    /// that: the slot holding item 705 reads `c1 02 01 00 1a 09 17 …`, i.e. 26/9/23.
+    #[must_use]
+    pub fn seal_date(&self) -> (u8, u8, u8) {
+        (
+            self.raw[ITEM_SEAL_DATE_OFFSET],
+            self.raw[ITEM_SEAL_DATE_OFFSET + 1],
+            self.raw[ITEM_SEAL_DATE_OFFSET + 2],
+        )
+    }
+
+    /// Whether the slot is **sealed**.
+    ///
+    /// Exactly "the date trio is zero": `cltItem::IsSealingUp`
+    /// (`ItemUnit.cpp:3463-3467`) returns true on `uiDateYear == 0 && uiDateMonth ==
+    /// 0 && uiDateDay == 0`, and a freshly-built record starts zeroed — which is why
+    /// an item a quest hands out arrives sealed until the player unseals it.
+    #[must_use]
+    pub fn is_sealed(&self) -> bool {
+        self.seal_date() == (0, 0, 0)
+    }
+
+    /// Unseals by stamping the date — the write the legacy's sealing-up path makes
+    /// (`Server-Item.cpp:3793-3795`, from its `SYSTEMTIME`, year relative to 2000).
+    pub fn set_seal_date(&mut self, year: u8, month: u8, day: u8) {
+        self.raw[ITEM_SEAL_DATE_OFFSET] = year;
+        self.raw[ITEM_SEAL_DATE_OFFSET + 1] = month;
+        self.raw[ITEM_SEAL_DATE_OFFSET + 2] = day;
+    }
+
+    /// `cltItem.uiDateUseDay` — the validity window in days.
+    ///
+    /// A `UI16` the compiler aligns to offset 8 rather than packing at 7
+    /// (`ItemUnit.h:1201`); the dev characters' necklaces carry `14 00` there.
+    #[must_use]
+    pub fn use_days(&self) -> u16 {
+        u16::from_le_bytes([
+            self.raw[ITEM_USE_DAYS_OFFSET],
+            self.raw[ITEM_USE_DAYS_OFFSET + 1],
+        ])
     }
 
     /// Reads one record.
@@ -411,6 +471,57 @@ pub const MAX_ITEM_UNIQUE: i32 = 30000;
 /// # Errors
 ///
 /// [`WireError::Truncated`] if the body is shorter than [`INV_PICKUP_SIZE`].
+/// The 7223 body — `cltGameMsgRequest_Inv_CancellationSealingUp`
+/// (`MsgType.h:3531-3541`): the slot to unseal, plus the record the client believes
+/// is in it.
+///
+/// 88 bytes: `SI32 siItemPos` then the 84-byte `clItem`. The reply struct
+/// (`MsgType.h:3543-3553`) has the same shape, but the server never sends it — see
+/// [`decode_inv_cancellationsealingup`]'s neighbour `encode_person_item_info`.
+pub const REQUEST_INV_CANCELLATIONSEALINGUP_SIZE: usize = 4 + CLT_ITEM_SIZE;
+
+/// `GAMEMSG_REQUEST_INV_CANCELLATIONSEALINGUP` (7223) — "unseal this slot".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InvCancellationSealingUp {
+    /// `siItemPos` — an absolute slot of the character's item array.
+    pub slot: i32,
+    /// `clItem` — the client's copy.
+    ///
+    /// The server does **not** trust it: the legacy reads the live array by
+    /// `siItemPos` (`Server-Item.cpp:3781`), and so does this port. It is decoded so
+    /// the frame parses whole, and a future reader can compare the two.
+    pub item: Item,
+}
+
+/// Reads a 7223 body.
+///
+/// # Errors
+///
+/// [`WireError::Truncated`] if fewer than
+/// [`REQUEST_INV_CANCELLATIONSEALINGUP_SIZE`] bytes are available.
+pub fn decode_inv_cancellationsealingup(
+    payload: &[u8],
+) -> Result<InvCancellationSealingUp, WireError> {
+    let mut r = Reader::new(payload);
+    Ok(InvCancellationSealingUp {
+        slot: r.i32()?,
+        item: Item::decode(r.bytes(CLT_ITEM_SIZE)?)?,
+    })
+}
+
+/// The server's answer to a 7223: `GAMEMSG_RESPONSE_PERSONITEMINFO` (7210) carrying
+/// the slot's new record.
+///
+/// The sealing-up family *has* a `GAMEMSG_RESPONSE_INV_CANCELLATIONSEALINGUP`
+/// (7224) in the opcode table, but the legacy never sends it on this path — it calls
+/// `cltGameMsgResponse_PersonItemInfo` instead (`Server-Item.cpp:3868-3873`), and the
+/// shipped client has no 7224 handler anywhere. So the reply is
+/// [`encode_person_item_info`].
+///
+/// # Errors
+///
+/// [`WireError`] only if `payload` is short, which the fixed-size callers cannot
+/// hit.
 pub fn decode_inv_pickup(payload: &[u8]) -> Result<InvPickupRequest, WireError> {
     let mut r = Reader::new(payload);
     Ok(InvPickupRequest {

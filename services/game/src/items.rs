@@ -8,14 +8,205 @@ use gz_db::{
     PickupStatus, SplitStatus,
 };
 use gz_proto::item::{
-    Item, MAX_ITEM_PER_PERSON, MAX_ITEM_UNIQUE, decode_inv_drop, decode_inv_pickup,
-    decode_move_item, decode_split_item, encode_person_item_info,
+    Item, MAX_ITEM_PER_PERSON, MAX_ITEM_UNIQUE, decode_inv_cancellationsealingup, decode_inv_drop,
+    decode_inv_pickup, decode_move_item, decode_split_item, encode_person_item_info,
 };
 use gz_proto::opcodes_game::GameMsg;
 use gz_proto::personalshop::{ShopTradeData, decode_personal_shop_request, shop_mode_for_request};
 use tokio::net::TcpStream;
 
 use crate::{AnyError, GameSession, logln, send_encoded, send_raw};
+
+/// What a `GAMEMSG_REQUEST_INV_CANCELLATIONSEALINGUP` (7223) should do to the slot.
+///
+/// Pure, so the decision is testable without a database or a socket — the same
+/// split the quest family uses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum UnsealPlan {
+    /// Stamp this date into the record and store it.
+    Unseal(Item),
+    /// Nothing to write, and the reason for the log.
+    NoChange(&'static str),
+}
+
+/// The decision behind 7223: given the slot's stored record and today's date, what
+/// should be written?
+///
+/// This is `DoMsg_GAMEMSG_REQUEST_INV_CANCELLATIONSEALINGUP`'s core
+/// (`Server-Item.cpp:3781-3795`): read the live array, and if the record is sealed
+/// stamp today's date into it. The legacy guards that this port does not model the
+/// same way are the personal-shop checks (no player shops yet) and the
+/// `ITEMATB_OBJECT` / level-under-30 / crystal exclusions inside `IsSealingUp` — the
+/// item table this port carries has no attribute bits, and the client only offers
+/// the unseal action for items its own `IsSealingUp` accepts, so the stored date trio
+/// is the whole test here. Documented on the card.
+#[must_use]
+pub(crate) fn unseal_plan(stored: &Item, today: (u8, u8, u8)) -> UnsealPlan {
+    if stored.is_empty() {
+        return UnsealPlan::NoChange("slot is empty");
+    }
+    if !stored.is_sealed() {
+        return UnsealPlan::NoChange("item is not sealed");
+    }
+    let mut item = *stored;
+    item.set_seal_date(today.0, today.1, today.2);
+    UnsealPlan::Unseal(item)
+}
+
+/// `GAMEMSG_REQUEST_INV_CANCELLATIONSEALINGUP` (7223): the player asked to unseal a
+/// bag slot.
+///
+/// A sealed item is one whose `uiDateYear`/`uiDateMonth`/`uiDateDay` are all zero
+/// (`ItemUnit.cpp:3463-3467`), which is how a freshly granted record starts — so the
+/// shoes a quest hands out arrive sealed and take this request to become equippable.
+///
+/// The store, not the client, decides: the request carries the client's copy of the
+/// record, and it is decoded but never trusted (`Server-Item.cpp:3781` reads the live
+/// array by slot).
+///
+/// The answer is `GAMEMSG_RESPONSE_PERSONITEMINFO` (7210) with the slot's new record
+/// — the legacy's own reply (`Server-Item.cpp:3868-3873`). There is *no* 7224
+/// response frame on this path, and the shipped client has no handler for one.
+///
+/// # Errors
+///
+/// A short body is logged and ignored, matching the family's soft-fail rule;
+/// repository and socket failures propagate.
+pub(crate) async fn handle_inv_cancellation_sealing_up(
+    stream: &mut TcpStream,
+    outbound: &mut Cipher,
+    items: &PgItemRepository,
+    character_id: i32,
+    today: (u8, u8, u8),
+    payload: &[u8],
+) -> Result<(), AnyError> {
+    let Ok(request) = decode_inv_cancellationsealingup(payload) else {
+        logln!("game: malformed 7223 ({} bytes) — ignored", payload.len());
+        return Ok(());
+    };
+    let Ok(slot) = u16::try_from(request.slot) else {
+        logln!("game: unseal for negative slot {} — ignored", request.slot);
+        return Ok(());
+    };
+    if usize::from(slot) >= MAX_ITEM_PER_PERSON {
+        logln!("game: unseal slot {slot} out of range — ignored");
+        return Ok(());
+    }
+
+    let stored = items
+        .list(character_id)
+        .await?
+        .into_iter()
+        .find(|row| row.slot == slot);
+    let Some(row) = stored else {
+        logln!("game: unseal slot {slot} for character {character_id}: slot is empty");
+        return Ok(());
+    };
+    let current = Item::decode(&row.raw)?;
+
+    match unseal_plan(&current, today) {
+        UnsealPlan::NoChange(why) => {
+            logln!("game: unseal slot {slot} for character {character_id}: {why}");
+        }
+        UnsealPlan::Unseal(item) => {
+            items.write_slot(character_id, slot, &item).await?;
+            logln!(
+                "game: unseal slot {slot} for character {character_id}: item {} dated {}-{}-{}",
+                item.unique(),
+                item.seal_date().0,
+                item.seal_date().1,
+                item.seal_date().2
+            );
+            send_encoded(
+                stream,
+                outbound,
+                GameMsg::ResponsePersoniteminfo,
+                &encode_person_item_info(slot, &item),
+            )
+            .await?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A record exactly as the store holds the quest shoes that started this: item
+    /// 20164, one of it, every date byte zero (the live row for character 35, slot
+    /// 16).
+    fn sealed_shoes() -> Item {
+        let mut raw = [0u8; gz_proto::item::CLT_ITEM_SIZE];
+        raw[0..2].copy_from_slice(&20164u16.to_le_bytes());
+        raw[2..4].copy_from_slice(&1u16.to_le_bytes());
+        Item::decode(&raw).expect("a whole record")
+    }
+
+    #[test]
+    fn a_sealed_item_is_dated_with_today() {
+        let plan = unseal_plan(&sealed_shoes(), (26, 10, 13));
+        let UnsealPlan::Unseal(item) = plan else {
+            panic!("sealed item must unseal, got {plan:?}");
+        };
+        assert_eq!(item.seal_date(), (26, 10, 13));
+        assert!(!item.is_sealed());
+        // Nothing else moved: same unique, same count, same use-days.
+        assert_eq!(item.unique(), 20164);
+        assert_eq!(item.count(), 1);
+        assert_eq!(item.use_days(), sealed_shoes().use_days());
+    }
+
+    /// The date trio is the whole seal test, and the offsets are pinned against a
+    /// real record: item 705 in a dev character's slot reads `1a 09 17` at +4.
+    #[test]
+    fn the_seal_test_is_the_date_trio() {
+        let mut raw = [0u8; gz_proto::item::CLT_ITEM_SIZE];
+        raw[0..2].copy_from_slice(&705u16.to_le_bytes());
+        raw[2..4].copy_from_slice(&1u16.to_le_bytes());
+        raw[4] = 26;
+        raw[5] = 9;
+        raw[6] = 23;
+        let dated = Item::decode(&raw).expect("a whole record");
+        assert_eq!(dated.seal_date(), (26, 9, 23));
+        assert!(!dated.is_sealed());
+        assert!(matches!(
+            unseal_plan(&dated, (26, 10, 13)),
+            UnsealPlan::NoChange(_)
+        ));
+    }
+
+    #[test]
+    fn an_empty_slot_and_a_stamped_item_are_both_refused() {
+        assert!(matches!(
+            unseal_plan(&Item::empty(), (26, 10, 13)),
+            UnsealPlan::NoChange("slot is empty")
+        ));
+        let mut stamped = sealed_shoes();
+        stamped.set_seal_date(26, 10, 1);
+        assert!(matches!(
+            unseal_plan(&stamped, (26, 10, 13)),
+            UnsealPlan::NoChange("item is not sealed")
+        ));
+    }
+
+    /// A 7223 body is the 88 bytes the client sent: the slot, then its copy of the
+    /// record.
+    #[test]
+    fn a_7223_body_decodes_to_the_slot_and_the_clients_copy() {
+        let mut body = Vec::new();
+        body.extend_from_slice(&16i32.to_le_bytes());
+        body.extend_from_slice(&sealed_shoes().encode());
+        assert_eq!(
+            body.len(),
+            gz_proto::item::REQUEST_INV_CANCELLATIONSEALINGUP_SIZE
+        );
+        let decoded = decode_inv_cancellationsealingup(&body).expect("88 bytes");
+        assert_eq!(decoded.slot, 16);
+        assert_eq!(decoded.item.unique(), 20164);
+        assert!(decoded.item.is_sealed());
+    }
+}
 /// Applies `GAMEMSG_REQUEST_ITEMMOVE` (303) and `GAMEMSG_REQUEST_ITEMCHANGE`
 /// (305) — a drag between two slots of the character's 80-entry item array.
 ///

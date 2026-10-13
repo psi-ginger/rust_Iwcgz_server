@@ -119,6 +119,62 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         restored.len()
     );
 
+    // --- write_slot: the single-record write the unseal path uses ---
+    // On this character's (empty) slot 17, so nothing of anyone's is touched: write a
+    // sealed record, read it back, stamp a date the way 7223 does, read it back again,
+    // then delete the row.
+    const WRITE_SLOT: u16 = 17;
+    let mut sealed = gz_proto::item::Item::from_unique(20164, 1);
+    if !sealed.is_sealed() {
+        failures.push("a fresh record should be sealed".into());
+    }
+    let written = items.write_slot(character_id, WRITE_SLOT, &sealed).await?;
+    let read_back = items
+        .list(character_id)
+        .await?
+        .into_iter()
+        .find(|r| r.slot == WRITE_SLOT);
+    println!("write_slot sealed -> {written:?}");
+    match read_back
+        .as_ref()
+        .map(|r| gz_proto::item::Item::decode(&r.raw))
+    {
+        Some(Ok(item)) if item == sealed => {}
+        other => failures.push(format!("sealed record did not round-trip: {other:?}")),
+    }
+
+    sealed.set_seal_date(26, 10, 13);
+    items.write_slot(character_id, WRITE_SLOT, &sealed).await?;
+    let after = items
+        .list(character_id)
+        .await?
+        .into_iter()
+        .find(|r| r.slot == WRITE_SLOT)
+        .map(|r| gz_proto::item::Item::decode(&r.raw));
+    match after {
+        Some(Ok(item))
+            if item.seal_date() == (26, 10, 13) && !item.is_sealed() && item.unique() == 20164 =>
+        {
+            println!("write_slot unsealed -> date {:?}", item.seal_date());
+        }
+        other => failures.push(format!("unsealed record did not land: {other:?}")),
+    }
+
+    // An empty record clears the slot, which is what `write_slot` promises.
+    let cleared = items
+        .write_slot(character_id, WRITE_SLOT, &gz_proto::item::Item::empty())
+        .await?;
+    let left = items
+        .list(character_id)
+        .await?
+        .into_iter()
+        .filter(|r| r.slot == WRITE_SLOT)
+        .count();
+    println!("write_slot empty -> {cleared:?}, rows left at slot {WRITE_SLOT}: {left}");
+    if cleared.is_some() || left != 0 {
+        failures.push("an empty record must delete the row".into());
+    }
+
     if failures.is_empty() {
         println!("\nRESULT: PASS");
         Ok(())

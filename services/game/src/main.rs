@@ -136,8 +136,8 @@ pub(crate) use stats::{
 // through `super::*`, hence the allow.
 #[allow(unused_imports)]
 pub(crate) use items::{
-    handle_inv_drop, handle_inv_pickup, handle_item_move, handle_item_split,
-    handle_personal_shop_data,
+    handle_inv_cancellation_sealing_up, handle_inv_drop, handle_inv_pickup, handle_item_move,
+    handle_item_split, handle_personal_shop_data,
 };
 
 // The world family lives in `world.rs`. The dispatcher calls 1101 and world
@@ -913,6 +913,31 @@ async fn handle_client(
                     )
                     .await?;
                 }
+                c if c == GameMsg::RequestInvCancellationsealingup as u16 => {
+                    let character_id = login
+                        .as_ref()
+                        .ok_or("unseal before a successful game login")?
+                        .character_id
+                        .ok_or("unseal before a character was selected")?;
+                    // The legacy stamps its own local `SYSTEMTIME`
+                    // (`Server-Item.cpp:3793-3795`); this port's clock is UTC, which
+                    // is the only documented difference.
+                    let now = crate::world_entry::ServerTime::from_unix_seconds(now_seconds());
+                    let today = (
+                        u8::try_from(now.year.saturating_sub(2000)).unwrap_or(0),
+                        u8::try_from(now.month).unwrap_or(0),
+                        u8::try_from(now.day).unwrap_or(0),
+                    );
+                    handle_inv_cancellation_sealing_up(
+                        &mut stream,
+                        &mut outbound,
+                        &items,
+                        character_id,
+                        today,
+                        payload.as_ref(),
+                    )
+                    .await?;
+                }
                 c if c == GameMsg::RequestInvpickup as u16 => {
                     let character_id = login
                         .as_ref()
@@ -1445,6 +1470,13 @@ async fn handle_rightmouse_userlist_name(
 fn random_key_bytes() -> (u8, u8) {
     let v = hash_now();
     (v as u8, (v >> 8) as u8)
+}
+
+fn now_seconds() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 fn hash_now() -> u64 {

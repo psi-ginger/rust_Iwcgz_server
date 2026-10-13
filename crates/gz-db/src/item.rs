@@ -223,6 +223,27 @@ pub trait ItemRepository: Send + Sync {
         item_unique: u16,
         count: i32,
     ) -> Result<Option<CharacterItem>, RepositoryError>;
+
+    /// Replaces one slot's whole record — the write the sealing-up path makes.
+    ///
+    /// The legacy saves the single modified record through
+    /// `sDBRequest_WasteDurability(id, personid, itempos, pclitem)`
+    /// (`Server-Item.cpp:3863`) and answers the client with that same record.
+    ///
+    /// An **empty** item clears the slot (the row is deleted, the legacy's
+    /// `siUnique == 0` convention) and returns `None`.
+    ///
+    /// # Errors
+    ///
+    /// [`RepositoryError::Invalid`] if `slot` is outside the array, or
+    /// [`RepositoryError::Database`] if the write fails.
+    async fn write_slot(
+        &self,
+        character_id: i32,
+        slot: u16,
+        item: &Item,
+    ) -> Result<Option<CharacterItem>, RepositoryError>;
+
     /// Applies a `GAMEMSG_REQUEST_ITEMMOVE` (303) to the stored array.
     ///
     /// The client applies the move locally and never waits for a reply — the
@@ -800,6 +821,54 @@ impl ItemRepository for PgItemRepository {
         }
         tx.commit().await?;
         Ok(())
+    }
+
+    async fn write_slot(
+        &self,
+        character_id: i32,
+        slot: u16,
+        item: &Item,
+    ) -> Result<Option<CharacterItem>, RepositoryError> {
+        if usize::from(slot) >= MAX_ITEM_PER_PERSON {
+            return Err(RepositoryError::Invalid(format!(
+                "item slot {slot} out of range 0..{MAX_ITEM_PER_PERSON}"
+            )));
+        }
+        let mut tx = self.pool.begin().await?;
+        if item.is_empty() {
+            sqlx::query("DELETE FROM character_items WHERE character_id = $1 AND slot = $2")
+                .bind(character_id)
+                .bind(i16::try_from(slot).unwrap_or(0))
+                .execute(&mut *tx)
+                .await?;
+            tx.commit().await?;
+            return Ok(None);
+        }
+        let raw = item.encode().to_vec();
+        sqlx::query(
+            "INSERT INTO character_items \
+             (character_id, slot, container, item_unique, count, raw) \
+             VALUES ($1, $2, $3, $4, $5, $6) \
+             ON CONFLICT (character_id, slot) DO UPDATE SET \
+                 container = EXCLUDED.container, item_unique = EXCLUDED.item_unique, \
+                 count = EXCLUDED.count, raw = EXCLUDED.raw",
+        )
+        .bind(character_id)
+        .bind(i16::try_from(slot).unwrap_or(0))
+        .bind(i16::try_from(container_of(slot)).unwrap_or(0))
+        .bind(i32::from(item.unique()))
+        .bind(i32::from(item.count()))
+        .bind(&raw)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(Some(CharacterItem {
+            slot,
+            container: container_of(slot),
+            item_unique: i32::from(item.unique()),
+            count: i32::from(item.count()),
+            raw,
+        }))
     }
 
     async fn move_slot(
