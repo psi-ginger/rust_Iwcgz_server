@@ -80,8 +80,8 @@ struct Gate {
 const GATES: &[Gate] = &[
     Gate {
         src_map: 0,
-        src_x: 291,
-        src_y: 350,
+        src_x: 298,
+        src_y: 353,
         xsize: 9,
         ysize: 4,
         center_x: 1,
@@ -136,8 +136,8 @@ const GATES: &[Gate] = &[
     },
     Gate {
         src_map: 0,
-        src_x: 254,
-        src_y: 603,
+        src_x: 261,
+        src_y: 606,
         xsize: 5,
         ysize: 5,
         center_x: 0,
@@ -192,8 +192,8 @@ const GATES: &[Gate] = &[
     },
     Gate {
         src_map: 0,
-        src_x: 317,
-        src_y: 423,
+        src_x: 324,
+        src_y: 426,
         xsize: 5,
         ysize: 5,
         center_x: 3,
@@ -276,8 +276,8 @@ const GATES: &[Gate] = &[
     },
     Gate {
         src_map: 0,
-        src_x: 265,
-        src_y: 360,
+        src_x: 272,
+        src_y: 363,
         xsize: 4,
         ysize: 4,
         center_x: 1,
@@ -304,8 +304,8 @@ const GATES: &[Gate] = &[
     },
     Gate {
         src_map: 0,
-        src_x: 402,
-        src_y: 580,
+        src_x: 409,
+        src_y: 583,
         xsize: 4,
         ysize: 5,
         center_x: 1,
@@ -360,8 +360,8 @@ const GATES: &[Gate] = &[
     },
     Gate {
         src_map: 0,
-        src_x: 522,
-        src_y: 446,
+        src_x: 529,
+        src_y: 449,
         xsize: 5,
         ysize: 5,
         center_x: 0,
@@ -416,8 +416,8 @@ const GATES: &[Gate] = &[
     },
     Gate {
         src_map: 0,
-        src_x: 166,
-        src_y: 124,
+        src_x: 173,
+        src_y: 127,
         xsize: 4,
         ysize: 10,
         center_x: 0,
@@ -430,8 +430,8 @@ const GATES: &[Gate] = &[
     },
     Gate {
         src_map: 0,
-        src_x: 181,
-        src_y: 322,
+        src_x: 188,
+        src_y: 325,
         xsize: 4,
         ysize: 10,
         center_x: 0,
@@ -444,8 +444,8 @@ const GATES: &[Gate] = &[
     },
     Gate {
         src_map: 0,
-        src_x: 240,
-        src_y: 650,
+        src_x: 247,
+        src_y: 653,
         xsize: 4,
         ysize: 10,
         center_x: 0,
@@ -458,8 +458,8 @@ const GATES: &[Gate] = &[
     },
     Gate {
         src_map: 0,
-        src_x: 252,
-        src_y: 697,
+        src_x: 259,
+        src_y: 700,
         xsize: 4,
         ysize: 10,
         center_x: 0,
@@ -472,8 +472,8 @@ const GATES: &[Gate] = &[
     },
     Gate {
         src_map: 0,
-        src_x: 477,
-        src_y: 665,
+        src_x: 484,
+        src_y: 668,
         xsize: 4,
         ysize: 10,
         center_x: 0,
@@ -486,8 +486,8 @@ const GATES: &[Gate] = &[
     },
     Gate {
         src_map: 0,
-        src_x: 398,
-        src_y: 707,
+        src_x: 405,
+        src_y: 710,
         xsize: 4,
         ysize: 10,
         center_x: 0,
@@ -500,8 +500,8 @@ const GATES: &[Gate] = &[
     },
     Gate {
         src_map: 0,
-        src_x: 203,
-        src_y: 406,
+        src_x: 210,
+        src_y: 409,
         xsize: 4,
         ysize: 10,
         center_x: 0,
@@ -514,8 +514,8 @@ const GATES: &[Gate] = &[
     },
     Gate {
         src_map: 0,
-        src_x: 382,
-        src_y: 85,
+        src_x: 389,
+        src_y: 88,
         xsize: 4,
         ysize: 10,
         center_x: 0,
@@ -528,8 +528,8 @@ const GATES: &[Gate] = &[
     },
     Gate {
         src_map: 0,
-        src_x: 418,
-        src_y: 155,
+        src_x: 425,
+        src_y: 158,
         xsize: 4,
         ysize: 10,
         center_x: 0,
@@ -542,8 +542,8 @@ const GATES: &[Gate] = &[
     },
     Gate {
         src_map: 0,
-        src_x: 607,
-        src_y: 219,
+        src_x: 614,
+        src_y: 222,
         xsize: 4,
         ysize: 10,
         center_x: 0,
@@ -556,8 +556,8 @@ const GATES: &[Gate] = &[
     },
     Gate {
         src_map: 0,
-        src_x: 258,
-        src_y: 153,
+        src_x: 265,
+        src_y: 156,
         xsize: 4,
         ysize: 10,
         center_x: 0,
@@ -570,8 +570,8 @@ const GATES: &[Gate] = &[
     },
     Gate {
         src_map: 0,
-        src_x: 581,
-        src_y: 592,
+        src_x: 588,
+        src_y: 595,
         xsize: 4,
         ysize: 10,
         center_x: 0,
@@ -584,8 +584,8 @@ const GATES: &[Gate] = &[
     },
     Gate {
         src_map: 0,
-        src_x: 516,
-        src_y: 621,
+        src_x: 523,
+        src_y: 624,
         xsize: 4,
         ysize: 10,
         center_x: 0,
@@ -598,8 +598,8 @@ const GATES: &[Gate] = &[
     },
     Gate {
         src_map: 0,
-        src_x: 317,
-        src_y: 585,
+        src_x: 324,
+        src_y: 588,
         xsize: 4,
         ysize: 10,
         center_x: 0,
@@ -612,8 +612,8 @@ const GATES: &[Gate] = &[
     },
     Gate {
         src_map: 0,
-        src_x: 663,
-        src_y: 428,
+        src_x: 670,
+        src_y: 431,
         xsize: 4,
         ysize: 10,
         center_x: 0,
@@ -626,8 +626,8 @@ const GATES: &[Gate] = &[
     },
     Gate {
         src_map: 0,
-        src_x: 510,
-        src_y: 23,
+        src_x: 517,
+        src_y: 26,
         xsize: 5,
         ysize: 5,
         center_x: 0,
@@ -710,8 +710,8 @@ const GATES: &[Gate] = &[
     },
     Gate {
         src_map: 0,
-        src_x: 356,
-        src_y: 700,
+        src_x: 363,
+        src_y: 703,
         xsize: 4,
         ysize: 4,
         center_x: 0,
@@ -738,8 +738,8 @@ const GATES: &[Gate] = &[
     },
     Gate {
         src_map: 0,
-        src_x: 289,
-        src_y: 41,
+        src_x: 296,
+        src_y: 44,
         xsize: 6,
         ysize: 5,
         center_x: 0,
@@ -822,8 +822,8 @@ const GATES: &[Gate] = &[
     },
     Gate {
         src_map: 0,
-        src_x: 322,
-        src_y: 213,
+        src_x: 329,
+        src_y: 216,
         xsize: 5,
         ysize: 5,
         center_x: 0,
@@ -878,8 +878,8 @@ const GATES: &[Gate] = &[
     },
     Gate {
         src_map: 0,
-        src_x: 413,
-        src_y: 217,
+        src_x: 420,
+        src_y: 220,
         xsize: 3,
         ysize: 4,
         center_x: 0,
@@ -934,8 +934,8 @@ const GATES: &[Gate] = &[
     },
     Gate {
         src_map: 0,
-        src_x: 419,
-        src_y: 629,
+        src_x: 426,
+        src_y: 632,
         xsize: 6,
         ysize: 6,
         center_x: 0,
@@ -1018,8 +1018,8 @@ const GATES: &[Gate] = &[
     },
     Gate {
         src_map: 0,
-        src_x: 602,
-        src_y: 311,
+        src_x: 609,
+        src_y: 314,
         xsize: 4,
         ysize: 4,
         center_x: 0,
@@ -1298,8 +1298,8 @@ const GATES: &[Gate] = &[
     },
     Gate {
         src_map: 0,
-        src_x: 575,
-        src_y: 172,
+        src_x: 582,
+        src_y: 175,
         xsize: 4,
         ysize: 4,
         center_x: 0,
@@ -1634,8 +1634,8 @@ const GATES: &[Gate] = &[
     },
     Gate {
         src_map: 0,
-        src_x: 253,
-        src_y: 446,
+        src_x: 260,
+        src_y: 449,
         xsize: 5,
         ysize: 5,
         center_x: 0,
@@ -1844,8 +1844,8 @@ const GATES: &[Gate] = &[
     },
     Gate {
         src_map: 0,
-        src_x: 558,
-        src_y: 548,
+        src_x: 565,
+        src_y: 551,
         xsize: 5,
         ysize: 4,
         center_x: 0,
@@ -1900,8 +1900,8 @@ const GATES: &[Gate] = &[
     },
     Gate {
         src_map: 0,
-        src_x: 224,
-        src_y: 314,
+        src_x: 231,
+        src_y: 317,
         xsize: 6,
         ysize: 6,
         center_x: 0,
@@ -1914,8 +1914,8 @@ const GATES: &[Gate] = &[
     },
     Gate {
         src_map: 0,
-        src_x: 266,
-        src_y: 355,
+        src_x: 273,
+        src_y: 358,
         xsize: 4,
         ysize: 4,
         center_x: 0,
@@ -2012,8 +2012,8 @@ const GATES: &[Gate] = &[
     },
     Gate {
         src_map: 0,
-        src_x: 695,
-        src_y: 240,
+        src_x: 702,
+        src_y: 243,
         xsize: 5,
         ysize: 5,
         center_x: 0,
@@ -2236,8 +2236,8 @@ const GATES: &[Gate] = &[
     },
     Gate {
         src_map: 0,
-        src_x: 314,
-        src_y: 339,
+        src_x: 321,
+        src_y: 342,
         xsize: 4,
         ysize: 4,
         center_x: 0,
@@ -2432,8 +2432,8 @@ const GATES: &[Gate] = &[
     },
     Gate {
         src_map: 0,
-        src_x: 782,
-        src_y: 204,
+        src_x: 789,
+        src_y: 207,
         xsize: 5,
         ysize: 5,
         center_x: 0,
@@ -2530,8 +2530,8 @@ const GATES: &[Gate] = &[
     },
     Gate {
         src_map: 0,
-        src_x: 514,
-        src_y: 264,
+        src_x: 521,
+        src_y: 267,
         xsize: 4,
         ysize: 4,
         center_x: 1,
@@ -2544,8 +2544,8 @@ const GATES: &[Gate] = &[
     },
     Gate {
         src_map: 0,
-        src_x: 321,
-        src_y: 614,
+        src_x: 328,
+        src_y: 617,
         xsize: 4,
         ysize: 4,
         center_x: 0,
@@ -2712,22 +2712,8 @@ const GATES: &[Gate] = &[
     },
     Gate {
         src_map: 0,
-        src_x: 0,
-        src_y: 0,
-        xsize: 9,
-        ysize: 4,
-        center_x: 1,
-        center_y: 0,
-        dst_map: 98,
-        dst_x: 3,
-        dst_y: 47,
-        item_unique: 0,
-        item_num: 0,
-    },
-    Gate {
-        src_map: 0,
-        src_x: 526,
-        src_y: 144,
+        src_x: 533,
+        src_y: 147,
         xsize: 5,
         ysize: 5,
         center_x: 0,
@@ -2810,8 +2796,8 @@ const GATES: &[Gate] = &[
     },
     Gate {
         src_map: 0,
-        src_x: 639,
-        src_y: 531,
+        src_x: 646,
+        src_y: 534,
         xsize: 5,
         ysize: 5,
         center_x: 1,
@@ -3132,8 +3118,8 @@ const GATES: &[Gate] = &[
     },
     Gate {
         src_map: 0,
-        src_x: 723,
-        src_y: 574,
+        src_x: 730,
+        src_y: 577,
         xsize: 4,
         ysize: 3,
         center_x: 1,
@@ -3216,8 +3202,8 @@ const GATES: &[Gate] = &[
     },
     Gate {
         src_map: 0,
-        src_x: 780,
-        src_y: 641,
+        src_x: 787,
+        src_y: 644,
         xsize: 4,
         ysize: 4,
         center_x: 0,
@@ -3272,8 +3258,8 @@ const GATES: &[Gate] = &[
     },
     Gate {
         src_map: 0,
-        src_x: 503,
-        src_y: 710,
+        src_x: 510,
+        src_y: 713,
         xsize: 6,
         ysize: 6,
         center_x: 0,
@@ -3351,20 +3337,6 @@ const GATES: &[Gate] = &[
         dst_map: 94,
         dst_x: 35,
         dst_y: 72,
-        item_unique: 0,
-        item_num: 0,
-    },
-    Gate {
-        src_map: 0,
-        src_x: 212,
-        src_y: 502,
-        xsize: 4,
-        ysize: 4,
-        center_x: 0,
-        center_y: 0,
-        dst_map: 451,
-        dst_x: 130,
-        dst_y: 70,
         item_unique: 0,
         item_num: 0,
     },
@@ -3480,355 +3452,509 @@ const GATES: &[Gate] = &[
         item_unique: 0,
         item_num: 0,
     },
-    Gate {
-        src_map: 0,
-        src_x: 296,
-        src_y: 367,
-        xsize: 5,
-        ysize: 3,
-        center_x: 0,
-        center_y: 0,
-        dst_map: 425,
-        dst_x: 60,
-        dst_y: 60,
-        item_unique: 0,
-        item_num: 0,
-    },
 ];
 
 const VILLAGES: &[Village] = &[
     Village {
         unique: 1,
-        src_x: 269,
-        src_y: 325,
+        src_x: 276,
+        src_y: 328,
+        xsize: 8,
+        ysize: 8,
+        center_x: 1,
+        center_y: 1,
         dst_map: 1,
         dst_x: 24,
         dst_y: 22,
     },
     Village {
         unique: 2,
-        src_x: 214,
-        src_y: 346,
+        src_x: 221,
+        src_y: 349,
+        xsize: 8,
+        ysize: 8,
+        center_x: 1,
+        center_y: 1,
         dst_map: 2,
         dst_x: 24,
         dst_y: 22,
     },
     Village {
         unique: 3,
-        src_x: 241,
-        src_y: 303,
+        src_x: 248,
+        src_y: 306,
+        xsize: 8,
+        ysize: 8,
+        center_x: 1,
+        center_y: 1,
         dst_map: 3,
         dst_x: 24,
         dst_y: 22,
     },
     Village {
         unique: 4,
-        src_x: 277,
-        src_y: 619,
+        src_x: 284,
+        src_y: 622,
+        xsize: 8,
+        ysize: 8,
+        center_x: 1,
+        center_y: 1,
         dst_map: 4,
         dst_x: 24,
         dst_y: 22,
     },
     Village {
         unique: 5,
-        src_x: 476,
-        src_y: 132,
+        src_x: 483,
+        src_y: 135,
+        xsize: 8,
+        ysize: 8,
+        center_x: 1,
+        center_y: 1,
         dst_map: 5,
         dst_x: 24,
         dst_y: 22,
     },
     Village {
         unique: 6,
-        src_x: 280,
-        src_y: 405,
+        src_x: 287,
+        src_y: 408,
+        xsize: 8,
+        ysize: 8,
+        center_x: 1,
+        center_y: 1,
         dst_map: 6,
         dst_x: 24,
         dst_y: 22,
     },
     Village {
         unique: 7,
-        src_x: 290,
-        src_y: 214,
+        src_x: 297,
+        src_y: 217,
+        xsize: 8,
+        ysize: 8,
+        center_x: 1,
+        center_y: 1,
         dst_map: 7,
         dst_x: 24,
         dst_y: 22,
     },
     Village {
         unique: 8,
-        src_x: 377,
-        src_y: 661,
+        src_x: 384,
+        src_y: 664,
+        xsize: 8,
+        ysize: 8,
+        center_x: 1,
+        center_y: 1,
         dst_map: 8,
         dst_x: 24,
         dst_y: 22,
     },
     Village {
         unique: 9,
-        src_x: 425,
-        src_y: 52,
+        src_x: 432,
+        src_y: 55,
+        xsize: 8,
+        ysize: 8,
+        center_x: 1,
+        center_y: 1,
         dst_map: 9,
         dst_x: 24,
         dst_y: 22,
     },
     Village {
         unique: 10,
-        src_x: 448,
-        src_y: 498,
+        src_x: 455,
+        src_y: 501,
+        xsize: 8,
+        ysize: 8,
+        center_x: 1,
+        center_y: 1,
         dst_map: 10,
         dst_x: 24,
         dst_y: 22,
     },
     Village {
         unique: 11,
-        src_x: 563,
-        src_y: 238,
+        src_x: 570,
+        src_y: 241,
+        xsize: 8,
+        ysize: 8,
+        center_x: 1,
+        center_y: 1,
         dst_map: 11,
         dst_x: 24,
         dst_y: 22,
     },
     Village {
         unique: 12,
-        src_x: 591,
-        src_y: 362,
+        src_x: 598,
+        src_y: 365,
+        xsize: 8,
+        ysize: 8,
+        center_x: 1,
+        center_y: 1,
         dst_map: 12,
         dst_x: 24,
         dst_y: 22,
     },
     Village {
         unique: 13,
-        src_x: 475,
-        src_y: 413,
+        src_x: 482,
+        src_y: 416,
+        xsize: 8,
+        ysize: 8,
+        center_x: 1,
+        center_y: 1,
         dst_map: 13,
         dst_x: 24,
         dst_y: 22,
     },
     Village {
         unique: 14,
-        src_x: 437,
-        src_y: 240,
+        src_x: 444,
+        src_y: 243,
+        xsize: 8,
+        ysize: 8,
+        center_x: 1,
+        center_y: 1,
         dst_map: 14,
         dst_x: 24,
         dst_y: 22,
     },
     Village {
         unique: 15,
-        src_x: 280,
-        src_y: 694,
+        src_x: 287,
+        src_y: 697,
+        xsize: 8,
+        ysize: 8,
+        center_x: 1,
+        center_y: 1,
         dst_map: 15,
         dst_x: 24,
         dst_y: 22,
     },
     Village {
         unique: 16,
-        src_x: 241,
-        src_y: 409,
+        src_x: 248,
+        src_y: 412,
+        xsize: 8,
+        ysize: 8,
+        center_x: 1,
+        center_y: 1,
         dst_map: 16,
         dst_x: 24,
         dst_y: 22,
     },
     Village {
         unique: 17,
-        src_x: 464,
-        src_y: 722,
+        src_x: 471,
+        src_y: 725,
+        xsize: 8,
+        ysize: 8,
+        center_x: 1,
+        center_y: 1,
         dst_map: 17,
         dst_x: 24,
         dst_y: 22,
     },
     Village {
         unique: 18,
-        src_x: 252,
-        src_y: 92,
+        src_x: 259,
+        src_y: 95,
+        xsize: 8,
+        ysize: 8,
+        center_x: 1,
+        center_y: 1,
         dst_map: 18,
         dst_x: 24,
         dst_y: 22,
     },
     Village {
         unique: 19,
-        src_x: 650,
-        src_y: 376,
+        src_x: 657,
+        src_y: 379,
+        xsize: 8,
+        ysize: 8,
+        center_x: 1,
+        center_y: 1,
         dst_map: 19,
         dst_x: 24,
         dst_y: 22,
     },
     Village {
         unique: 20,
-        src_x: 641,
-        src_y: 553,
+        src_x: 648,
+        src_y: 556,
+        xsize: 8,
+        ysize: 8,
+        center_x: 1,
+        center_y: 1,
         dst_map: 20,
         dst_x: 24,
         dst_y: 22,
     },
     Village {
         unique: 21,
-        src_x: 24,
-        src_y: 629,
+        src_x: 31,
+        src_y: 632,
+        xsize: 8,
+        ysize: 8,
+        center_x: 1,
+        center_y: 1,
         dst_map: 21,
         dst_x: 24,
         dst_y: 22,
     },
     Village {
         unique: 22,
-        src_x: 754,
-        src_y: 130,
+        src_x: 761,
+        src_y: 133,
+        xsize: 8,
+        ysize: 8,
+        center_x: 1,
+        center_y: 1,
         dst_map: 22,
         dst_x: 24,
         dst_y: 22,
     },
     Village {
         unique: 23,
-        src_x: 458,
-        src_y: 572,
+        src_x: 465,
+        src_y: 575,
+        xsize: 8,
+        ysize: 8,
+        center_x: 1,
+        center_y: 1,
         dst_map: 23,
         dst_x: 24,
         dst_y: 22,
     },
     Village {
         unique: 24,
-        src_x: 473,
-        src_y: 593,
+        src_x: 480,
+        src_y: 596,
+        xsize: 8,
+        ysize: 8,
+        center_x: 1,
+        center_y: 1,
         dst_map: 24,
         dst_x: 24,
         dst_y: 22,
     },
     Village {
         unique: 25,
-        src_x: 412,
-        src_y: 655,
+        src_x: 419,
+        src_y: 658,
+        xsize: 8,
+        ysize: 8,
+        center_x: 1,
+        center_y: 1,
         dst_map: 25,
         dst_x: 24,
         dst_y: 22,
     },
     Village {
         unique: 26,
-        src_x: 458,
-        src_y: 660,
+        src_x: 465,
+        src_y: 663,
+        xsize: 8,
+        ysize: 8,
+        center_x: 1,
+        center_y: 1,
         dst_map: 26,
         dst_x: 24,
         dst_y: 22,
     },
     Village {
         unique: 27,
-        src_x: 396,
-        src_y: 591,
+        src_x: 403,
+        src_y: 594,
+        xsize: 8,
+        ysize: 8,
+        center_x: 1,
+        center_y: 1,
         dst_map: 27,
         dst_x: 24,
         dst_y: 22,
     },
     Village {
         unique: 28,
-        src_x: 415,
-        src_y: 550,
+        src_x: 422,
+        src_y: 553,
+        xsize: 8,
+        ysize: 8,
+        center_x: 1,
+        center_y: 1,
         dst_map: 28,
         dst_x: 24,
         dst_y: 22,
     },
     Village {
         unique: 29,
-        src_x: 524,
-        src_y: 514,
+        src_x: 531,
+        src_y: 517,
+        xsize: 8,
+        ysize: 8,
+        center_x: 1,
+        center_y: 1,
         dst_map: 29,
         dst_x: 24,
         dst_y: 22,
     },
     Village {
         unique: 30,
-        src_x: 616,
-        src_y: 500,
+        src_x: 623,
+        src_y: 503,
+        xsize: 8,
+        ysize: 8,
+        center_x: 1,
+        center_y: 1,
         dst_map: 30,
         dst_x: 24,
         dst_y: 22,
     },
     Village {
         unique: 31,
-        src_x: 425,
-        src_y: 438,
+        src_x: 432,
+        src_y: 441,
+        xsize: 8,
+        ysize: 8,
+        center_x: 1,
+        center_y: 1,
         dst_map: 31,
         dst_x: 24,
         dst_y: 22,
     },
     Village {
         unique: 32,
-        src_x: 449,
-        src_y: 411,
+        src_x: 456,
+        src_y: 414,
+        xsize: 8,
+        ysize: 8,
+        center_x: 1,
+        center_y: 1,
         dst_map: 32,
         dst_x: 24,
         dst_y: 22,
     },
     Village {
         unique: 33,
-        src_x: 640,
-        src_y: 281,
+        src_x: 647,
+        src_y: 284,
+        xsize: 8,
+        ysize: 8,
+        center_x: 1,
+        center_y: 1,
         dst_map: 33,
         dst_x: 24,
         dst_y: 22,
     },
     Village {
         unique: 34,
-        src_x: 188,
-        src_y: 179,
+        src_x: 195,
+        src_y: 182,
+        xsize: 8,
+        ysize: 8,
+        center_x: 1,
+        center_y: 1,
         dst_map: 34,
         dst_x: 24,
         dst_y: 22,
     },
     Village {
         unique: 35,
-        src_x: 269,
-        src_y: 243,
+        src_x: 276,
+        src_y: 246,
+        xsize: 8,
+        ysize: 8,
+        center_x: 1,
+        center_y: 1,
         dst_map: 35,
         dst_x: 24,
         dst_y: 22,
     },
     Village {
         unique: 36,
-        src_x: 298,
-        src_y: 299,
+        src_x: 305,
+        src_y: 302,
+        xsize: 8,
+        ysize: 8,
+        center_x: 1,
+        center_y: 1,
         dst_map: 36,
         dst_x: 24,
         dst_y: 22,
     },
     Village {
         unique: 37,
-        src_x: 252,
-        src_y: 478,
+        src_x: 259,
+        src_y: 481,
+        xsize: 8,
+        ysize: 8,
+        center_x: 1,
+        center_y: 1,
         dst_map: 37,
         dst_x: 24,
         dst_y: 22,
     },
     Village {
         unique: 38,
-        src_x: 302,
-        src_y: 447,
+        src_x: 309,
+        src_y: 450,
+        xsize: 8,
+        ysize: 8,
+        center_x: 1,
+        center_y: 1,
         dst_map: 38,
         dst_x: 24,
         dst_y: 22,
     },
     Village {
         unique: 39,
-        src_x: 337,
-        src_y: 482,
+        src_x: 344,
+        src_y: 485,
+        xsize: 8,
+        ysize: 8,
+        center_x: 1,
+        center_y: 1,
         dst_map: 39,
         dst_x: 24,
         dst_y: 22,
     },
     Village {
         unique: 40,
-        src_x: 357,
-        src_y: 410,
+        src_x: 364,
+        src_y: 413,
+        xsize: 8,
+        ysize: 8,
+        center_x: 1,
+        center_y: 1,
         dst_map: 40,
         dst_x: 24,
         dst_y: 22,
     },
     Village {
         unique: 41,
-        src_x: 272,
-        src_y: 522,
+        src_x: 279,
+        src_y: 525,
+        xsize: 8,
+        ysize: 8,
+        center_x: 1,
+        center_y: 1,
         dst_map: 41,
         dst_x: 24,
         dst_y: 22,
     },
     Village {
         unique: 42,
-        src_x: 299,
-        src_y: 660,
+        src_x: 306,
+        src_y: 663,
+        xsize: 8,
+        ysize: 8,
+        center_x: 1,
+        center_y: 1,
         dst_map: 42,
         dst_x: 24,
         dst_y: 22,
@@ -4018,6 +4144,15 @@ struct Village {
     src_x: i32,
     /// `PosY` on map 0.
     src_y: i32,
+    /// The entrance object's `TileXsize` — 8
+    /// (`KoreanVillageSmall` / `KoreanVillageSmallUp`, both `8 8 1 1`).
+    xsize: i32,
+    /// See [`Village::xsize`].
+    ysize: i32,
+    /// The entrance object's `TileCenterX`.
+    center_x: i32,
+    /// See [`Village::center_x`].
+    center_y: i32,
     /// `MapIndex` — the village's own map (`siVillageUnique`, `char.cpp:9008`).
     dst_map: i32,
     /// That map type's `CenterX` (`char.cpp:9011`).
@@ -4033,9 +4168,24 @@ struct Village {
 /// size from. So this matches the entrance tile itself for now, and
 /// [`village_within`] reports the cells a player actually clicks so the block can be
 /// measured rather than guessed.
+impl Village {
+    /// The stamped block as `(left, top, right, bottom)`, inclusive.
+    pub(crate) const fn block(&self) -> (i32, i32, i32, i32) {
+        let left = self.src_x + self.center_x - self.xsize + 1;
+        let top = self.src_y + self.center_y - self.ysize + 1;
+        (left, top, left + self.xsize - 1, top + self.ysize - 1)
+    }
+
+    /// Whether `(x, y)` is one of the entrance's cells.
+    pub(crate) const fn covers(&self, x: i32, y: i32) -> bool {
+        let (left, top, _, _) = self.block();
+        x >= left && x < left + self.xsize && y >= top && y < top + self.ysize
+    }
+}
+
 fn village_at(map_id: i32, x: i32, y: i32) -> Option<&'static Village> {
     (map_id == 0).then_some(())?;
-    VILLAGES.iter().find(|v| v.src_x == x && v.src_y == y)
+    VILLAGES.iter().find(|v| v.covers(x, y))
 }
 
 /// The village entrance nearest `(map_id, x, y)` within `radius`, and how far it is.
@@ -4049,7 +4199,10 @@ fn village_within(map_id: i32, x: i32, y: i32, radius: i32) -> Option<(&'static 
     VILLAGES
         .iter()
         .filter_map(|v| {
-            let distance = (v.src_x - x).abs().max((v.src_y - y).abs());
+            let (left, top, right, bottom) = v.block();
+            let dx = (left - x).max(x - right).max(0);
+            let dy = (top - y).max(y - bottom).max(0);
+            let distance = dx.max(dy);
             (distance <= radius).then_some((v, distance))
         })
         .min_by_key(|(_, distance)| *distance)
@@ -5163,7 +5316,10 @@ mod tests {
         // The entry requirement, straight off the gate rows: exactly eight gates in the
         // file carry one, and the Raccoon Lair (row 561, anchor map 0 (224,314)) is the
         // one a player meets first — item 24107, one of them (`char.cpp:9123-9133`).
-        let lair = gate_at(0, 224, 314).expect("the Raccoon Lair gate");
+        let lair = GATES
+            .iter()
+            .find(|g| g.dst_map == 320)
+            .expect("the Raccoon Lair gate");
         assert_eq!(
             (lair.dst_map, lair.item_unique, lair.item_num),
             (320, 24107, 1)
@@ -5173,8 +5329,9 @@ mod tests {
             .filter(|g| g.item_unique > 0 && g.item_num > 0)
             .count();
         assert_eq!(gated, 8, "the file's gated rows");
-        // Hanyang's exits and the mine take nothing.
-        for (map, x, y) in [(158, 14, 90), (158, 28, 101), (158, 41, 90), (0, 402, 580)] {
+        // Hanyang's exits and the mine take nothing. The mine is looked up in its
+        // measured block (the text marker (402,580) is a few cells off it).
+        for (map, x, y) in [(158, 14, 90), (158, 28, 101), (158, 41, 90), (0, 407, 580)] {
             let gate = gate_at(map, x, y).unwrap_or_else(|| panic!("({map}, {x}, {y})"));
             assert_eq!(
                 (gate.item_unique, gate.item_num),
@@ -5235,8 +5392,18 @@ mod tests {
         assert_eq!(revive_target(9, 158), REVIVE_PALACE);
         // At or above it, a dungeon returns to the map that gate-enters it
         // (`char.cpp:4914-4917`): the Lair to its mouth on map 0, the mine likewise.
-        assert_eq!(revive_target(10, 320), (0, 224, 314));
-        assert_eq!(revive_target(30, 157), (0, 402, 580));
+        // Read the row rather than hard-coding: the anchor is the *stamped* block's,
+        // measured from the map file, not the text file's editor marker.
+        for map_id in [320, 157] {
+            let entrance = GATES
+                .iter()
+                .find(|g| g.dst_map == map_id)
+                .unwrap_or_else(|| panic!("no entrance into map {map_id}"));
+            assert_eq!(
+                revive_target(30, map_id),
+                (entrance.src_map, entrance.src_x, entrance.src_y)
+            );
+        }
         // A town keeps you in a town: the palace is entered by a gate row too, and
         // sending a Hanyang character outside to that gate would not be "the nearest
         // town".
@@ -5253,7 +5420,7 @@ mod tests {
     /// `MapTypeInfo.txt:24`).
     #[test]
     fn a_village_entrance_warps_to_its_own_map_centre() {
-        let ankaran = village_at(0, 269, 325).expect("Ankaran's entrance");
+        let ankaran = village_at(0, 270, 322).expect("Ankaran's entrance");
         assert_eq!(
             (
                 ankaran.unique,
@@ -5263,7 +5430,7 @@ mod tests {
             ),
             (1, 1, 24, 22)
         );
-        let talasha = village_at(0, 241, 303).expect("Talasha's entrance");
+        let talasha = village_at(0, 242, 300).expect("Talasha's entrance");
         assert_eq!(
             (
                 talasha.unique,
@@ -5282,11 +5449,37 @@ mod tests {
         assert!(VILLAGES.len() >= 4, "only {} villages", VILLAGES.len());
         // Villages live on the world map, so nothing else answers.
         assert!(village_at(158, 269, 325).is_none());
-        assert!(village_at(0, 268, 325).is_none());
-        // The diagnostic finds the entrance from a neighbouring cell.
-        let (near, distance) = village_within(0, 268, 324, 3).expect("one diagonal away");
-        assert_eq!((near.unique, distance), (1, 1));
-        assert!(village_within(158, 269, 325, 3).is_none());
+        // The measured blocks from MainMap.map's para grid: Ankaran's entrance occupies
+        // x[270..277] y[322..329], Talasha's x[242..249] y[300..307].
+        let (left, top, right, bottom) = ankaran.block();
+        assert_eq!((left, top, right, bottom), (270, 322, 277, 329));
+        let (left, top, right, bottom) = talasha.block();
+        assert_eq!((left, top, right, bottom), (242, 300, 249, 307));
+        // A click anywhere in a town's entrance counts, one cell outside it does not.
+        assert!(village_at(0, 270, 322).is_some());
+        assert!(village_at(0, 277, 329).is_some());
+        assert!(village_at(0, 269, 325).is_none());
+        assert!(village_at(0, 278, 330).is_none());
+        // The diagnostic measures to the block: (268,324) is two tiles left of it.
+        let (near, distance) = village_within(0, 268, 324, 3).expect("two tiles away");
+        assert_eq!((near.unique, distance), (1, 2));
+        assert!(village_within(158, 270, 322, 3).is_none());
+    }
+
+    /// The mine's gate is the case that failed live: `GateInfoE.txt:19` declares its
+    /// source at (402,580), while the shipped `MainMap.map` stamps the object at
+    /// x[407..410] y[580..584]. The table now carries the measured anchor, so a click on
+    /// the block is a gate and the old text cell is not.
+    #[test]
+    fn the_mine_gate_uses_the_measured_block_not_the_text_marker() {
+        let gate = gate_at(0, 407, 580).expect("the measured block");
+        assert_eq!((gate.dst_map, gate.dst_x, gate.dst_y), (157, 60, 97));
+        let (left, top, right, bottom) = gate.block();
+        assert_eq!((left, top, right, bottom), (407, 580, 410, 584));
+        assert!(
+            gate_at(0, 402, 580).is_none(),
+            "the editor's marker is not the object"
+        );
     }
 
     #[test]

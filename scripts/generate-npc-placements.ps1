@@ -258,8 +258,86 @@ function Get-FieldObjectFootprint([int]$unique) {
     return $footprint
 }
 
+# --- map 0's stamped blocks, read from the map file --------------------------
+#
+# `GateInfoE.txt`'s `SrcX`/`SrcY` is the map editor's marker, not the cell
+# `PutFieldObject` stamped first: reading the shipped `MainMap.map` shows the marker sitting
+# anywhere from +1 to +5 cells inside the block, which is why the mine's gate (text 402,580)
+# never matched a click in-game. The stamped block itself is in the map's field-object grid:
+#
+#   `map-save.cpp:44-55` is the file order - header (324 B, `map.h:176-194`), IDMap
+#   (2*W*H), CollMap (2*W*H), layer 0, layer 1, FieldObjectMap (4*W*H),
+#   **FieldObjectMapPara** (4*W*H), geometry. `Map-FieldObject.cpp:253` reads the para grid
+#   as `pFieldObjectMapPara[x + YOff[y]]`.
+#
+# W, H and the grid's start are measured from the file and self-checked below: gate 306's
+# block shows up as runs of 9 going right and 4 down, giving 3200 bytes per row (W = 800),
+# and its first hit at cell (291,350) fixes `para_start = 12631712 - 4*(291 + 350*800)`.
+$MapFile = Join-Path $DataRoot 'Map\MainMap\MainMap.map'
+if (-not (Test-Path $MapFile)) { throw "map file not found: '$MapFile' (set -DataRoot)" }
+$MapWidth = 800
+$MapHeight = 1000
+$MapParaStart = 12631712 - 4 * (291 + 350 * $MapWidth)
+$mapBytes = [System.IO.File]::ReadAllBytes($MapFile)
+if ($mapBytes.Length -lt ($MapParaStart + 4 * $MapWidth * $MapHeight)) {
+    throw "$($MapFile): too short for an $MapWidth x $MapHeight para grid at $MapParaStart"
+}
+
+function Read-ParaCell([int]$x, [int]$y) {
+    if ($x -lt 0 -or $y -lt 0 -or $x -ge $MapWidth -or $y -ge $MapHeight) { return -1 }
+    return [System.BitConverter]::ToInt32($mapBytes, $MapParaStart + 4 * ($x + $y * $MapWidth))
+}
+
+function Get-StampedBlock([int]$value, [int]$nearX, [int]$nearY, [int]$xsize, [int]$ysize, [int]$centerX, [int]$centerY) {
+    # Find a cell of the block near the editor's marker, then measure its extent.
+    $found = $false
+    $seedX = 0
+    $seedY = 0
+    for ($radius = 0; $radius -le 12 -and -not $found; $radius++) {
+        for ($dy = -$radius; $dy -le $radius -and -not $found; $dy++) {
+            for ($dx = -$radius; $dx -le $radius; $dx++) {
+                if ([Math]::Abs($dx) -ne $radius -and [Math]::Abs($dy) -ne $radius) { continue }
+                if ((Read-ParaCell ([int]$nearX + [int]$dx) ([int]$nearY + [int]$dy)) -eq $value) {
+                    $seedX = [int]$nearX + [int]$dx
+                    $seedY = [int]$nearY + [int]$dy
+                    $found = $true
+                    break
+                }
+            }
+        }
+    }
+    if (-not $found) {
+        # A row declared with a placeholder source (0,0) and others like it are not stamped
+        # into map 0's grid at all - the object never existed on this map, so the row is
+        # dead in-game. Report it and let the caller drop it.
+        return $null
+    }
+    $left = $seedX; $right = $seedX; $top = $seedY; $bottom = $seedY
+    while ((Read-ParaCell ($left - 1) $seedY) -eq $value) { $left-- }
+    while ((Read-ParaCell ($right + 1) $seedY) -eq $value) { $right++ }
+    while ((Read-ParaCell $seedX ($top - 1)) -eq $value) { $top-- }
+    while ((Read-ParaCell $seedX ($bottom + 1)) -eq $value) { $bottom++ }
+    # PutFieldObject stamps `x = anchor + center - size + 1 + j`, so the block ends at
+    # `anchor + center`: invert that to the anchor the table stores, and check the result
+    # reproduces the measured rectangle exactly.
+    $anchorX = $right - $centerX
+    $anchorY = $bottom - $centerY
+    $checkLeft = $anchorX + $centerX - $xsize + 1
+    $checkTop = $anchorY + $centerY - $ysize + 1
+    if ($checkLeft -ne $left -or $checkTop -ne $top -or
+        ($checkLeft + $xsize - 1) -ne $right -or ($checkTop + $ysize - 1) -ne $bottom) {
+        # The shipped grid disagrees with the object's declared size for this row - some
+        # rows in `GateInfoE.txt` are leftovers whose ids collide with something else. The
+        # placement is the authority, so the row is reported and dropped rather than
+        # emitted with a block that does not exist.
+        return $null
+    }
+    return @($anchorX, $anchorY)
+}
+
 $gates = New-Object 'System.Collections.Generic.List[object]'
 $gateSkipped = New-Object 'System.Collections.Generic.List[string]'
+$gateUnplaced = New-Object 'System.Collections.Generic.List[string]'
 $gateSeenTiles = @{}
 $gateSeenCells = @{}
 $inData = $false
@@ -284,6 +362,22 @@ foreach ($line in [System.IO.File]::ReadAllLines($gateFile, [System.Text.Encodin
     $centerX = $footprint[2]
     $centerY = $footprint[3]
 
+    # On map 0 the block is measured from the map file rather than derived from the
+    # editor's marker (see the note above `Get-StampedBlock`). Every other source map keeps
+    # the text anchor: this port has no reader for those map files yet, so their blocks stay
+    # the formula's, and the card says so.
+    $srcX = $nums[6]
+    $srcY = $nums[7]
+    if ($srcMap -eq 0) {
+        $anchor = Get-StampedBlock $nums[0] $srcX $srcY $xsize $ysize $centerX $centerY
+        if ($null -eq $anchor) {
+            $gateUnplaced.Add("gate $($nums[0]) -> map ${dstMap}: declared at ($srcX,$srcY) but not stamped in MainMap.map")
+            continue
+        }
+        $srcX = $anchor[0]
+        $srcY = $anchor[1]
+    }
+
     # `PutFieldObject` refuses a block that overlaps one already stamped
     # (`Map-FieldObject.cpp:88-97`), and the client's gate table is keyed by unique
     # (`IsEnterGate`, `Client.cpp:8128`), so two rows cannot both own a cell. The file
@@ -294,8 +388,8 @@ foreach ($line in [System.IO.File]::ReadAllLines($gateFile, [System.Text.Encodin
     $overlap = $null
     for ($i = 0; $i -lt $ysize; $i++) {
         for ($j = 0; $j -lt $xsize; $j++) {
-            $x = $nums[6] + $centerX - $xsize + 1 + $j
-            $y = $nums[7] + $centerY - $ysize + 1 + $i
+            $x = $srcX + $centerX - $xsize + 1 + $j
+            $y = $srcY + $centerY - $ysize + 1 + $i
             $cellKey = "$srcMap/$x/$y"
             if ($gateSeenCells.ContainsKey($cellKey)) { $overlap = "$($gateSeenCells[$cellKey]) at $cellKey"; break }
             $cells += $cellKey
@@ -303,7 +397,7 @@ foreach ($line in [System.IO.File]::ReadAllLines($gateFile, [System.Text.Encodin
         if ($overlap) { break }
     }
     if ($overlap) {
-        $gateSkipped.Add("gate $($nums[0]) at $srcMap/$($nums[6])/$($nums[7]) -> $dstMap/$($nums[9])/$($nums[10]): block already claimed by $overlap")
+        $gateSkipped.Add("gate $($nums[0]) at $srcMap/$srcX/$srcY -> $dstMap/$($nums[9])/$($nums[10]): block already claimed by $overlap")
         continue
     }
     $tileKey = "$srcMap/$($nums[6])/$($nums[7])"
@@ -312,8 +406,8 @@ foreach ($line in [System.IO.File]::ReadAllLines($gateFile, [System.Text.Encodin
 
     $gates.Add([pscustomobject]@{
         SrcMap  = $srcMap
-        SrcX    = $nums[6]
-        SrcY    = $nums[7]
+        SrcX    = $srcX
+        SrcY    = $srcY
         Xsize   = $xsize
         Ysize   = $ysize
         CenterX = $centerX
@@ -452,13 +546,26 @@ foreach ($line in [System.IO.File]::ReadAllLines($villageFile, [System.Text.Enco
         throw "village ${unique}: no centre for map $dstMap (type '$typeName')"
     }
     $centre = $centerOfTypeName[$typeName]
+    # The entrance object is `KoreanVillageSmall` (FOUnique 1) or `KoreanVillageSmallUp`
+    # (FOUnique 5); both detail files read `8 8 1 1 19 1 9 2`
+    # (`FieldObject\Korean.mz -> KoreanVillageSmall/KoreanVillageSmall.txt`), so the block is
+    # 8x8 with centre (1,1). `Get-StampedBlock` then measures the shipped block and derives
+    # the anchor, throwing if the size does not reproduce it.
+    $anchor = Get-StampedBlock $unique $srcX $srcY 8 8 1 1
+    if ($null -eq $anchor) {
+        throw "village ${unique}: declared at ($srcX,$srcY) but not stamped in MainMap.map"
+    }
     $villages.Add([pscustomobject]@{
-        Unique = $unique
-        SrcX   = $srcX
-        SrcY   = $srcY
-        DstMap = $dstMap
-        DstX   = $centre[0]
-        DstY   = $centre[1]
+        Unique  = $unique
+        SrcX    = $anchor[0]
+        SrcY    = $anchor[1]
+        Xsize   = 8
+        Ysize   = 8
+        CenterX = 1
+        CenterY = 1
+        DstMap  = $dstMap
+        DstX    = $centre[0]
+        DstY    = $centre[1]
     })
 }
 if ($villages.Count -eq 0) { throw "no village rows found in $villageFile" }
@@ -469,13 +576,17 @@ $villageBody = @($villageSorted | ForEach-Object {
         "        unique: $($_.Unique),",
         "        src_x: $($_.SrcX),",
         "        src_y: $($_.SrcY),",
+        "        xsize: $($_.Xsize),",
+        "        ysize: $($_.Ysize),",
+        "        center_x: $($_.CenterX),",
+        "        center_y: $($_.CenterY),",
         "        dst_map: $($_.DstMap),",
         "        dst_x: $($_.DstX),",
         "        dst_y: $($_.DstY),",
         "    },"
     )
 })
-$villageGenerated = @($villageSorted | ForEach-Object { '{0}/{1}/{2}/{3}/{4}/{5}' -f $_.Unique, $_.SrcX, $_.SrcY, $_.DstMap, $_.DstX, $_.DstY })
+$villageGenerated = @($villageSorted | ForEach-Object { '{0}/{1}/{2}/{3}/{4}/{5}/{6}/{7}/{8}/{9}' -f $_.Unique, $_.SrcX, $_.SrcY, $_.Xsize, $_.Ysize, $_.CenterX, $_.CenterY, $_.DstMap, $_.DstX, $_.DstY })
 
 if ($Check) {
     if ($Table -ne 'gate') {
@@ -532,13 +643,14 @@ if ($Check) {
             'const VILLAGES: &\[Village\] = &\[(.*?)\];',
             [System.Text.RegularExpressions.RegexOptions]::Singleline)
         if (-not $tableMatch.Success) { throw "no VILLAGES table found in $GateRustPath" }
-        $pattern = 'Village\s*\{\s*unique:\s*(\d+)\s*,\s*src_x:\s*(\d+)\s*,\s*src_y:\s*(\d+)\s*,\s*dst_map:\s*(\d+)\s*,\s*dst_x:\s*(\d+)\s*,\s*dst_y:\s*(\d+)\s*,?\s*\}'
+        $pattern = 'Village\s*\{\s*unique:\s*(\d+)\s*,\s*src_x:\s*(\d+)\s*,\s*src_y:\s*(\d+)\s*,\s*xsize:\s*(\d+)\s*,\s*ysize:\s*(\d+)\s*,\s*center_x:\s*(-?\d+)\s*,\s*center_y:\s*(-?\d+)\s*,\s*dst_map:\s*(\d+)\s*,\s*dst_x:\s*(\d+)\s*,\s*dst_y:\s*(\d+)\s*,?\s*\}'
         $committed = @([regex]::Matches(
                 $tableMatch.Groups[1].Value,
                 $pattern,
                 [System.Text.RegularExpressions.RegexOptions]::Singleline) | ForEach-Object {
-            '{0}/{1}/{2}/{3}/{4}/{5}' -f $_.Groups[1].Value, $_.Groups[2].Value, $_.Groups[3].Value,
-                $_.Groups[4].Value, $_.Groups[5].Value, $_.Groups[6].Value
+            '{0}/{1}/{2}/{3}/{4}/{5}/{6}/{7}/{8}/{9}' -f $_.Groups[1].Value, $_.Groups[2].Value, $_.Groups[3].Value,
+                $_.Groups[4].Value, $_.Groups[5].Value, $_.Groups[6].Value, $_.Groups[7].Value,
+                $_.Groups[8].Value, $_.Groups[9].Value, $_.Groups[10].Value
         })
         if (($villageGenerated -join ';') -ne ($committed -join ';')) {
             throw "VILLAGES is stale: $($villageGenerated.Count) generated vs $($committed.Count) committed. Re-run without -Check and paste the block."
