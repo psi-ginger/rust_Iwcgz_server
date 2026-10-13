@@ -103,7 +103,7 @@ impl Gate {
     pub(crate) const fn covers(&self, x: i32, y: i32) -> bool {
         let left = self.src_x + GATE_TILE_CENTER_X - GATE_TILE_XSIZE + 1;
         let top = self.src_y + GATE_TILE_CENTER_Y - GATE_TILE_YSIZE + 1;
-        x >= left && x <= left + GATE_TILE_XSIZE - 1 && y >= top && y <= top + GATE_TILE_YSIZE - 1
+        x >= left && x < left + GATE_TILE_XSIZE && y >= top && y < top + GATE_TILE_YSIZE
     }
 }
 
