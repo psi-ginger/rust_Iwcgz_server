@@ -117,8 +117,9 @@ pub(crate) use quest::{
 // the frame builders through `super::*`, hence the allow.
 #[allow(unused_imports)]
 pub(crate) use movement::{
-    Movement, char_update_body, fan_char_update, handle_leave_request, handle_sit_down,
-    handle_userorder, logout_departed, next_move_deadline, send_char_update, step_movement,
+    Movement, char_update_body, fan_char_update, handle_leave_request, handle_revive,
+    handle_sit_down, handle_userorder, logout_departed, next_move_deadline, send_char_update,
+    step_movement,
 };
 
 // The stats family lives in `stats.rs`. The dispatcher calls the 230 and 250
@@ -910,6 +911,18 @@ async fn handle_client(
                         &items,
                         character_id,
                         cell,
+                        payload.as_ref(),
+                    )
+                    .await?;
+                }
+                c if c == GameMsg::RequestRevive as u16 => {
+                    handle_revive(
+                        &mut stream,
+                        &mut outbound,
+                        &characters,
+                        &registry,
+                        session_key,
+                        &mut live,
                         payload.as_ref(),
                     )
                     .await?;

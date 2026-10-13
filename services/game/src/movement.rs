@@ -3535,6 +3535,133 @@ fn gate_at(map_id: i32, x: i32, y: i32) -> Option<&'static Gate> {
     GATES.iter().find(|g| g.src_map == map_id && g.covers(x, y))
 }
 
+/// `INIT_LEVEL` — the level below which a revive always returns to the palace
+/// (`CommonHeader.h:672`, `#define INIT_LEVEL 10`).
+pub(crate) const INIT_LEVEL: i16 = 10;
+
+/// `MAPINDEX_PALACE` at the tile the login spawn uses — where `Revive()` sends every
+/// branch that has no better answer (`char.cpp:4923`, `:5000`, `:5009`, `:5019`,
+/// `:5045`, `:5061`, all `cltWarpInfo(1, MAPINDEX_PALACE, false, false, 27, 87, …)`).
+pub(crate) const REVIVE_PALACE: (i32, i32, i32) = (158, 27, 87);
+
+/// The maps this port treats as towns, so a revive inside one stays there rather than
+/// being sent to the map that gate-enters it.
+fn is_town(map_id: i32) -> bool {
+    map_id == 0 || map_id == REVIVE_PALACE.0
+}
+
+/// Where a revive sends a character, in `cltCharServer::Revive()`'s own order
+/// (`char.cpp:4887-5100`).
+///
+/// Kept:
+///
+/// 1. **`level < INIT_LEVEL` → palace (158) at (27,87)** — `:5027-5046`, and it runs
+///    *before* the village branch, so a beginner always lands in Hanyang even when a
+///    nearer village resolved (`:5069-5085`).
+/// 2. **A dungeon returns to the map it is entered from** — the hunt-map rule at
+///    `:4914-4917` sets the parent map as the destination. This port has no map table,
+///    so the parent is read off the gate table: the row that enters the map names it
+///    (for the Raccoon Lair, row 561's source map 0 at (224,314) — its mouth).
+/// 3. The palace fallback (`:5007-5013`).
+///
+/// Not modelled, and why: the instance-map branches (`:4955-5015`) need instance maps;
+/// `KILLEDMODE_GOTOSAFEZONE` (`:5017-5025`) needs death modes; the PK-map switch
+/// (`:5057-5068`) is off in this port's SERVERINFO; and the nearest-village branch
+/// (`:5069-5085`, which warps to the village map's **centre** from the map type) needs
+/// the village table (`Data\villageinfoE.txt`) and the map-type table, neither of which
+/// is loaded here.
+#[must_use]
+pub(crate) fn revive_target(level: i16, map_id: i32) -> (i32, i32, i32) {
+    if level < INIT_LEVEL {
+        return REVIVE_PALACE;
+    }
+    if !is_town(map_id)
+        && let Some(entrance) = GATES.iter().find(|g| g.dst_map == map_id)
+    {
+        return (entrance.src_map, entrance.src_x, entrance.src_y);
+    }
+    REVIVE_PALACE
+}
+
+/// `GAMEMSG_REQUEST_REVIVE` (7225) — the client's revive prompt.
+///
+/// The body is `cltGameMsgRequest_Revive` (`MsgType-Person.h:1448-1460`): three
+/// `SI16`s — `siCharUnique`, `siParam`, `siDieMode`. The client fills it from its death
+/// dialog (`NCommonMsgDlg.cpp:172-178`, `(charid, 1, NORMAL)`), and the handler is a
+/// thin shell around `Revive()`: `Server-Person.cpp:3330-3345` validates the id, applies
+/// a one-second throttle, and calls it — there is **no HP check**, so the packet is
+/// honoured whatever state the character is in.
+///
+/// The warp itself reuses the gate path with a synthesised one-cell gate: a revive and a
+/// gate differ only in how the destination is chosen, and both end in the same
+/// `SetWarpInfo`/`Warp` pair the client is told about
+/// (`char.cpp:5080-5084`). The gate path's own entry-item check sees 0/0 and stays out
+/// of the way.
+///
+/// # Errors
+///
+/// A short body is logged and ignored, like the rest of this family; repository and
+/// socket failures propagate.
+pub(crate) async fn handle_revive(
+    stream: &mut TcpStream,
+    outbound: &mut Cipher,
+    characters: &PgCharacterRepository,
+    registry: &Registry,
+    session_key: SessionKey,
+    live: &mut LiveFrames<'_>,
+    payload: &[u8],
+) -> Result<(), AnyError> {
+    const REVIVE_REQUEST_SIZE: usize = 6;
+    if payload.len() < REVIVE_REQUEST_SIZE {
+        logln!("game: malformed 7225 ({} bytes) — ignored", payload.len());
+        return Ok(());
+    }
+    let named = i16::from_le_bytes([payload[0], payload[1]]);
+    let die_mode = i16::from_le_bytes([payload[4], payload[5]]);
+    // `:3341` — a request that does not name this session's character is dropped.
+    if i32::from(named) != live.char_unique {
+        logln!(
+            "game: revive for char {named} ignored: this session is {}",
+            live.char_unique
+        );
+        return Ok(());
+    }
+    let Some(character) = live.character.as_ref() else {
+        logln!("game: revive before the character row is loaded — ignored");
+        return Ok(());
+    };
+    let (from_map, level) = (character.map_id, character.level);
+    let (dst_map, x, y) = revive_target(level, from_map);
+    logln!(
+        "game: revive: char {} (level {level}, mode {die_mode}) on map {from_map} -> map {dst_map} at ({x}, {y})",
+        character.character_id
+    );
+    let gate = Gate {
+        src_map: from_map,
+        src_x: 0,
+        src_y: 0,
+        xsize: 1,
+        ysize: 1,
+        center_x: 0,
+        center_y: 0,
+        item_unique: 0,
+        item_num: 0,
+        dst_map,
+        dst_x: x,
+        dst_y: y,
+    };
+    warp_through_gate(
+        stream,
+        outbound,
+        characters,
+        registry,
+        session_key,
+        live,
+        &gate,
+    )
+    .await
+}
+
 /// The gate nearest `(map_id, x, y)` within `radius` tiles, and how far it is.
 ///
 /// Diagnostic only. The live run of 2026-10-13 had the player clicking (26,100),
@@ -4623,6 +4750,28 @@ mod tests {
         assert!(gate_at(0, 291, 350).is_some_and(|g| g.dst_map == 158));
         // A gate block is not honoured on another map.
         assert!(gate_at(109, 28, 101).is_none());
+    }
+
+    /// `Revive()`'s destination rules, and the two facts that decide them: `INIT_LEVEL`
+    /// is 10 (`CommonHeader.h:672`) and the palace spawn is (158, 27, 87)
+    /// (`char.cpp:5045`).
+    #[test]
+    fn a_revive_sends_beginners_to_hanyang_and_dungeon_dwellers_back_to_the_mouth() {
+        // Below 10: always Hanyang, whatever map they died on (`char.cpp:5027-5046`).
+        assert_eq!(revive_target(1, 320), REVIVE_PALACE);
+        assert_eq!(revive_target(9, 0), REVIVE_PALACE);
+        assert_eq!(revive_target(9, 158), REVIVE_PALACE);
+        // At or above it, a dungeon returns to the map that gate-enters it
+        // (`char.cpp:4914-4917`): the Lair to its mouth on map 0, the mine likewise.
+        assert_eq!(revive_target(10, 320), (0, 224, 314));
+        assert_eq!(revive_target(30, 157), (0, 402, 580));
+        // A town keeps you in a town: the palace is entered by a gate row too, and
+        // sending a Hanyang character outside to that gate would not be "the nearest
+        // town".
+        assert_eq!(revive_target(30, 158), REVIVE_PALACE);
+        assert_eq!(revive_target(30, 0), REVIVE_PALACE);
+        // A map nothing enters falls back to the palace (`char.cpp:5007-5013`).
+        assert_eq!(revive_target(30, 999), REVIVE_PALACE);
     }
 
     #[test]
