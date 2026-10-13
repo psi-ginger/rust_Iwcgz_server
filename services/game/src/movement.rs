@@ -93,12 +93,47 @@ const GATES: &[Gate] = &[
     },
 ];
 
-/// The gate standing on `(map_id, x, y)`, if any.
-fn gate_at(map_id: i32, x: i32, y: i32) -> Option<&'static Gate> {
-    GATES
-        .iter()
-        .find(|g| g.src_map == map_id && g.src_x == x && g.src_y == y)
+/// The tile block one gate covers, `PutFieldObject`'s formula made explicit.
+impl Gate {
+    /// Whether `(x, y)` is one of the cells this gate's object occupies.
+    ///
+    /// `Map-FieldObject.cpp:102-107`: the object is stamped for `j` in
+    /// `0..TileXsize` at `x = anchor + TileCenterX - TileXsize + 1 + j`, and likewise
+    /// for `y`. With `Gate_Warp01`'s `4 4 0 0` the block ends at the anchor.
+    pub(crate) const fn covers(&self, x: i32, y: i32) -> bool {
+        let left = self.src_x + GATE_TILE_CENTER_X - GATE_TILE_XSIZE + 1;
+        let top = self.src_y + GATE_TILE_CENTER_Y - GATE_TILE_YSIZE + 1;
+        x >= left && x <= left + GATE_TILE_XSIZE - 1 && y >= top && y <= top + GATE_TILE_YSIZE - 1
+    }
 }
+
+/// The gate covering `(map_id, x, y)`, if any.
+///
+/// The gate is a **field object**, not a tile: `cltUnderMouseObject::FindGate`
+/// (`UnderMouseObject.cpp:290-307`) resolves a click by the object on the cell, and
+/// `PutFieldObject` (`Map-FieldObject.cpp:66-130`) stamps the object's whole block — so
+/// every cell of the block is that gate. `GateInfoE.txt` gives the block's anchor, and
+/// `Gate_Warp01`'s own detail file gives its size (see [`GATE_TILE_XSIZE`]).
+fn gate_at(map_id: i32, x: i32, y: i32) -> Option<&'static Gate> {
+    GATES.iter().find(|g| g.src_map == map_id && g.covers(x, y))
+}
+
+/// `Gate_Warp01`'s `TileXsize` / `TileYsize`, from the object's own detail file —
+/// `FieldObject\Gate.mz → Gate_Warp01/Gate_Warp01.txt`, whose data line is `4 4 0 0 0 0
+/// 15 2` (`TileXsize TileYsize TileCenterX TileCenterY …`).
+///
+/// That is the file `cltFieldObjectInfo::LoadDetailInfo` reads (`FieldObject.cpp:325-399`)
+/// before `cltMapCommon::PutFieldObject` stamps the object into the collision grid, and the
+/// Hanyang exits' `FOUnique` is 7023 = `FOTYPE_GATE Gate_Warp01`
+/// (`FieldObjectSetInfo.txt:1236`). The stamped block ends at the anchor because the centre
+/// offsets are zero: `x = six - xsize + 1 + j`, `y = siy - ysize + 1 + i`.
+const GATE_TILE_XSIZE: i32 = 4;
+/// See [`GATE_TILE_XSIZE`].
+const GATE_TILE_YSIZE: i32 = 4;
+/// `Gate_Warp01`'s `TileCenterX`.
+const GATE_TILE_CENTER_X: i32 = 0;
+/// `Gate_Warp01`'s `TileCenterY`.
+const GATE_TILE_CENTER_Y: i32 = 0;
 
 /// The gate nearest `(map_id, x, y)` within `radius` tiles, and how far it is.
 ///
@@ -1079,33 +1114,53 @@ mod tests {
     /// (`gz_proto::game::client_map_index`).
     /// The step-onto path and the near-gate diagnostic both hang off these two
     /// lookups, so their semantics are pinned here.
+    ///
+    /// The gate is a **4×4 block ending at the anchor**: `PutFieldObject`
+    /// (`Map-FieldObject.cpp:102-107`) stamps `x = six + centerx - xsize + 1 + j` and
+    /// `y = siy + centery - ysize + 1 + i` with `Gate_Warp01`'s own `4 4 0 0`.
     #[test]
-    fn a_committed_tile_is_a_gate_only_on_the_recorded_cells() {
-        // The three map-158 exits, straight out of `GateInfoE.txt` (rows 307-309).
-        assert!(gate_at(158, 14, 90).is_some_and(|g| g.dst_map == 0));
+    fn every_cell_of_the_gate_block_is_the_gate() {
+        // Map 158's centre exit is row 308 of `GateInfoE.txt`: (28, 101) -> map 0 (288, 354).
         assert!(gate_at(158, 28, 101).is_some_and(|g| g.dst_map == 0));
-        assert!(gate_at(158, 41, 90).is_some_and(|g| g.dst_map == 0));
-        // The cells the live run actually ordered to are *not* gates. Until the
-        // footprint is measured, one tile off is still one tile off.
-        for (x, y) in [(26, 100), (27, 100), (26, 101), (28, 99)] {
+        // Once more for the anchor binding, then the block: x in [25, 28], y in [98, 101].
+        // The cells the live run actually ordered to are inside it, which is the finding.
+        for (x, y) in [
+            (26, 98),
+            (26, 100),
+            (27, 100),
+            (26, 101),
+            (28, 99),
+            (25, 98),
+        ] {
             assert!(
-                gate_at(158, x, y).is_none(),
-                "({x}, {y}) must not be a gate"
+                gate_at(158, x, y).is_some(),
+                "({x}, {y}) is inside the circle"
             );
         }
-        // A gate on another map is not this map's gate.
-        assert!(gate_at(0, 14, 90).is_none());
+        // One cell outside the block on each side is not a gate.
+        assert!(gate_at(158, 24, 101).is_none());
+        assert!(gate_at(158, 28, 97).is_none());
+        assert!(gate_at(158, 29, 101).is_none());
+        assert!(gate_at(158, 28, 102).is_none());
+        // The two side exits of the same map, and the outward gate on map 0.
+        assert!(gate_at(158, 14, 90).is_some());
+        assert!(gate_at(158, 41, 90).is_some());
+        assert!(gate_at(0, 291, 350).is_some_and(|g| g.dst_map == 158));
+        // A gate block is not honoured on another map.
+        assert!(gate_at(109, 28, 101).is_none());
     }
 
     #[test]
     fn the_near_gate_diagnostic_reports_the_closest_row_within_radius() {
-        let (gate, distance) = gate_within(158, 27, 100, 2).expect("one tile from (28,101)");
+        // Distance is measured to the anchor cell, and the diagnostic is only about
+        // telling an unrecognised order apart from a gate hit — which the block check in
+        // [`every_cell_of_the_gate_block_is_the_gate`] now covers.
+        let (gate, distance) = gate_within(158, 28, 101, 0).expect("the anchor itself");
         assert_eq!((gate.src_x, gate.src_y), (28, 101));
-        assert_eq!(distance, 1);
-        // Diagonals count as one step, as they do in the walk itself.
-        assert_eq!(gate_within(158, 27, 100, 1).map(|(_, d)| d), Some(1));
-        // Outside the radius, or on a map with no gates, nothing is reported.
-        assert!(gate_within(158, 27, 96, 2).is_none());
+        assert_eq!(distance, 0);
+        // Five tiles north of the anchor is out of a two-tile radius and in a six-tile one.
+        assert!(gate_within(158, 28, 96, 2).is_none());
+        assert_eq!(gate_within(158, 28, 96, 6).map(|(_, d)| d), Some(5));
         assert!(gate_within(109, 28, 101, 2).is_none());
     }
 
