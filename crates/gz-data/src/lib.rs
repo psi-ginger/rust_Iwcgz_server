@@ -35,6 +35,7 @@
 //! - English `SetItemData` does not load every file on disk (e.g. `ItemBoxE`,
 //!   `SoulGuardE`), so those uniques have no type and are non-pileable too.
 
+pub mod map;
 pub mod npc;
 
 /// The item uniques that may be stacked (`cltItem::CanPile` == true).
