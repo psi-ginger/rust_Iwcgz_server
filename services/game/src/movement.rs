@@ -3465,7 +3465,7 @@ const VILLAGES: &[Village] = &[
         center_y: 1,
         dst_map: 1,
         dst_x: 25,
-        dst_y: 14,
+        dst_y: 13,
         exit_x: 25,
         exit_y: 7,
     },
@@ -3479,7 +3479,7 @@ const VILLAGES: &[Village] = &[
         center_y: 1,
         dst_map: 2,
         dst_x: 25,
-        dst_y: 14,
+        dst_y: 13,
         exit_x: 25,
         exit_y: 7,
     },
@@ -3493,7 +3493,7 @@ const VILLAGES: &[Village] = &[
         center_y: 1,
         dst_map: 3,
         dst_x: 25,
-        dst_y: 14,
+        dst_y: 13,
         exit_x: 25,
         exit_y: 7,
     },
@@ -3507,7 +3507,7 @@ const VILLAGES: &[Village] = &[
         center_y: 1,
         dst_map: 4,
         dst_x: 25,
-        dst_y: 14,
+        dst_y: 13,
         exit_x: 25,
         exit_y: 7,
     },
@@ -3521,7 +3521,7 @@ const VILLAGES: &[Village] = &[
         center_y: 1,
         dst_map: 5,
         dst_x: 25,
-        dst_y: 14,
+        dst_y: 13,
         exit_x: 25,
         exit_y: 7,
     },
@@ -3535,7 +3535,7 @@ const VILLAGES: &[Village] = &[
         center_y: 1,
         dst_map: 6,
         dst_x: 25,
-        dst_y: 14,
+        dst_y: 13,
         exit_x: 25,
         exit_y: 7,
     },
@@ -3549,7 +3549,7 @@ const VILLAGES: &[Village] = &[
         center_y: 1,
         dst_map: 7,
         dst_x: 25,
-        dst_y: 14,
+        dst_y: 13,
         exit_x: 25,
         exit_y: 7,
     },
@@ -3563,7 +3563,7 @@ const VILLAGES: &[Village] = &[
         center_y: 1,
         dst_map: 8,
         dst_x: 25,
-        dst_y: 14,
+        dst_y: 13,
         exit_x: 25,
         exit_y: 7,
     },
@@ -3577,7 +3577,7 @@ const VILLAGES: &[Village] = &[
         center_y: 1,
         dst_map: 9,
         dst_x: 25,
-        dst_y: 14,
+        dst_y: 13,
         exit_x: 25,
         exit_y: 7,
     },
@@ -3591,7 +3591,7 @@ const VILLAGES: &[Village] = &[
         center_y: 1,
         dst_map: 10,
         dst_x: 25,
-        dst_y: 14,
+        dst_y: 13,
         exit_x: 25,
         exit_y: 7,
     },
@@ -3605,7 +3605,7 @@ const VILLAGES: &[Village] = &[
         center_y: 1,
         dst_map: 11,
         dst_x: 25,
-        dst_y: 14,
+        dst_y: 13,
         exit_x: 25,
         exit_y: 7,
     },
@@ -3619,7 +3619,7 @@ const VILLAGES: &[Village] = &[
         center_y: 1,
         dst_map: 12,
         dst_x: 25,
-        dst_y: 14,
+        dst_y: 13,
         exit_x: 25,
         exit_y: 7,
     },
@@ -3633,7 +3633,7 @@ const VILLAGES: &[Village] = &[
         center_y: 1,
         dst_map: 13,
         dst_x: 25,
-        dst_y: 14,
+        dst_y: 13,
         exit_x: 25,
         exit_y: 7,
     },
@@ -3647,7 +3647,7 @@ const VILLAGES: &[Village] = &[
         center_y: 1,
         dst_map: 14,
         dst_x: 25,
-        dst_y: 14,
+        dst_y: 13,
         exit_x: 25,
         exit_y: 7,
     },
@@ -3661,7 +3661,7 @@ const VILLAGES: &[Village] = &[
         center_y: 1,
         dst_map: 15,
         dst_x: 25,
-        dst_y: 14,
+        dst_y: 13,
         exit_x: 25,
         exit_y: 7,
     },
@@ -3675,7 +3675,7 @@ const VILLAGES: &[Village] = &[
         center_y: 1,
         dst_map: 16,
         dst_x: 25,
-        dst_y: 14,
+        dst_y: 13,
         exit_x: 25,
         exit_y: 7,
     },
@@ -3689,7 +3689,7 @@ const VILLAGES: &[Village] = &[
         center_y: 1,
         dst_map: 17,
         dst_x: 25,
-        dst_y: 14,
+        dst_y: 13,
         exit_x: 25,
         exit_y: 7,
     },
@@ -3703,7 +3703,7 @@ const VILLAGES: &[Village] = &[
         center_y: 1,
         dst_map: 18,
         dst_x: 25,
-        dst_y: 14,
+        dst_y: 13,
         exit_x: 25,
         exit_y: 7,
     },
@@ -3717,7 +3717,7 @@ const VILLAGES: &[Village] = &[
         center_y: 1,
         dst_map: 19,
         dst_x: 25,
-        dst_y: 14,
+        dst_y: 13,
         exit_x: 25,
         exit_y: 7,
     },
@@ -3731,7 +3731,7 @@ const VILLAGES: &[Village] = &[
         center_y: 1,
         dst_map: 20,
         dst_x: 25,
-        dst_y: 14,
+        dst_y: 13,
         exit_x: 25,
         exit_y: 7,
     },
@@ -3745,7 +3745,7 @@ const VILLAGES: &[Village] = &[
         center_y: 1,
         dst_map: 21,
         dst_x: 25,
-        dst_y: 14,
+        dst_y: 13,
         exit_x: 25,
         exit_y: 7,
     },
@@ -3759,7 +3759,7 @@ const VILLAGES: &[Village] = &[
         center_y: 1,
         dst_map: 22,
         dst_x: 25,
-        dst_y: 14,
+        dst_y: 13,
         exit_x: 25,
         exit_y: 7,
     },
@@ -3773,7 +3773,7 @@ const VILLAGES: &[Village] = &[
         center_y: 1,
         dst_map: 23,
         dst_x: 25,
-        dst_y: 14,
+        dst_y: 13,
         exit_x: 25,
         exit_y: 7,
     },
@@ -3787,7 +3787,7 @@ const VILLAGES: &[Village] = &[
         center_y: 1,
         dst_map: 24,
         dst_x: 25,
-        dst_y: 14,
+        dst_y: 13,
         exit_x: 25,
         exit_y: 7,
     },
@@ -3801,7 +3801,7 @@ const VILLAGES: &[Village] = &[
         center_y: 1,
         dst_map: 25,
         dst_x: 25,
-        dst_y: 14,
+        dst_y: 13,
         exit_x: 25,
         exit_y: 7,
     },
@@ -3815,7 +3815,7 @@ const VILLAGES: &[Village] = &[
         center_y: 1,
         dst_map: 26,
         dst_x: 25,
-        dst_y: 14,
+        dst_y: 13,
         exit_x: 25,
         exit_y: 7,
     },
@@ -3829,7 +3829,7 @@ const VILLAGES: &[Village] = &[
         center_y: 1,
         dst_map: 27,
         dst_x: 25,
-        dst_y: 14,
+        dst_y: 13,
         exit_x: 25,
         exit_y: 7,
     },
@@ -3843,7 +3843,7 @@ const VILLAGES: &[Village] = &[
         center_y: 1,
         dst_map: 28,
         dst_x: 25,
-        dst_y: 14,
+        dst_y: 13,
         exit_x: 25,
         exit_y: 7,
     },
@@ -3857,7 +3857,7 @@ const VILLAGES: &[Village] = &[
         center_y: 1,
         dst_map: 29,
         dst_x: 25,
-        dst_y: 14,
+        dst_y: 13,
         exit_x: 25,
         exit_y: 7,
     },
@@ -3871,7 +3871,7 @@ const VILLAGES: &[Village] = &[
         center_y: 1,
         dst_map: 30,
         dst_x: 25,
-        dst_y: 14,
+        dst_y: 13,
         exit_x: 25,
         exit_y: 7,
     },
@@ -3885,7 +3885,7 @@ const VILLAGES: &[Village] = &[
         center_y: 1,
         dst_map: 31,
         dst_x: 25,
-        dst_y: 14,
+        dst_y: 13,
         exit_x: 25,
         exit_y: 7,
     },
@@ -3899,7 +3899,7 @@ const VILLAGES: &[Village] = &[
         center_y: 1,
         dst_map: 32,
         dst_x: 25,
-        dst_y: 14,
+        dst_y: 13,
         exit_x: 25,
         exit_y: 7,
     },
@@ -3913,7 +3913,7 @@ const VILLAGES: &[Village] = &[
         center_y: 1,
         dst_map: 33,
         dst_x: 25,
-        dst_y: 14,
+        dst_y: 13,
         exit_x: 25,
         exit_y: 7,
     },
@@ -3927,7 +3927,7 @@ const VILLAGES: &[Village] = &[
         center_y: 1,
         dst_map: 34,
         dst_x: 25,
-        dst_y: 14,
+        dst_y: 13,
         exit_x: 25,
         exit_y: 7,
     },
@@ -3941,7 +3941,7 @@ const VILLAGES: &[Village] = &[
         center_y: 1,
         dst_map: 35,
         dst_x: 25,
-        dst_y: 14,
+        dst_y: 13,
         exit_x: 25,
         exit_y: 7,
     },
@@ -3955,7 +3955,7 @@ const VILLAGES: &[Village] = &[
         center_y: 1,
         dst_map: 36,
         dst_x: 25,
-        dst_y: 14,
+        dst_y: 13,
         exit_x: 25,
         exit_y: 7,
     },
@@ -3969,7 +3969,7 @@ const VILLAGES: &[Village] = &[
         center_y: 1,
         dst_map: 37,
         dst_x: 25,
-        dst_y: 14,
+        dst_y: 13,
         exit_x: 25,
         exit_y: 7,
     },
@@ -3983,7 +3983,7 @@ const VILLAGES: &[Village] = &[
         center_y: 1,
         dst_map: 38,
         dst_x: 25,
-        dst_y: 14,
+        dst_y: 13,
         exit_x: 25,
         exit_y: 7,
     },
@@ -3997,7 +3997,7 @@ const VILLAGES: &[Village] = &[
         center_y: 1,
         dst_map: 39,
         dst_x: 25,
-        dst_y: 14,
+        dst_y: 13,
         exit_x: 25,
         exit_y: 7,
     },
@@ -4011,7 +4011,7 @@ const VILLAGES: &[Village] = &[
         center_y: 1,
         dst_map: 40,
         dst_x: 25,
-        dst_y: 14,
+        dst_y: 13,
         exit_x: 25,
         exit_y: 7,
     },
@@ -4025,7 +4025,7 @@ const VILLAGES: &[Village] = &[
         center_y: 1,
         dst_map: 41,
         dst_x: 25,
-        dst_y: 14,
+        dst_y: 13,
         exit_x: 25,
         exit_y: 7,
     },
@@ -4039,7 +4039,7 @@ const VILLAGES: &[Village] = &[
         center_y: 1,
         dst_map: 42,
         dst_x: 25,
-        dst_y: 14,
+        dst_y: 13,
         exit_x: 25,
         exit_y: 7,
     },
@@ -4215,13 +4215,13 @@ pub(crate) async fn handle_revive(
 ///
 /// `cltCharServer::CharServerMoveByGate`'s village half (`char.cpp:8983-9027`) takes the
 /// village unique from the cell's field-object para (`:8986`) and warps to the village's
-/// own map at that map type's centre (`:9008-9015`). The shape comes from text data —
+/// own map at that map type's centre (`:9008-9015`), and `dst_x`/`dst_y` is exactly that
+/// centre: the engine's own `SetMapType` hardcode, **(25,13)** for type 24
+/// (`char.cpp:9011-9012` reads `siCenterX`/`siCenterY`). The shape comes from text data —
 /// `villageinfoE.txt` (`Unique`, `PosX`, `PosY`, `MapIndex`) → `mapinfoE.txt` (the map's
-/// type unique) → `MapTypeInfo.txt` (type name) — but the landing `dst_x`/`dst_y` is the
-/// port's own value, **(25,14)**: the live-tested town entry spawn, deliberately off both
-/// legacy numbers. The engine never loads `MapTypeInfo_Village.txt` (`MapTypeManager.cpp:78`,
-/// so its (24,22) is dead data) and would warp to its own `SetMapType` centre instead —
-/// (25,13) for type 24 (`char.cpp:9011-9012`). See `docs/town-exit-gate.md`.
+/// type unique) → `MapTypeInfo.txt` (type name) — while the never-loaded
+/// `MapTypeInfo_Village.txt` (`MapTypeManager.cpp:78` comments its loader out) says
+/// (24,22) and ships only as dead data. See `docs/town-exit-gate.md`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Village {
     /// `villageinfoE.txt`'s `Unique` — the value the client's click carries in the
@@ -4242,10 +4242,10 @@ struct Village {
     center_y: i32,
     /// `MapIndex` — the village's own map (`siVillageUnique`, `char.cpp:9008`).
     dst_map: i32,
-    /// The town entry spawn, x — port-set to (25,14), the live-tested landing on entering
-    /// a town (`village_warp_gate`). Neither legacy number ships: the engine reads its own
-    /// `SetMapType` centre (`char.cpp:9011`, (25,13) for type 24) and the never-loaded
-    /// `MapTypeInfo_Village.txt` says (24,22).
+    /// The town entry spawn, x — the engine's own `SetMapType` centre, (25,13) for type
+    /// 24, read exactly as the legacy entry warp reads it (`char.cpp:9011`). The
+    /// never-loaded `MapTypeInfo_Village.txt` says (24,22) and is dead data
+    /// (`MapTypeManager.cpp:78`).
     dst_x: i32,
     /// The town entry spawn, y. See [`Village::dst_x`].
     dst_y: i32,
@@ -5624,9 +5624,9 @@ mod tests {
 
     /// The village table: village 1 (Ankaran) is stamped at x[263..270] y[319..326] around the
     /// marker (269,325) and village 3 (Talasha) at x[235..242] y[297..304] around (241,303)
-    /// — `villageinfoE.txt:12,14` — and both land on their own map at the port's town entry
-    /// spawn (25,14), live-tested and deliberately off both legacy numbers (engine centre
-    /// (25,13), dead `MapTypeInfo_Village.txt` (24,22)).
+    /// — `villageinfoE.txt:12,14` — and both land on their own map at the engine's own
+    /// centre, (25,13): the `SetMapType` value the legacy entry warp reads
+    /// (`char.cpp:9011-9012`), not the dead file's (24,22).
     #[test]
     fn a_village_entrance_warps_to_the_town_entry_spawn() {
         let ankaran = village_at(0, 263, 319).expect("Ankaran's entrance");
@@ -5637,7 +5637,7 @@ mod tests {
                 ankaran.dst_x,
                 ankaran.dst_y
             ),
-            (1, 1, 25, 14)
+            (1, 1, 25, 13)
         );
         let talasha = village_at(0, 235, 297).expect("Talasha's entrance");
         assert_eq!(
@@ -5647,7 +5647,7 @@ mod tests {
                 talasha.dst_x,
                 talasha.dst_y
             ),
-            (3, 3, 25, 14)
+            (3, 3, 25, 13)
         );
         // Every row is an entrance on map 0 with a destination that has a centre.
         for village in VILLAGES {
@@ -5695,8 +5695,9 @@ mod tests {
         for (x, y) in [(23, 6), (26, 6), (23, 8), (26, 8)] {
             assert!(village_exit(1, x, y).is_some(), "stamped cell ({x},{y})");
         }
-        // One tile outside does not — and neither do the stairs/spawn: the spawn (25,14)
-        // and both legacy centres (24,22)/(25,13) sit far from the stamped block.
+        // One tile outside does not — and neither do the stairs/spawn: the spawn itself
+        // (25,13) is the engine centre, and neither it, the dead-file centre (24,22) nor
+        // the tile below the spawn sits near the stamped block.
         for (x, y) in [
             (22, 7),
             (27, 7),
@@ -6207,8 +6208,8 @@ mod tests {
         }
 
         // Neither block leaves a non-town map, and one tile outside either block is a
-        // step: corners of the south block plus the spawn (25,14) and both legacy
-        // centres the old reach-6 window used to swallow.
+        // step: corners of the south block plus the spawn (25,13), the tile below it,
+        // and the dead-file centre (24,22) the old reach-6 window used to swallow.
         assert!(village_exit(0, 25, 7).is_none());
         assert!(village_exit(0, 35, 63).is_none());
         for (x, y) in [

@@ -621,11 +621,11 @@ foreach ($line in [System.IO.File]::ReadAllLines($villageFile, [System.Text.Enco
         CenterX = 1
         CenterY = 1
         DstMap  = $dstMap
-        # Town entry spawn, port-set (25,14) - live-tested. Neither legacy number ships:
-        # the engine's own entry warp reads its SetMapType centre (char.cpp:9011-9012,
-        # (25,13) for type 24) and the dead MapTypeInfo_Village.txt says (24,22).
+        # Town entry spawn = the engine's own SetMapType centre (char.cpp:9011-9012,
+        # (25,13) for type 24) - exactly what the legacy entry warp reads. The dead
+        # MapTypeInfo_Village.txt says (24,22) and stays unloaded (MapTypeManager.cpp:78).
         DstX    = 25
-        DstY    = 14
+        DstY    = 13
         # The engine's own gate anchor for this map type (SetMapType hardcode - see
         # $engineGateOfType). MapCommon.cpp:436-453 stamps `Gate_Wood1ToMain` (FO 1840,
         # 4x3, centre (1,1)) over `x in [anchor-2, anchor+1]`, `y in [anchor-1,

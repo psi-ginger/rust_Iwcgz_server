@@ -120,14 +120,14 @@ two blocks exit, everything else is a step — and drive the production branch f
 anchors plus a non-gate tile: both gates land row, cached copy and registry on map 0
 (266,327); the non-gate tile writes nothing.
 
-## Town entry spawn — (25, 14)
+## Town entry spawn — (25, 13)
 
-Entering a town (maps 1..42) lands the character at **(25,14)** — a port value, set by
-live test. It is deliberately not either legacy number: the engine's own entry warp reads
-its `SetMapType` centre (`char.cpp:9011-9012`, (25,13) for type 24) and the never-loaded
-`MapTypeInfo_Village.txt` says (24,22). The generator hardcodes `DstX/DstY = 25/14`
-(its `$centerOfTypeName` parse survives only as a type-name check), and the `VILLAGES`
-table carries the same 42 times.
+Entering a town (maps 1..42) lands the character at **(25,13)** — the engine's own
+`SetMapType` centre for type 24, read exactly as the legacy entry warp reads it
+(`char.cpp:9011-9012`). The only number it does *not* use is `MapTypeInfo_Village.txt`'s
+(24,22): that file's loader is commented out (`MapTypeManager.cpp:78`), so it is dead
+data. The generator emits `DstX/DstY = 25/13` (its `$centerOfTypeName` parse survives
+only as a type-name check), and the `VILLAGES` table carries the same 42 times.
 
 ## Known gaps (deliberately untouched)
 - **Japan/China service area** would move the anchor to (26,8)
