@@ -533,6 +533,12 @@ foreach ($line in [System.IO.File]::ReadAllLines($mapTypeFile, [System.Text.Enco
 
 # map type name -> centre and gate (MapTypeInfo_Village.txt:
 #   MapUniqueString, MapAttb, CenterX, CenterY, GateX, GateY, Cost, Level, Slots...)
+#
+# NOTE: nothing here feeds DstX/DstY - the town entry spawn is port-set (see the DstX
+# assignment below). The engine never loads this file either - LoadMapTypeInfo_Village()
+# is commented out (MapTypeManager.cpp:78) - and the exit gate anchor is NOT taken from
+# it; see $engineGateOfType below. The table survives only as the check that every
+# village's map type name resolves in legacy data.
 $centerOfTypeName = @{}
 $inData = $false
 foreach ($line in [System.IO.File]::ReadAllLines($villageTypeFile, [System.Text.Encoding]::Unicode)) {
@@ -549,6 +555,23 @@ foreach ($line in [System.IO.File]::ReadAllLines($villageTypeFile, [System.Text.
     }
     if (-not $ok) { continue }
     $centerOfTypeName[$fields[0].Trim()] = $values
+}
+
+# map type unique -> the engine's own gate anchor, from the SetMapType hardcodes in
+# cltMapTypeManager's constructor (MapTypeManager.cpp: Village01 at :119-126 -
+# Japan/China (26,8), default (25,7), and the shipped ServiceArea.txt is
+# SERVICEAREA_ENGLISH for every client - Village02-04 at :128-130 - Village05-08 at
+# :150-153). LoadMapTypeInfo_Village() is commented out (:78), so this table - not
+# MapTypeInfo_Village.txt - is what MapCommon.cpp:436-453 stamps the exit gate on.
+$engineGateOfType = @{
+    24 = @(25, 7)   # Village01 - every town in villageinfoE (maps 1..42) is type 24
+    25 = @(23, 18)  # Village02
+    26 = @(23, 18)  # Village03
+    27 = @(23, 18)  # Village04
+    31 = @(16, 8)   # Village05
+    33 = @(16, 8)   # Village06
+    34 = @(16, 8)   # Village07
+    35 = @(16, 8)   # Village08
 }
 
 $villages = New-Object 'System.Collections.Generic.List[object]'
@@ -575,7 +598,11 @@ foreach ($line in [System.IO.File]::ReadAllLines($villageFile, [System.Text.Enco
     if (-not $typeName -or -not $centerOfTypeName.ContainsKey($typeName)) {
         throw "village ${unique}: no centre for map $dstMap (type '$typeName')"
     }
-    $centre = $centerOfTypeName[$typeName]
+    $typeUnique = $mapTypeOfMap[$dstMap]
+    if (-not $engineGateOfType.ContainsKey($typeUnique)) {
+        throw "village ${unique}: no engine gate anchor for map type $typeUnique (map $dstMap)"
+    }
+    $gateAnchor = $engineGateOfType[$typeUnique]
     # The entrance object is `KoreanVillageSmall` (FOUnique 1) or `KoreanVillageSmallUp`
     # (FOUnique 5); both detail files read `8 8 1 1 19 1 9 2`
     # (`FieldObject\Korean.mz -> KoreanVillageSmall/KoreanVillageSmall.txt`), so the block is
@@ -594,12 +621,18 @@ foreach ($line in [System.IO.File]::ReadAllLines($villageFile, [System.Text.Enco
         CenterX = 1
         CenterY = 1
         DstMap  = $dstMap
-        DstX    = $centre[0]
-        DstY    = $centre[1]
-        # `GateX`/`GateY` of the village's map type: the gate *inside* the town, which is
-        # what a character walks to in order to leave it again.
-        ExitX   = $centre[2]
-        ExitY   = $centre[3]
+        # Town entry spawn, port-set (25,14) - live-tested. Neither legacy number ships:
+        # the engine's own entry warp reads its SetMapType centre (char.cpp:9011-9012,
+        # (25,13) for type 24) and the dead MapTypeInfo_Village.txt says (24,22).
+        DstX    = 25
+        DstY    = 14
+        # The engine's own gate anchor for this map type (SetMapType hardcode - see
+        # $engineGateOfType). MapCommon.cpp:436-453 stamps `Gate_Wood1ToMain` (FO 1840,
+        # 4x3, centre (1,1)) over `x in [anchor-2, anchor+1]`, `y in [anchor-1,
+        # anchor+1]` at map load, and only those cells carry the gate's para - the
+        # legacy exits on them (char.cpp:8975).
+        ExitX   = $gateAnchor[0]
+        ExitY   = $gateAnchor[1]
     })
 }
 if ($villages.Count -eq 0) { throw "no village rows found in $villageFile" }
