@@ -4727,8 +4727,10 @@ pub(crate) fn logout_departed(
 /// Advances an in-flight move by one tick. When the tick commits a tile it sends
 /// the 200 `CHARUPDATE` for the new cell, updates the session's drop cell and
 /// the registry's copy of the position (so the near fan sees where the avatar
-/// actually stands), and ends the move on arrival. A no-op when no move is
-/// active or the tile is not due yet.
+/// actually stands), and ends the move on arrival. A committed step never warps:
+/// the legacy arms a warp only from an order's destination (`char-order.cpp:173`), so
+/// stepping onto an entrance block or a gate cell keeps walking. A no-op when no
+/// move is active or the tile is not due yet.
 ///
 /// # Errors
 ///
@@ -4740,7 +4742,6 @@ pub(crate) async fn step_movement(
     movement: &mut Option<Movement>,
     registry: &Registry,
     session_key: SessionKey,
-    characters: &PgCharacterRepository,
 ) -> Result<(), AnyError> {
     let Some(mv) = movement.as_mut() else {
         return Ok(());
@@ -4760,78 +4761,20 @@ pub(crate) async fn step_movement(
         *movement = None;
         return Ok(());
     }
-    // Stepping *onto* a gate leaves the map too, not only ordering a move to one.
+    // A committed step never leaves the map.
     //
-    // The legacy checks the order's destination and nothing else
-    // (`char-order.cpp:173` → `CharServerMoveByGate(x, y)`), but a walk that merely
-    // passes across a gate cell never has it as a destination, and the client
-    // resolves a gate by the object the player clicked rather than by our tile
-    // table. Warping on the committed tile as well is a deliberate widening: it is
-    // what makes "walk out through the gate" work, and a gate tile is by
-    // definition somewhere the character was not meant to stay. The destination
-    // check in `handle_userorder` stays first, so a direct order still leaves
-    // without a step.
-    let stepped_gate = gate_at(mv.map_id, x, y);
-    let stepped_village = village_at(mv.map_id, x, y);
-    let stepped_exit = village_exit(mv.map_id, x, y);
-    let stepped_map = mv.map_id;
-    if mv.arrived() || stepped_gate.is_some() || stepped_village.is_some() || stepped_exit.is_some()
-    {
+    // The legacy arms a warp in exactly one place: the order handler, over the
+    // order's *destination* (`char-order.cpp:173` is `CharServerMoveByGate`'s only
+    // caller). Warping on the committed tile as well was this port's own widening,
+    // and it misfired the way it was always going to: an entrance block is the
+    // town's whole stamped footprint, so standing on the open ground beside
+    // Ankaran's wall and taking one step pulled the character into town (owner
+    // report, Test12). Walking past a town or across a gate is now just a walk;
+    // entering, leaving and gates fire only from an explicit order, which
+    // `handle_userorder` checks on the destination.
+    if mv.arrived() {
         mv.deadline = None;
         *movement = None;
-    }
-    if let Some((village, landing)) = stepped_exit {
-        logln!(
-            "game: village {} exit on foot: map {stepped_map} ({x}, {y}) -> map 0 at {landing:?}",
-            village.unique
-        );
-        let gate = warp_gate_to(stepped_map, 0, landing.0, landing.1);
-        warp_through_gate(
-            stream,
-            outbound,
-            characters,
-            registry,
-            session_key,
-            live,
-            &gate,
-        )
-        .await?;
-        return Ok(());
-    }
-    if let Some(village) = stepped_village {
-        logln!(
-            "game: village {} entered on foot: map {stepped_map} ({x}, {y})",
-            village.unique
-        );
-        let gate = village_warp_gate(stepped_map, village);
-        warp_through_gate(
-            stream,
-            outbound,
-            characters,
-            registry,
-            session_key,
-            live,
-            &gate,
-        )
-        .await?;
-        return Ok(());
-    }
-    if let Some(gate) = stepped_gate {
-        logln!(
-            "game: stepped onto the gate at ({x}, {y}) on map {stepped_map} -> map {}",
-            gate.dst_map
-        );
-        warp_through_gate(
-            stream,
-            outbound,
-            characters,
-            registry,
-            session_key,
-            live,
-            gate,
-        )
-        .await?;
-        return Ok(());
     }
     // The stepped tile is now the authoritative cell, and it has to become so
     // *before* anything is built from the row: `announce_nearby_characters`
@@ -5419,7 +5362,7 @@ pub(crate) async fn handle_leave_request(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gz_db::RepositoryError;
+    use gz_db::{PgItemRepository, RepositoryError};
 
     /// The gate table is a transcription of `Data\GateInfoE.txt`, so the test
     /// states the file's own facts: Hanyang's three exits land on the outdoor map
@@ -5520,7 +5463,7 @@ mod tests {
     /// The destinations are inside the 10-bit fields the record packs, and the
     /// client's map index for them is the map id itself
     /// (`gz_proto::game::client_map_index`).
-    /// The step-onto path and the near-gate diagnostic both hang off these two
+    /// The order path and the near-gate diagnostic both hang off these two
     /// lookups, so their semantics are pinned here.
     ///
     /// The gate is a **4×4 block ending at the anchor**: `PutFieldObject`
@@ -5929,5 +5872,192 @@ mod tests {
                 .is_err()
         );
         assert!(characters.map_writes.lock().unwrap().is_empty());
+    }
+
+    /// A connected socket pair: `step_movement` writes its 200s into one end
+    /// and the test holds the other open, so nothing blocks on a full buffer.
+    async fn socket_pair() -> (TcpStream, TcpStream) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("a loopback port");
+        let addr = listener.local_addr().expect("the bound address");
+        let writer = TcpStream::connect(addr).await.expect("the client end");
+        let (reader, _) = listener.accept().await.expect("the server end");
+        (writer, reader)
+    }
+
+    /// A movement that is due on the next tick: the accumulator already holds a
+    /// full step, so `step_movement`'s own `advance` commits the first tile.
+    fn due_movement(dest: (i32, i32), pos: (i32, i32), map_id: i32) -> Movement {
+        let mut movement = Movement::new(dest, pos, map_id, 12);
+        movement.percent = MOVE_PERCENT_STEP;
+        movement
+    }
+
+    /// A row standing at `(x, y)` on map 0.
+    fn row_on_map0(x: i32, y: i32) -> CharacterFull {
+        let mut row = row_on_the_east_gate();
+        row.map_id = 0;
+        row.pos_x = x;
+        row.pos_y = y;
+        row
+    }
+
+    /// The item repository `LiveFrames` carries: a pool that never connects,
+    /// because the step path reads no items.
+    fn lazy_items() -> PgItemRepository {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://none:none@127.0.0.1:1/none")
+            .expect("a parseable URL, connected only on first use");
+        PgItemRepository::new(pool)
+    }
+
+    /// The owner's live report, as a test: Test12 stood on the open ground
+    /// beside Ankaran's wall — the entrance block's footprint is eight tiles
+    /// deep around the marker — and one step pulled it into town. A committed
+    /// step is **never** a warp: the legacy arms one only from an order's
+    /// destination (`char-order.cpp:173` is `CharServerMoveByGate`'s only
+    /// caller), so walking beside the wall is just walking.
+    #[tokio::test]
+    async fn a_step_across_an_entrance_block_does_not_warp() {
+        // (263, 322) is Ankaran's leftmost entrance cell and (262, 322) is one
+        // tile of open ground west of it, so the walk crosses the boundary.
+        assert!(village_at(0, 263, 322).is_some(), "the block starts here");
+        assert!(village_at(0, 262, 322).is_none(), "and this is off it");
+
+        let (mut stream, _peer) = socket_pair().await;
+        let mut outbound = Cipher::new();
+        let items = lazy_items();
+        let row = row_on_map0(262, 322);
+        let mut live = LiveFrames {
+            items: &items,
+            account_id: 0,
+            account_name: String::new(),
+            character: Some(row.clone()),
+            char_unique: 1473,
+            friend_list: Vec::new(),
+            quest: gz_proto::quest::PersonQuest::new(),
+        };
+        let registry = Registry::new();
+        let key = Registry::next_key();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        registry.register(key, tx, session_info_from(&Some(row), 1473));
+
+        let mut movement = Some(due_movement((265, 322), (262, 322), 0));
+        step_movement(
+            &mut stream,
+            &mut outbound,
+            &mut live,
+            &mut movement,
+            &registry,
+            key,
+        )
+        .await
+        .expect("the step commits");
+
+        let character = live.character.as_ref().expect("still loaded");
+        assert_eq!(
+            (character.map_id, character.pos_x, character.pos_y),
+            (0, 263, 322),
+            "the step lands on the entrance block and stays on map 0"
+        );
+        let stored = registry.info(key).expect("still registered");
+        assert_eq!((stored.map_id, stored.x, stored.y), (0, 263, 322));
+        assert!(movement.is_some(), "the walk continues past the block");
+    }
+
+    /// The same rule for a gate: the palace gate's block on map 0 is nine by
+    /// four (`x[284..292] y[347..350]`), and stepping onto it must not move the
+    /// character to Hanyang. Only an order that names such a cell does that.
+    #[tokio::test]
+    async fn a_step_across_a_gate_block_does_not_warp() {
+        assert!(gate_at(0, 284, 350).is_some(), "the block starts here");
+        assert!(gate_at(0, 283, 350).is_none(), "and this is off it");
+
+        let (mut stream, _peer) = socket_pair().await;
+        let mut outbound = Cipher::new();
+        let items = lazy_items();
+        let row = row_on_map0(283, 350);
+        let mut live = LiveFrames {
+            items: &items,
+            account_id: 0,
+            account_name: String::new(),
+            character: Some(row.clone()),
+            char_unique: 1473,
+            friend_list: Vec::new(),
+            quest: gz_proto::quest::PersonQuest::new(),
+        };
+        let registry = Registry::new();
+        let key = Registry::next_key();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        registry.register(key, tx, session_info_from(&Some(row), 1473));
+
+        let mut movement = Some(due_movement((286, 350), (283, 350), 0));
+        step_movement(
+            &mut stream,
+            &mut outbound,
+            &mut live,
+            &mut movement,
+            &registry,
+            key,
+        )
+        .await
+        .expect("the step commits");
+
+        let character = live.character.as_ref().expect("still loaded");
+        assert_eq!(
+            (character.map_id, character.pos_x, character.pos_y),
+            (0, 284, 350),
+            "the step lands on the gate block and stays on map 0"
+        );
+        let stored = registry.info(key).expect("still registered");
+        assert_eq!((stored.map_id, stored.x, stored.y), (0, 284, 350));
+    }
+
+    /// And for leaving: the village map's exit tile is `GateX`/`GateY`
+    /// (23,18) on Ankaran's own map, and a walk across it is a walk too.
+    #[tokio::test]
+    async fn a_step_across_a_village_exit_does_not_warp() {
+        assert!(village_exit(1, 23, 18).is_some(), "the exit tile");
+
+        let (mut stream, _peer) = socket_pair().await;
+        let mut outbound = Cipher::new();
+        let items = lazy_items();
+        let mut row = row_on_map0(22, 18);
+        row.map_id = 1;
+        let mut live = LiveFrames {
+            items: &items,
+            account_id: 0,
+            account_name: String::new(),
+            character: Some(row.clone()),
+            char_unique: 1473,
+            friend_list: Vec::new(),
+            quest: gz_proto::quest::PersonQuest::new(),
+        };
+        let registry = Registry::new();
+        let key = Registry::next_key();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        registry.register(key, tx, session_info_from(&Some(row), 1473));
+
+        let mut movement = Some(due_movement((23, 18), (22, 18), 1));
+        step_movement(
+            &mut stream,
+            &mut outbound,
+            &mut live,
+            &mut movement,
+            &registry,
+            key,
+        )
+        .await
+        .expect("the step commits");
+
+        let character = live.character.as_ref().expect("still loaded");
+        assert_eq!(
+            (character.map_id, character.pos_x, character.pos_y),
+            (1, 23, 18),
+            "the step lands on the exit tile and stays in the village"
+        );
+        let stored = registry.info(key).expect("still registered");
+        assert_eq!((stored.map_id, stored.x, stored.y), (1, 23, 18));
     }
 }

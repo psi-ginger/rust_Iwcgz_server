@@ -20,3 +20,6 @@ async-trait = "0.1"
 [dev-dependencies]
 # `MemoryFriends` exercises the 6202 accept handler's persistence seam.
 async-trait = "0.1"
+# The movement tests build a `LiveFrames`, which carries an item repository but
+# never reads it on the step path; a lazy pool keeps them off a database.
+sqlx = { version = "0.8", features = ["postgres", "runtime-tokio"] }

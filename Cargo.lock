@@ -364,6 +364,7 @@ dependencies = [
  "gz-lzf",
  "gz-net",
  "gz-proto",
+ "sqlx",
  "tokio",
 ]
 
