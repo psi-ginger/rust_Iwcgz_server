@@ -161,13 +161,11 @@ Tool, Explain, AttackE, AttackR, Grade, ATB, MinNum, unionmarket` — 30 columns
 
 ### Equip gate
 
-`cltItemManagerCommon::CheckCondition` (`Item-ManagerCommon.cpp:977-1045`) computes the
-required skill level (with two overrides: a fishing quest forces 10, a summon identity
-forces 100), then `cltItemConition::Check` (`Item-Condition.cpp:27-264`) verifies in order:
-skill → level → str → dex → mag → vit → hnd → gender (hero/heroeine kinds) → fame.
-Called from the drag-equip paths (`MouseOperation.cpp:1836,2160,2631,2891`),
-`NEquipWindow.cpp:643`, and `Char-Common.cpp:3230`. Binary anchors: base `FUN_008977f0`,
-update `FUN_0x8a4350`/`0x8a44b0`, NewHope `FUN_14061d5f0`.
+`CheckCondition` prepares the character side (skill total with two overrides),
+`cltItemConition::Check` verifies the item side in a fixed 1..10 order. Called from the
+drag-equip paths (`MouseOperation.cpp:1836,2160,2631,2891`), `NEquipWindow.cpp:643`,
+and `Char-Common.cpp:3230`. Full specification — check order, fail codes, the two
+skill-level overrides, fame, and where the character-level gates live: **§7**.
 
 ## 3. Active vs dead data files (English locale)
 
@@ -264,6 +262,7 @@ them in either the source tree or the binary.
 | `AddItem` (generic: Tree/Cloth/Etc) | `FUN_00888c90` | `FUN_008956d0` | `FUN_14060c470` |
 | `cltItemInfo::cltItemInfo` (ctor) | `FUN_00893600` | `FUN_008a0050` | `FUN_140617d20` |
 | `cltItemConition::Check` | `FUN_008977f0` | `FUN_008a4350` | `FUN_14061d5f0` |
+| `cltItemManagerCommon::CheckCondition` | `FUN_008a3e40` | `FUN_008b0b30` | `FUN_14062c4d0` |
 | `cltSkillBookManager::FileLoad` | `FUN_008946e0` | — | `FUN_140619360` |
 | CRC file-check list (TradeRank lives here) | `FUN_00756d40` | `FUN_00760ea0` | `FUN_140480510` |
 
@@ -281,4 +280,126 @@ callees) are captured in this analysis session's REA artifacts
   (weapon 11/11/10, armour 12/12/6, ring 4×6, shoes 10/6…).
 - Requirement checks are pure functions of `cltItemConition` + character stats + skill
   totals; the only non-obvious behaviour is the two `CheckCondition` overrides (fishing
-  quest → skill 10, summon → 100).
+  quest → skill 10, summon → 100) — see §7 before implementing the gate.
+
+## 7. Equip Gate & CheckCondition Specification
+
+How the client decides whether a character may equip an item: `CheckCondition` prepares
+the character side, `cltItemConition::Check` verifies the item side. Both decompiled in
+all three clients and matched line-for-line against the source — nothing below is
+inferred.
+
+| Function | Source | base `New Era.exe` | `New_Era_Live_update` | `GoonZuNewHope` (x64) |
+|---|---|---|---|---|
+| `cltItemManagerCommon::CheckCondition` | `Item-ManagerCommon.cpp:977-1045` | `FUN_008a3e40` | `FUN_008b0b30` | `FUN_14062c4d0` |
+| `cltItemConition::Check` | `Item-Condition.cpp:27-264` | `FUN_008977f0` | `FUN_008a4350` | `FUN_14061d5f0` |
+
+(The update build's `FUN_008a44b0`, previously listed next to `FUN_008a4350`, is **not**
+`Check`: its decompile contains no fail-code stores.)
+
+### 7.1 Check order and fail codes
+
+`Check` verifies strictly in this order and returns at the first failure. Order proven
+from the fail-code stores in all three decompiles; source `Item-Condition.cpp`:
+
+| # | Check (source lines) | Fails iff | `ITEMEQUIP_FAIL_*` (`ItemUnit.h`) |
+|---|---|---|---|
+| 1 | skill (:30-37) | `siSkillKind != 0 && skillpoint < siSkillPoint` | `OUTOFSKILL = 1` (:471) |
+| 2 | level (:39-46) | `siLevel != 0 && level < siLevel` | `OUTOFLEVEL = 2` (:472) |
+| 3 | str (:47-54) | `siStr != 0 && str < siStr` | `OUTOFSTR = 3` (:473) |
+| 4 | dex (:55-62) | `siDex != 0 && dex < siDex` | `OUTOFDEX = 4` (:474) |
+| 5 | mag (:63-70) | `siMag != 0 && mag < siMag` | `OUTOFMAG = 5` (:475) |
+| 6 | vit (:71-78) | `siVit != 0 && vit < siVit` | `OUTOFVIT = 6` (:476) |
+| 7 | hnd (:79-86) | `siHnd != 0 && hnd < siHnd` | `OUTOFHND = 7` (:477) |
+| 8 | male-only item (:88-95) | `kind ∈ {hash("KIND_HERO1"), 3, 5, 7} && bForMan == false` | `FORWOMAN = 8` (:478) |
+| 9 | female-only item (:98-105) | `kind ∈ {2, 4, 6, 8} && bForWoman == false` | `FORMAN = 9` (:479) |
+| 10 | fame (:254-262) | `siFameLevel != 0 && famelevel < siFameLevel` | `OUTOFFAME = 10` (:480) |
+| — | otherwise (:264) | — | returns true |
+
+Binary details (identical in base/update/NewHope): `bForMan` at
+`cltItemConition+0x20`, `bForWoman` at `+0x21`, fame is an SI16 at `+36` compared
+against `param_10`/`param_11` (the `famelevel` argument) — base `FUN_008977f0`,
+update `FUN_008a4350` lines 42-56, NewHope `FUN_14061d5f0` lines 41-53. The hero/heroine
+kind sets are numeric literals in every decompile (`3,5,7` male, `2,4,6,8` female) with
+only `KIND_HERO1` resolved through the hash (`FUN_00756c50` base).
+
+Codes 11-16 (`NOSUMMONHERO … WRONGEQUIPTYPE`, `ItemUnit.h:481-486`) belong to the summon
+equip path; note that the `OUTOFSUMMONLEVEL = 12` emission exists only in commented-out
+code (`Item-ManagerCommon.cpp:1071`, `:1139`).
+
+### 7.2 The two skill-level overrides (`CheckCondition`)
+
+`totalskilllevel` is what `Check` receives as its `skillpoint` argument (check #1) — the
+overrides relax **skill** requirements only; level, stats and fame are never touched:
+
+1. **Fishing quest → 10** (`Item-ManagerCommon.cpp:988-997`): if the item's
+   `siSkillKind` total via `GetTotalSkillLevel` (:983-986) is `< 10` **and**
+   `IsQuestGoing(QUEST_CLEAR_COND_FISHNOSKILL)` is true, the effective skill level
+   becomes 10. The quest-clear-cond enum is value **161** — every binary passes the
+   literal `0xa1`: base `FUN_00903400(0xa1,…)`, update `FUN_0090ffd0(0xa1,…)`
+   (`FUN_008b0b30` line 64 → `local_14 = 10`), NewHope `FUN_1406a79a0(…,0xa1,…)`
+   (`FUN_14062c4d0` line 100 → `iVar8 = 10`). All three guard it with
+   `if (9 < totalskilllevel) skip` (base `goto LAB_008a3f67`, update line 62,
+   NewHope line 95) — the quest only matters while the real total is below 10.
+2. **Summon identity → 100** (`:999-1003`): if `clIdentity.siIdentity ==
+   IDENTITY_PERSON_SUMMON` (`CommonHeader.h:478`, value **4**), the effective skill
+   level becomes 100 — unconditional, evaluated after override 1, so it overwrites it.
+   Binary: identity byte at `char+0xc8` (base `*(char*)(param_2+200)`,
+   update line 70) / `char+0xfc` (NewHope line 110) `== '\x04'` → `100`.
+
+After the overrides, `CheckCondition` picks the `hnd` argument as `GetLuk()` or
+`GetHnd()` per country switch `0x9d` (`Switch_ManufactureInfluenceLuck`, source
+`:1006-1014`; base `FUN_00757cf0(0x9d)`, update `FUN_00761e50(0x9d)` line 73,
+NewHope `FUN_140481a20(0x9d)` line 115). If `bSetTotalBA` is false (byte at
+`char+0x400`, base-verified; source `:1017-1032`), str/dex/mag/vit/hnd are passed as
+`MAX_SI32` so the stat checks auto-pass — while **level, skill and fame stay the real
+values** (`GetLevel()` is passed in both branches, `:1023` and `:1036`).
+
+### 7.3 Fame requirement (necklace-only column 11)
+
+- **Item side**: `cltItemConition.siFameLevel`, populated **only by necklaces** —
+  positional **column 11** of `ItemTypeNeckE.txt`, header name `Fame Condition`
+  (verified: col 11 of 27), read as `NDATA_INT32, &siFameLevelCondition`
+  (`cltItem-SetItemData.Cpp:4669`; file loaded at `:639`) and passed as the ctor's 12th
+  argument: `cltItemConition(0, 0, 0, 0, 0, 0, 0, 0, true, true, 0, siFameLevelCondition)`
+  (`:4714`) — all other neck requirements are 0.
+- **Character side**: `clIP.siFameLevel`, the character's **fame level** — same unit as
+  the requirement; assigned at `CommonHeader.h:3016`, advanced by the DB delta
+  `siIncFameLevel` (`DBMsgImportantParameta.cpp:19,42`), milestone-checked at
+  10/20/30/40 (`char.cpp:6545-6560`). Passed at `Item-ManagerCommon.cpp:1030` and
+  `:1043`.
+- **Formula**: fail **iff** `item_req != 0 && char_fame_level < item_req` → fail 10
+  (`Item-Condition.cpp:254-262`). The tooltip mirrors the same comparison, rendering the
+  requirement red when unmet (`Item-Condition.cpp:546-558`).
+
+### 7.4 Where the character-level gates actually live
+
+- **Equip level requirements** come only from the txt `Level`/`Condition` columns →
+  `cltItemConition.siLevel`, compared against `clIP.GetLevel()` (check #2); the
+  `bSetTotalBA` guard never bypasses the level check.
+- **Fishing rods carry no level (or any) requirement**: `AddFishingRodItem` builds
+  `cltItemConition(0, 0, 0, 0, 0, 0, 0, 0, true, true, 0, 0)`
+  (`cltItem-SetItemData.Cpp:6781`); the rod's `Skill`/`MountSkillPoint` columns feed
+  **crafting** info instead (`clinfo(SKILL_MAKETOOL1, skilllevel, …)`, `:6778`), and
+  `CanEquip` becomes the `bCanEquipSwitch` flag (`:6797`). Fishing is gated by
+  **SKILL_FISH skill level**, never character level: `CharServer-Fish.cpp:94-102`
+  (skill < 1 without the quest → refuse) with the same quest→10 override at `:148-151`,
+  mirrored in `NFishingDlg.cpp:449-460`.
+- **The one character-level gate in the fishing flow is the quest start condition**:
+  `Quest\huntingGround06\4540E.txt` → `InitCondition / Level = 47` (Skill 0) —
+  identical in base and update builds (this build requires **47, not 30**). Enforced
+  against `clIP.GetLevel()`: client `NNewQuestDlg.cpp:663-669`, `NQuestDlg.cpp:242-248`,
+  server `Server-Person.cpp:1864-1866`. Struct `cltQuestInitConditionInfo`
+  (`Quest.h:714-731`), parsed at `Quest-LoadTxt.cpp:1050`. NewHope's quest 4540 is
+  pak-resident and was not checked.
+- **Summon level 20 is a hardcoded character-level constant at the market/hatch UI**,
+  not an item condition: `#define LIMIT_LEVEL_HATCH_DOLL 20` (`Char-Common.h:488`),
+  checked in `NSummonMarketBuy.cpp:296` and `NSummonHeroMarketBuy.cpp:251` before the
+  buy order is sent. Doll items carry an all-zero condition
+  (`cltItem-SetItemData.Cpp:1427`); the `LimitLevel` column of `ItemTypeDollE.txt`
+  (values 0/20, the 20s on hero dolls) is **not read** by the source `AddDollItem`
+  (14 schema entries, no variable for it — binary handler not decompiled).
+- Summon equip (`CheckConditionForSummon`, `Item-ManagerCommon.cpp:1093+`) requires
+  `SUMMON_STATUS_TAKEOUT` (`:1100`); its min-level check is commented out
+  (`:1135-1142`, would emit `OUTOFSUMMONLEVEL`), as is the older whole-function variant
+  (`:1047-1091`: `limitlevel = 100`, skill forced to 100, fame forced to 100).
