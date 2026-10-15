@@ -61,11 +61,11 @@ fn make_new_char_rejects_slots_at_or_above_the_roster_bound() {
     }
 }
 
-/// The 2026-10-10 audit's must-fix #1: the game login checked only that
-/// `auth_key` equalled the account idnum and **ignored the password**, so any
-/// client that knew (or guessed) an account's `SERIAL` id could enter as that
-/// account without passing the front's login. The packet's password is
-/// verified against the stored hash now.
+/// The 2026-10-10 audit's must-fix #1 (`docs/MUST_FIX.md`): the game login
+/// checked only that `auth_key` equalled the account idnum and **ignored the
+/// password**, so any client that knew (or guessed) an account's `SERIAL` id
+/// could enter as that account without passing the front's login. The packet's
+/// password is verified against the stored hash now.
 #[test]
 fn game_login_refuses_a_wrong_password() {
     let hash = gz_db::password::hash_password("secret");

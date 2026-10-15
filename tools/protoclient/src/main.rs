@@ -6,7 +6,7 @@
 //! okay". It is the harness that must go green before `New Era.exe` is
 //! pointed at the service.
 //!
-//! Usage: `protoclient [front_addr] [user] [password] [--move-item <from>:<to>] [--drop-item <slot>:<count>]`
+//! Usage: `protoclient [front_addr] [user] [password] [--move-item <from>:<to>] [--drop-item <slot>:<count>] [--use-bonus <pos>:<amount>] [--observe-char-update <user>:<password>]`
 //! Defaults: `127.0.0.1:5700 test test`.
 //!
 //! `--move-item` runs the inventory phase after world entry: it pulls the

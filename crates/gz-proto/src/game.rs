@@ -105,7 +105,8 @@ pub struct GameLogin {
     pub auth_key: i32,
     /// `szID[20]`.
     pub userid: String,
-    /// `szPassword[20]`.
+    /// `szPassword[20]` — as typed by the player; checked server-side against
+    /// the stored hash (`docs/MUST_FIX.md` #1).
     pub password: String,
     /// `uiGameMode` (`0` windowed, `1`, `2`).
     pub game_mode: u8,
