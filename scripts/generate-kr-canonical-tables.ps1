@@ -1,7 +1,7 @@
 # generate-kr-canonical-tables.ps1 - regenerate the KR-baseline canonical monster tables.
 #
-# Emits two committed tables from the Korean baseline plus the active English data,
-# and `-Check` fails when either has drifted:
+# Emits three committed tables from the Korean baseline plus the active English data,
+# and `-Check` fails when any has drifted:
 #
 #   * `crates/gz-data/data/CharAttackInfoCanonical.txt` - combat stats. EN 27-column
 #     schema; every column the KR baseline carries takes the KR value, the 7 columns
@@ -9,6 +9,11 @@
 #     `Name` column keeps the English display name.
 #   * `crates/gz-data/data/CharItemInfoCanonical.txt` - capture + drops. EN 6-column
 #     schema, same merge rule; the `ItemInfo` drop string comes from KR verbatim.
+#   * `crates/gz-data/data/KindReconciliation.txt` - roster audit. Every kind in either
+#     roster or either spawn-group set, with its tier, EN wire id and spawning side.
+#     The spawn gate: a kind an EN group spawns must carry a wire id - every one does
+#     but the 3 quest placeholders, which no roster holds. The KR groups' extra 256
+#     kinds cannot resolve on an EN client and stay quarantined (strategy doc 3.4, 4).
 #
 # The decision record is docs/DESIGN_MONSTER_KR_BASELINE_STRATEGY.md (docs repo):
 # the Korean baseline `Goonzu_kr_last` is the source of truth; English names and
@@ -80,6 +85,30 @@ function Read-EnTable([string]$Path) {
 
 function Read-KrTable([string]$Path) {
     Read-Table ((Read-NcrText $Path) -split "`r?`n")
+}
+
+# Group files are plain EUC-KR, but a few ship UTF-16 or NCR; sniff rather than assume.
+function Read-LooseText([string]$Path) {
+    $b = [IO.File]::ReadAllBytes($Path)
+    if ($b.Length -ge 24 -and [Text.Encoding]::ASCII.GetString($b[0..3]) -eq "NCR`0") {
+        $size = [BitConverter]::ToUInt32($b, 8); $key = $b[12]
+        $ct = $b[24..(24 + $size - 1)]; $pt = New-Object byte[] $size
+        for ($i = 0; $i -lt $size - 1; $i++) { $pt[$i] = ((($ct[$i] - $key) -band 0xFF) -bxor $ct[$i + 1]) }
+        $pt[$size - 1] = $ct[$size - 1] -bxor $key
+        return $euc.GetString($pt)
+    }
+    if ($b.Length -ge 2 -and $b[0] -eq 0xFF -and $b[1] -eq 0xFE) { return [Text.Encoding]::Unicode.GetString($b, 2, $b.Length - 2) }
+    $euc.GetString($b)
+}
+
+# Every KIND_ code a spawn-group set references (the codes are ASCII in every encoding).
+function Get-ReferencedKinds([string]$Dir) {
+    $rx = [regex]'KIND_[A-Za-z0-9_]+'
+    $set = New-Object System.Collections.Generic.HashSet[string]
+    foreach ($f in (Get-ChildItem $Dir -File -ErrorAction SilentlyContinue)) {
+        foreach ($m in $rx.Matches((Read-LooseText $f.FullName))) { [void]$set.Add($m.Value) }
+    }
+    $set
 }
 
 function ColMap([string[]]$Header) {
@@ -168,6 +197,27 @@ function Write-CanonTable([string]$Path, [string]$Title, $Table, [string]$Proven
     }
 }
 
+# The reconciliation is a plain UTF-8 TSV, not an NDataLoader table: it is a build
+# audit, not runtime data. `.gitattributes` pins eol=lf, so emit LF and compare
+# newline-insensitively rather than the platform newline.
+function Write-ReconTable([string]$Path, $Rows) {
+    $sb = New-Object Text.StringBuilder
+    [void]$sb.Append("code`ttier`ten_wire_id`tspawnable`n")
+    foreach ($r in $Rows) { [void]$sb.Append(($r -join "`t")); [void]$sb.Append("`n") }
+    $text = $sb.ToString()
+    if ($Check) {
+        if (-not (Test-Path -LiteralPath $Path)) { throw "missing committed table: $Path" }
+        $have = ([IO.File]::ReadAllText($Path) -replace "`r`n", "`n")
+        if ($have -ne $text) { throw "drift: $Path differs from the regenerated reconciliation; re-run without -Check" }
+        Write-Host "  OK $Path" -ForegroundColor Green
+    }
+    else {
+        New-Item -ItemType Directory -Force -Path (Split-Path $Path) | Out-Null
+        [IO.File]::WriteAllText($Path, $text, [Text.UTF8Encoding]::new($false))
+        Write-Host "  wrote $Path ($($Rows.Count) rows)" -ForegroundColor Green
+    }
+}
+
 # --- load -------------------------------------------------------------------
 $krAttack = Read-KrTable (Join-Path $KRRoot "CharInfo\CharAttackInfo.txt")
 $krItem = Read-KrTable (Join-Path $KRRoot "CharInfo\CharItemInfo.txt")
@@ -188,10 +238,46 @@ foreach ($line in ([Text.Encoding]::Unicode.GetString([IO.File]::ReadAllBytes((J
 }
 $missingIds = @(($attack.Rows | ForEach-Object { $_[0].Trim() }) | Where-Object { -not $unique.ContainsKey($_) } | Sort-Object)
 
+# --- roster reconciliation (strategy doc 3.4 / 4) ----------------------------
+# One row per kind in either roster or either spawn-group set. The committed table
+# is the audit the spawn gate reads. The pairing investigation (strategy doc 4)
+# found no safe automatic key - the two id spaces are independent and the names
+# diverge even for shared kinds - so KR-only kinds stay quarantined, not paired.
+$krRef = Get-ReferencedKinds (Join-Path $KRRoot "NPCGroup")
+$enRef = Get-ReferencedKinds (Join-Path $ENRoot "NPCGroup")
+$krRoster = @{}
+foreach ($r in $krAttack.Rows) { $krRoster[$r[0].Trim()] = $true }
+$enRoster = @{}
+foreach ($r in $enAttack.Rows) { $enRoster[$r[0].Trim()] = $true }
+$codes = New-Object System.Collections.Generic.HashSet[string]
+foreach ($k in $krRoster.Keys) { [void]$codes.Add($k) }
+foreach ($k in $enRoster.Keys) { [void]$codes.Add($k) }
+foreach ($k in $krRef) { [void]$codes.Add($k) }
+foreach ($k in $enRef) { [void]$codes.Add($k) }
+$recon = @()
+$order = [string[]]@($codes)
+# Ordinal, not culture-aware: equal-under-culture codes (KIND_KELAN / KIND_kelan) would
+# otherwise fall back to HashSet order, and .NET Core randomises string hashing per
+# process - the file would flip row order and `-Check` would fail at random.
+[Array]::Sort($order, [StringComparer]::Ordinal)
+foreach ($code in $order) {
+    if ($krRoster.ContainsKey($code) -and $enRoster.ContainsKey($code)) { $tier = "shared" }
+    elseif ($enRoster.ContainsKey($code)) { $tier = "en_only" }
+    elseif ($krRoster.ContainsKey($code)) { $tier = "kr_only" }
+    else { $tier = "unrostered" }
+    if ($unique.ContainsKey($code)) { $id = [string]$unique[$code] } else { $id = "-" }
+    $spawn = @()
+    if ($krRef.Contains($code)) { $spawn += "kr" }
+    if ($enRef.Contains($code)) { $spawn += "en" }
+    if ($spawn.Count) { $spawnable = $spawn -join "+" } else { $spawnable = "none" }
+    $recon += , @($code, $tier, $id, $spawnable)
+}
+
 # --- emit -------------------------------------------------------------------
 $prov = "KR baseline (Goonzu_kr_last) values, EN schema + English display names; docs/DESIGN_MONSTER_KR_BASELINE_STRATEGY.md"
 Write-CanonTable (Join-Path $OutDir "CharAttackInfoCanonical.txt") "CharAttackInfoCanonical" $attack $prov
 Write-CanonTable (Join-Path $OutDir "CharItemInfoCanonical.txt") "CharItemInfoCanonical" $item $prov
+Write-ReconTable (Join-Path $OutDir "KindReconciliation.txt") $recon
 
 # --- report -----------------------------------------------------------------
 Write-Host ""
@@ -203,3 +289,8 @@ if ($item.Dups.Count) { Write-Host "  KR duplicate codes (last wins): $($item.Du
 if ($item.CaseOnly.Count) { Write-Host "  case-only pairs: $($item.CaseOnly -join '; ')" }
 Write-Host "wire-id gate: $($attack.Rows.Count - $missingIds.Count)/$($attack.Rows.Count) attack codes have an EN KindInfo_Unique id"
 if ($missingIds.Count) { Write-Host "  missing ids: $($missingIds -join ', ')" -ForegroundColor Yellow }
+$spawnNoId = @($recon | Where-Object { $_[3] -ne "none" -and $_[2] -eq "-" })
+$enNoId = @($recon | Where-Object { ($_[3] -split '\+') -contains "en" -and $_[2] -eq "-" })
+Write-Host "reconcile: $($recon.Count) kinds across both rosters + both group sets"
+Write-Host "  spawned without an EN wire id: $($spawnNoId.Count) (of which an EN group spawns: $($enNoId.Count))"
+if ($enNoId.Count) { Write-Host "  EN-group misses: $((@($enNoId | ForEach-Object { $_[0] })) -join ', ')" -ForegroundColor Yellow }

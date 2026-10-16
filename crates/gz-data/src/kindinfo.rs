@@ -657,4 +657,80 @@ mod tests {
             (258, 460, 630)
         );
     }
+
+    /// The committed roster reconciliation and the spawn gate (strategy doc 3.4,
+    /// 4): every kind in either roster or either spawn-group set, and the rule that
+    /// a kind an English group spawns must carry a wire id. The only misses are the
+    /// quest placeholders, which no roster holds. The file is committed, so this
+    /// always runs; regenerate with `scripts/generate-kr-canonical-tables.ps1`.
+    #[test]
+    fn every_kind_an_english_group_spawns_resolves_to_a_wire_id() {
+        let path = std::path::Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/data/KindReconciliation.txt"
+        ));
+        let text = std::fs::read_to_string(path).expect("the reconciliation is committed");
+        let mut lines = text.lines();
+        assert_eq!(lines.next(), Some("code\ttier\ten_wire_id\tspawnable"));
+
+        let (mut rows, mut shared, mut en_only, mut kr_only) = (0, 0, 0, 0);
+        let mut shared_without_id: Vec<&str> = Vec::new();
+        let mut en_spawn_without_id: Vec<&str> = Vec::new();
+        for line in lines.filter(|l| !l.is_empty()) {
+            rows += 1;
+            let f: Vec<&str> = line.split('\t').collect();
+            assert_eq!(f.len(), 4, "row: {line}");
+            match f[1] {
+                "shared" => shared += 1,
+                "en_only" => en_only += 1,
+                "kr_only" => kr_only += 1,
+                _ => {}
+            }
+            if f[2] == "-" {
+                if f[1] == "shared" {
+                    shared_without_id.push(f[0]);
+                }
+                if f[3].split('+').any(|s| s == "en") {
+                    // The gate: a kind an EN group spawns must resolve, unless no
+                    // roster holds it at all (the quest placeholders).
+                    assert_eq!(
+                        f[1], "unrostered",
+                        "EN-spawned roster kind {} has no wire id",
+                        f[0]
+                    );
+                    en_spawn_without_id.push(f[0]);
+                }
+            }
+        }
+
+        // en_only is 610, not 609: KIND_kelan and KIND_KELAN are the same kind under
+        // the documented case-only-pair rule, so both rows carry the EN roster tier.
+        assert_eq!(
+            (rows, shared, en_only, kr_only),
+            (1369, 218, 610, 499),
+            "both rosters and both spawn-group sets, tiered"
+        );
+
+        // The 9 shared kinds still missing an EN `KindInfo_Unique` id (open item 3).
+        let mut expected_shared = vec![
+            "KIND_FireCrystal_State",
+            "KIND_KoryuGURI_STATUE",
+            "KIND_Koryu_CORALMUSHROOM",
+            "KIND_Koryu_CRABGURI",
+            "KIND_Koryu_SAMURAIBoss",
+            "KIND_Koryu_SAMURAICRAB",
+            "KIND_LandCrystal_State",
+            "KIND_WaterCrystal_State",
+            "KIND_WindCrystal_State",
+        ];
+        expected_shared.sort_unstable();
+        shared_without_id.sort_unstable();
+        assert_eq!(shared_without_id, expected_shared);
+
+        // The only EN-group references that do not resolve: quest placeholders.
+        let mut expected_en = vec!["KIND_QUESTETC1", "KIND_QUESTNPC1", "KIND_QUESTNPC2"];
+        expected_en.sort_unstable();
+        en_spawn_without_id.sort_unstable();
+        assert_eq!(en_spawn_without_id, expected_en);
+    }
 }
