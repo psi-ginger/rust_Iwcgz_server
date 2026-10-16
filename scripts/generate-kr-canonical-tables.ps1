@@ -9,22 +9,27 @@
 #     `Name` column keeps the English display name. The EN rows are followed by the
 #     verified exact-code KR-only kinds - KR-only codes that already carry an EN wire
 #     id, so the EN client can resolve them (`KIND_BOMBDRAGON`, `KIND_JANGBOGO`,
-#     strategy doc 3.4).
+#     strategy doc 3.4). Human-confirmed rename pairs (Tier C) upgrade the EN-only row
+#     of the paired EN code in place, so they add no row.
 #   * `crates/gz-data/data/CharItemInfoCanonical.txt` - capture + drops. EN 6-column
-#     schema, same merge rule; the `ItemInfo` drop string comes from KR verbatim.
+#     schema, same merge rule; the `ItemInfo` drop string comes from KR verbatim. A
+#     rename pair whose EN code has no EN row is appended.
 #   * `crates/gz-data/data/KindReconciliation.txt` - roster audit. Every kind in either
-#     roster or either spawn-group set, with its tier, EN wire id and spawning side.
-#     The spawn gate: a kind an EN group spawns must carry a wire id - every one does
-#     but the 3 quest placeholders, which no roster holds. The KR groups' extra 256
-#     kinds cannot resolve on an EN client and stay quarantined (strategy doc 3.4, 4).
+#     roster or either spawn-group set, with its tier, EN wire id, spawning side and the
+#     EN code a rename pair resolves it to. The spawn gate: a kind an EN group spawns
+#     must carry a wire id - every one does but the 3 quest placeholders, which no roster
+#     holds. The KR groups' extra kinds cannot resolve on an EN client and stay
+#     quarantined, minus the rename pairs (strategy doc 3.4, 4).
 #
 # The decision record is docs/DESIGN_MONSTER_KR_BASELINE_STRATEGY.md (docs repo):
 # the Korean baseline `Goonzu_kr_last` is the source of truth; English names and
 # the EN wire ids (`Data\KindInfo_Unique.txt`, never modified) layer on top.
 #   - shared kind codes are upgraded in place;
-#   - EN-only codes keep their EN values (provisional - no KR truth exists);
-#   - KR-only codes are quarantined: an EN client cannot resolve a kind id it does
-#     not have, so they are reported but not emitted.
+#   - EN-only codes keep their EN values (provisional - no KR truth exists), unless a
+#     human confirmed them as a rename-pair target, which makes them KR-sourced;
+#   - KR-only codes are quarantined: an EN client cannot resolve a kind id it does not
+#     have, so they are reported but not emitted - unless a human confirmed a rename
+#     pair to an EN code that carries the wire id (Tier C), which resolves the KR code.
 #
 # The KR `CharInfo\*.txt` files are NCR-encrypted (24-byte NCryptHeader, the read
 # path `NLib\NDataLoader.cpp:104-114`); the decoder below is the legacy algorithm
@@ -174,6 +179,45 @@ function Merge-Table($Kr, $En) {
     }
 }
 
+# Tier C: human-confirmed rename pairs (strategy doc 4, docs/MONSTER_PAIRING_CANDIDATES.md).
+# A KR-only code reviewed and paired to an EN-only code that carries the EN wire id: the
+# EN code is the runtime identity - the EN client resolves its id - so the EN row takes
+# the KR values (stats, attributes, capture numbers and the drop string) while keeping the
+# EN code and the English display name. A pair whose EN code has no EN row gets one
+# appended, as Tier B does. Only pairs a human has confirmed are listed; every unlisted
+# KR-only kind stays quarantined.
+function Apply-RenamePairs($Table, $KrTable, $Pairs) {
+    $krMap = ColMap $KrTable.Header
+    $enMap = ColMap $Table.Header
+    $common = @($krMap.Keys | Where-Object { $enMap.ContainsKey($_) -and $_ -ne "Char" -and $_ -ne "Name" })
+    $krByCode = @{}
+    foreach ($r in $KrTable.Rows) { $krByCode[$r[$krMap["Char"]].Trim()] = $r }
+    $rowAt = @{}
+    for ($i = 0; $i -lt $Table.Rows.Count; $i++) { $rowAt[$Table.Rows[$i][$enMap["Char"]].Trim()] = $i }
+    $upgraded = @()
+    $appended = @()
+    foreach ($krCode in @($Pairs.Keys)) {
+        $enCode = $Pairs[$krCode]
+        # A missing KR row means the table has no KR data for the pair (e.g. no drop
+        # row): nothing to apply, the EN row stays as it is.
+        if (-not $krByCode.ContainsKey($krCode)) { continue }
+        $krRow = $krByCode[$krCode]
+        if ($rowAt.ContainsKey($enCode)) {
+            $cells = $Table.Rows[$rowAt[$enCode]]
+            foreach ($c in $common) { if ($krMap[$c] -lt $krRow.Count) { $cells[$enMap[$c]] = $krRow[$krMap[$c]].Trim() } }
+            $upgraded += "$krCode->$enCode"
+        }
+        else {
+            $cells = @("") * $Table.Header.Count
+            foreach ($c in $krMap.Keys) { if ($enMap.ContainsKey($c) -and $krMap[$c] -lt $krRow.Count) { $cells[$enMap[$c]] = $krRow[$krMap[$c]].Trim() } }
+            $cells[$enMap["Char"]] = $enCode
+            $Table.Rows += , $cells
+            $appended += "$krCode->$enCode"
+        }
+    }
+    @{ Upgraded = $upgraded; Appended = $appended }
+}
+
 function Write-CanonTable([string]$Path, [string]$Title, $Table, [string]$Provenance) {
     $sb = New-Object Text.StringBuilder
     [void]$sb.AppendLine($Title)
@@ -206,7 +250,7 @@ function Write-CanonTable([string]$Path, [string]$Title, $Table, [string]$Proven
 # newline-insensitively rather than the platform newline.
 function Write-ReconTable([string]$Path, $Rows) {
     $sb = New-Object Text.StringBuilder
-    [void]$sb.Append("code`ttier`ten_wire_id`tspawnable`n")
+    [void]$sb.Append("code`ttier`ten_wire_id`tspawnable`tpairs_to`n")
     foreach ($r in $Rows) { [void]$sb.Append(($r -join "`t")); [void]$sb.Append("`n") }
     $text = $sb.ToString()
     if ($Check) {
@@ -230,6 +274,40 @@ $enItem = Read-EnTable (Join-Path $ENRoot "CharInfo\chariteminfoE.txt")
 
 $attack = Merge-Table $krAttack $enAttack
 $item = Merge-Table $krItem $enItem
+
+# --- Tier C: confirmed rename pairs (strategy doc 4) ------------------------
+# KR-only code -> EN-only code, each reviewed by a human against
+# docs/MONSTER_PAIRING_CANDIDATES.md. The EN code carries the wire id, so it stays the
+# runtime identity and the KR rows supply the values. Insertion order is the report order.
+$renamePairs = [ordered]@{
+    "KIND_BEAST06YOUNG"  = "KIND_HOR14YOUNG"
+    "KIND_BLACKTIGER"    = "KIND_BLACKTIGER_MELEE"
+    "KIND_BLOODDEACON"   = "KIND_DEACON"
+    "KIND_BLOODPRIEST"   = "KIND_PRIEST"
+    "KIND_Bum_I"         = "KIND_HUNTER_MELEE"
+    "KIND_EMPERORWIZARD" = "KIND_EMPERORCAVALRY"
+    "KIND_EMPERORWORKER" = "KIND_EMPERORPORTER"
+    "KIND_FIREHAETAE"    = "KIND_HOR16YOUNG"
+    "KIND_FULLMOON"      = "KIND_MOON"
+    "KIND_GAGOIL"        = "KIND_GARGOYLE"
+    "KIND_GRAVEROBBERY"  = "KIND_EMPERORROBBER"
+    "KIND_Gum_I"         = "KIND_GALE_RANGE"
+    "KIND_KRAKEN"        = "KIND_Kracken"
+    "KIND_SASURI"        = "KIND_HOR18YOUNG"
+    "KIND_SPAMONKEY"     = "KIND_MONKEYSON"
+    "KIND_SPAPANDA"      = "KIND_NINJAPANDA"
+    "KIND_SPARACCON"     = "KIND_RACCOONDOG"
+    "KIND_SPATOAD"       = "KIND_TOAD"
+    "KIND_VIRGINGHOST"   = "KIND_Ghost_NvGui1"
+    "KIND_WERWOLF"       = "KIND_WEREWOLF"
+}
+$attackPairs = Apply-RenamePairs $attack $krAttack $renamePairs
+$itemPairs = Apply-RenamePairs $item $krItem $renamePairs
+# Every pair must land on the attack master (the KR attack roster holds all 20); a
+# shortfall means a typo in the pair table, not legitimate missing data.
+if (($attackPairs.Upgraded.Count + $attackPairs.Appended.Count) -ne $renamePairs.Count) {
+    throw "rename pairs applied to attack: $($attackPairs.Upgraded.Count + $attackPairs.Appended.Count) of $($renamePairs.Count)"
+}
 
 # --- wire-id gate (strategy doc step 3.4) -----------------------------------
 # The wire carries the KindInfo_Unique numeric id; a kind without an id cannot be
@@ -266,9 +344,10 @@ $missingIds = @(($attack.Rows | ForEach-Object { $_[0].Trim() }) | Where-Object 
 
 # --- roster reconciliation (strategy doc 3.4 / 4) ----------------------------
 # One row per kind in either roster or either spawn-group set. The committed table
-# is the audit the spawn gate reads. The pairing investigation (strategy doc 4)
-# found no safe automatic key - the two id spaces are independent and the names
-# diverge even for shared kinds - so KR-only kinds stay quarantined, not paired.
+# is the audit the spawn gate reads. No safe automatic pairing key exists (strategy
+# doc 4: the two id spaces are independent and the names diverge even for shared
+# kinds), so KR-only kinds are quarantined unless a human confirmed a rename pair -
+# those carry the EN code's wire id and name the EN code in `pairs_to`.
 $krRef = Get-ReferencedKinds (Join-Path $KRRoot "NPCGroup")
 $enRef = Get-ReferencedKinds (Join-Path $ENRoot "NPCGroup")
 $krRoster = @{}
@@ -286,17 +365,28 @@ $order = [string[]]@($codes)
 # otherwise fall back to HashSet order, and .NET Core randomises string hashing per
 # process - the file would flip row order and `-Check` would fail at random.
 [Array]::Sort($order, [StringComparer]::Ordinal)
+$pairTo = @{}
+foreach ($k in $renamePairs.Keys) { $pairTo[$k] = $renamePairs[$k] }
 foreach ($code in $order) {
     if ($krRoster.ContainsKey($code) -and $enRoster.ContainsKey($code)) { $tier = "shared" }
     elseif ($enRoster.ContainsKey($code)) { $tier = "en_only" }
     elseif ($krRoster.ContainsKey($code)) { $tier = "kr_only" }
     else { $tier = "unrostered" }
-    if ($unique.ContainsKey($code)) { $id = [string]$unique[$code] } else { $id = "-" }
+    # A confirmed rename pair resolves its KR code to the EN code's wire id; the code
+    # itself carries no id, so record the target rather than claiming the id as its own.
+    if ($pairTo.ContainsKey($code)) {
+        $target = $pairTo[$code]
+        if (-not $unique.ContainsKey($target)) { throw "rename pair target $target has no EN wire id" }
+        $id = [string]$unique[$target]
+        $pairsTo = $target
+    }
+    elseif ($unique.ContainsKey($code)) { $id = [string]$unique[$code]; $pairsTo = "-" }
+    else { $id = "-"; $pairsTo = "-" }
     $spawn = @()
     if ($krRef.Contains($code)) { $spawn += "kr" }
     if ($enRef.Contains($code)) { $spawn += "en" }
     if ($spawn.Count) { $spawnable = $spawn -join "+" } else { $spawnable = "none" }
-    $recon += , @($code, $tier, $id, $spawnable)
+    $recon += , @($code, $tier, $id, $spawnable, $pairsTo)
 }
 
 # --- emit -------------------------------------------------------------------
@@ -307,13 +397,15 @@ Write-ReconTable (Join-Path $OutDir "KindReconciliation.txt") $recon
 
 # --- report -----------------------------------------------------------------
 Write-Host ""
-Write-Host "attack: $($attack.Rows.Count) rows - $($attack.Upgraded) KR-upgraded, $($attack.Provisional) EN-provisional, $($tierB.Count) Tier-B exact-code KR-only appended; $($attack.KrOnly.Count - $tierB.Count) KR-only quarantined"
+Write-Host "attack: $($attack.Rows.Count) rows - $($attack.Upgraded + $attackPairs.Upgraded.Count) KR-upgraded, $($attack.Provisional - $attackPairs.Upgraded.Count) EN-provisional, $($tierB.Count) Tier-B exact-code KR-only appended; $($attack.KrOnly.Count - $tierB.Count - $attackPairs.Upgraded.Count) KR-only quarantined"
 if ($tierB.Count) { Write-Host "  Tier B appended: $($tierB -join ', ')" }
 if ($attack.Dups.Count) { Write-Host "  KR duplicate codes (last wins): $($attack.Dups -join ', ')" }
 if ($attack.CaseOnly.Count) { Write-Host "  case-only pairs: $($attack.CaseOnly -join '; ')" }
-Write-Host "drops : $($item.Rows.Count) rows - $($item.Upgraded) KR-upgraded, $($item.Provisional) EN-provisional; $($item.KrOnly.Count) KR-only quarantined"
+Write-Host "drops : $($item.Rows.Count) rows - $($item.Upgraded + $itemPairs.Upgraded.Count) KR-upgraded, $($item.Provisional - $itemPairs.Upgraded.Count) EN-provisional; $($item.KrOnly.Count - $itemPairs.Upgraded.Count - $itemPairs.Appended.Count) KR-only quarantined"
 if ($item.Dups.Count) { Write-Host "  KR duplicate codes (last wins): $($item.Dups -join ', ')" }
 if ($item.CaseOnly.Count) { Write-Host "  case-only pairs: $($item.CaseOnly -join '; ')" }
+Write-Host "Tier C rename pairs: attack $($attackPairs.Upgraded.Count) upgraded / $($attackPairs.Appended.Count) appended; drops $($itemPairs.Upgraded.Count) upgraded / $($itemPairs.Appended.Count) appended"
+if ($itemPairs.Appended.Count) { Write-Host "  drops appended: $($itemPairs.Appended -join ', ')" }
 Write-Host "wire-id gate: $($attack.Rows.Count - $missingIds.Count)/$($attack.Rows.Count) attack codes have an EN KindInfo_Unique id"
 if ($missingIds.Count) { Write-Host "  missing ids: $($missingIds -join ', ')" -ForegroundColor Yellow }
 $spawnNoId = @($recon | Where-Object { $_[3] -ne "none" -and $_[2] -eq "-" })

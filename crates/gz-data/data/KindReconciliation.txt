@@ -1,1370 +1,1370 @@
-code	tier	en_wire_id	spawnable
-KIND_10cake	en_only	838	none
-KIND_11cake	en_only	839	none
-KIND_17THCAKE_LV1	kr_only	-	none
-KIND_17THCAKE_LV2	kr_only	-	none
-KIND_3LEAVES	kr_only	-	kr
-KIND_9th_M1_BOAR	en_only	561	en
-KIND_9th_M1_chailang	en_only	562	en
-KIND_9th_M2_Nuhly	en_only	563	en
-KIND_9th_M2_SNAKE	en_only	564	en
-KIND_9th_M3_Jigws	en_only	565	en
-KIND_9th_M3_Sphinx	en_only	567	en
-KIND_9th_M3_TIGER	en_only	566	en
-KIND_AGATE	kr_only	-	none
-KIND_AIRIN	en_only	319	en
-KIND_AJI	kr_only	-	none
-KIND_ALEX	en_only	359	en
-KIND_ALTAIR	shared	482	none
-KIND_AMBERSAURUS	en_only	364	en
-KIND_ANNIVERSARY	en_only	335	en
-KIND_ANTIQUITY	en_only	375	none
-KIND_ANT_CHICKEN	kr_only	-	none
-KIND_ARA	en_only	376	en
-KIND_ARCHER	kr_only	-	kr
-KIND_ARO	kr_only	-	kr
-KIND_ARTIFACTNPC	en_only	298	en
-KIND_ASADAL	kr_only	-	none
-KIND_ASURA	kr_only	-	none
-KIND_AURA_STONE	shared	929	none
-KIND_Ancient_Gate	en_only	700	none
-KIND_Ancient_Sorcerer01	unrostered	-	kr
-KIND_Ancient_Sorcerer02	unrostered	-	kr
-KIND_Ancient_Xingshi01	shared	701	kr+en
-KIND_Ancient_Xingshi02	shared	702	kr+en
-KIND_Ancient_Xingshi03	shared	772	kr+en
-KIND_Ancient_Xingshi04	shared	773	kr+en
-KIND_Ancient_Xingshi06	shared	774	kr+en
-KIND_AnimalBox	kr_only	-	none
-KIND_Aries	en_only	540	none
-KIND_Aries_T	en_only	541	none
-KIND_BABY_BOSSMONKEY	kr_only	-	kr
-KIND_BABY_ICEWITCH	kr_only	-	kr
-KIND_BABY_KINGYACHA	kr_only	-	kr
-KIND_BABY_SAMDURANG	kr_only	-	kr
-KIND_BABY_SKELETONBOSS	kr_only	-	kr
-KIND_BACHELORGHOST	kr_only	-	kr
-KIND_BADTOOL	kr_only	-	kr
-KIND_BAIYUY	shared	533	kr+en
-KIND_BALLON	kr_only	-	none
-KIND_BALLOTBOX	en_only	310	en
-KIND_BAMBI	kr_only	-	none
-KIND_BAMBI_N	kr_only	-	none
-KIND_BATTLECAR	kr_only	-	none
-KIND_BATTLEZONE	shared	244	kr+en
-KIND_BEARLADY	kr_only	-	kr
-KIND_BEARTANG	shared	328	none
-KIND_BEAST01YOUNG	shared	224	none
-KIND_BEAST02YOUNG	kr_only	-	none
-KIND_BEAST03YOUNG	kr_only	-	none
-KIND_BEAST04YOUNG	kr_only	-	none
-KIND_BEAST05YOUNG	kr_only	-	none
-KIND_BEAST06YOUNG	kr_only	-	none
-KIND_BEAST07YOUNG	kr_only	-	none
-KIND_BEAST08YOUNG	kr_only	-	none
-KIND_BEEGIRL	en_only	76	none
-KIND_BELITA	en_only	156	kr+en
-KIND_BERSERKER	en_only	238	none
-KIND_BIG3LEAVES	kr_only	-	none
-KIND_BIGRACCOON	en_only	178	none
-KIND_BIGRACCOON_AGIT	en_only	266	en
-KIND_BINGO	kr_only	-	kr
-KIND_BLACKBAT	shared	69	kr+en
-KIND_BLACKBAT_2	en_only	120	en
-KIND_BLACKBEAR	shared	63	kr+en
-KIND_BLACKBEAR_2	en_only	119	en
-KIND_BLACKBOSS	en_only	240	none
-KIND_BLACKPRIEST	en_only	446	en
-KIND_BLACKPRIEST_1	kr_only	-	kr
-KIND_BLACKPRIEST_2	kr_only	-	kr
-KIND_BLACKPRIEST_3	kr_only	-	kr
-KIND_BLACKPRIEST_4	kr_only	-	kr
-KIND_BLACKPRIEST_5	kr_only	-	kr
-KIND_BLACKRABIT	kr_only	-	none
-KIND_BLACKSOUL	en_only	448	en
-KIND_BLACKSOUL_1	kr_only	-	kr
-KIND_BLACKSOUL_2	kr_only	-	kr
-KIND_BLACKSOUL_3	kr_only	-	kr
-KIND_BLACKSOUL_4	kr_only	-	kr
-KIND_BLACKSOUL_5	kr_only	-	kr
-KIND_BLACKSPIDER	en_only	247	en
-KIND_BLACKTIGER	kr_only	-	none
-KIND_BLACKTIGER_MELEE	en_only	961	none
-KIND_BLACKWING	kr_only	-	kr
-KIND_BLACKWING_SUMMON	kr_only	-	none
-KIND_BLACKWOLF	shared	71	kr+en
-KIND_BLACKWOLF_2	en_only	122	en
-KIND_BLADE_BLUE	kr_only	-	none
-KIND_BLADE_GREEN	kr_only	-	none
-KIND_BLADE_RED	kr_only	-	none
-KIND_BLADE_YELLOW	kr_only	-	none
-KIND_BLESSINGCLARA	en_only	387	none
-KIND_BLESSINGHIRO	en_only	390	none
-KIND_BLESSINGJEAN	en_only	385	none
-KIND_BLESSINGMERIEL	en_only	386	none
-KIND_BLESSINGSPARKY	en_only	388	none
-KIND_BLOODBAT	shared	195	kr+en
-KIND_BLOODDEACON	kr_only	-	kr
-KIND_BLOODHAND	kr_only	-	kr
-KIND_BLOODIRON	kr_only	-	kr
-KIND_BLOODPRIEST	kr_only	-	kr
-KIND_BLUEBUG	en_only	77	none
-KIND_BLUEFLAG	kr_only	-	none
-KIND_BLUEFLY	shared	39	kr+en
-KIND_BLUESHABEL	en_only	223	none
-KIND_BLUE_CKNIGHT	en_only	596	none
-KIND_BOKBULBOKNPC	en_only	411	en
-KIND_BOMBDRAGON	kr_only	34	none
-KIND_BOMBWHALE	kr_only	-	none
-KIND_BONETYRANNO	shared	369	en
-KIND_BONG	shared	42	kr+en
-KIND_BONGDAL	shared	44	kr+en
-KIND_BONGSAMI	shared	93	kr+en
-KIND_BONGSUNI	shared	92	kr+en
-KIND_BONGTAGI	shared	90	kr+en
-KIND_BOSSBANDIT	kr_only	-	none
-KIND_BOSSINVASIONMAINBOSS	en_only	829	none
-KIND_BOSSMONKEY	shared	27	kr+en
-KIND_BOXERCRAB	shared	943	kr+en
-KIND_BRAI	en_only	138	en
-KIND_BROWNWOLF	shared	72	kr+en
-KIND_BROWNWOLF_2	en_only	153	en
-KIND_BUBOSANG	kr_only	-	kr
-KIND_BULGASARI	shared	141	none
-KIND_BUTCHER	kr_only	-	kr
-KIND_Baby_Melee	en_only	521	none
-KIND_Baby_Range	en_only	522	none
-KIND_BasicFrog	unrostered	-	kr
-KIND_BattleRoyalKatar	en_only	425	none
-KIND_BattleRoyalKatar2	en_only	428	none
-KIND_BattleRoyalNPC	en_only	431	en
-KIND_BattleRoyalRifle	en_only	426	none
-KIND_BattleRoyalRifle2	en_only	429	none
-KIND_BattleRoyalSword	en_only	424	none
-KIND_BattleRoyalSword2	en_only	427	none
-KIND_BearSanta_Range	en_only	658	none
-KIND_Bear_Melee	en_only	601	none
-KIND_Beastmaster_Melee	en_only	559	none
-KIND_Beastmaster_Range	en_only	560	none
-KIND_Bee_Range	en_only	602	none
-KIND_Big_husky	en_only	516	none
-KIND_BlueFrog	kr_only	-	kr
-KIND_Bum_I	kr_only	-	none
-KIND_CAMAOSS	shared	530	kr+en
-KIND_CANNON	kr_only	-	kr
-KIND_CANNONMOL	en_only	144	en
-KIND_CASTLE	shared	99	none
-KIND_CATAR	en_only	241	none
-KIND_CATFISH	shared	31	kr+en
-KIND_CATMELEE	en_only	321	none
-KIND_CATPET	en_only	339	none
-KIND_CATPET_T	en_only	422	none
-KIND_CATRANGE	en_only	322	none
-KIND_CAULDRON_LV1	kr_only	-	none
-KIND_CAULDRON_LV2	kr_only	-	none
-KIND_CAULDRON_LV3	kr_only	-	none
-KIND_CAVINE_RANGE	en_only	960	none
-KIND_CERBERUS	en_only	204	en
-KIND_CHEONGU	kr_only	-	none
-KIND_CHERRYWOOD_1	en_only	163	none
-KIND_CHERRYWOOD_2	en_only	164	none
-KIND_CHERRYWOOD_3	en_only	165	none
-KIND_CHERRY_Event	kr_only	-	kr
-KIND_CHERRY_FB	kr_only	-	kr
-KIND_CHICKCOMMANDER	kr_only	-	kr
-KIND_CHICKEN	shared	21	kr+en
-KIND_CHICKENBIG	en_only	218	none
-KIND_CHIMERA	en_only	211	none
-KIND_CHINAMERCHANT	shared	47	kr+en
-KIND_CHINATRADER	shared	48	kr+en
-KIND_CHOCHIEF	kr_only	-	kr
-KIND_CHOCOLATE	en_only	442	en
-KIND_CHOIMOOSUN	kr_only	-	none
-KIND_CHRISTMASMELEE	en_only	343	none
-KIND_CHRISTMASRANGE	en_only	344	none
-KIND_CHRISTMASTREE	en_only	234	none
-KIND_CHRISTMASTREE1	en_only	356	none
-KIND_CHRISTMASTREEBASE	en_only	355	none
-KIND_CHRISTMASTREELV1	en_only	921	none
-KIND_CHRISTMASTREELV2	en_only	922	none
-KIND_CHRISTMASWORLDTREE01	en_only	433	none
-KIND_CHRISTMASWORLDTREE02	en_only	434	none
-KIND_CLONESTEIN	en_only	505	none
-KIND_CLOWN	en_only	435	en
-KIND_CLOWN_1	kr_only	-	kr
-KIND_CLOWN_2	kr_only	-	kr
-KIND_CLOWN_3	kr_only	-	kr
-KIND_CLOWN_4	kr_only	-	kr
-KIND_CLOWN_5	kr_only	-	kr
-KIND_CLUBCAR	kr_only	-	kr
-KIND_COMMANDER	kr_only	-	kr
-KIND_COPFIELD	en_only	418	en
-KIND_CORALMUSHROOM	shared	944	kr+en
-KIND_CORNUCOW	shared	194	kr+en
-KIND_COSMIC_EGG	en_only	593	none
-KIND_COSMOSRABBIT1	en_only	333	none
-KIND_COSMOSRABBIT2	en_only	334	none
-KIND_COW	shared	20	kr+en
-KIND_CRAB	shared	132	kr+en
-KIND_CRABSPIDER	en_only	142	en
-KIND_CRAB_GURI	shared	942	kr+en
-KIND_CRANE	shared	162	kr+en
-KIND_CROWBLUE	en_only	641	none
-KIND_CROWRED	en_only	642	none
-KIND_CURSEHIRO	en_only	389	none
-KIND_CUTEGIRL	kr_only	-	none
-KIND_CYCLOPS	en_only	308	none
-KIND_Catpenguin_Melee	en_only	650	none
-KIND_Catpenguin_Range	en_only	651	none
-KIND_DAEGIL	kr_only	-	none
-KIND_DAEGUM	en_only	242	none
-KIND_DAEJAEHACK	kr_only	-	kr
-KIND_DAEMAARMOR_FB	kr_only	-	kr
-KIND_DAEMA_ARMOR	kr_only	-	kr
-KIND_DAEMA_ARMOR_T	shared	957	kr
-KIND_DAEMA_BADGER	kr_only	-	kr
-KIND_DAEMA_DARKNINJA	kr_only	-	kr
-KIND_DAEMA_FOX	kr_only	-	kr
-KIND_DAEMA_FOXMAN	kr_only	-	kr
-KIND_DAEMA_GWIWANG	shared	956	kr
-KIND_DAEMA_NINJA	kr_only	-	kr
-KIND_DAGGERCRIMINAL	kr_only	-	kr
-KIND_DAILYQUEST	shared	102	kr+en
-KIND_DAILYQUEST2	en_only	297	en
-KIND_DAILYQUEST3	en_only	309	en
-KIND_DAMDUK	kr_only	-	none
-KIND_DAMO	kr_only	-	none
-KIND_DANTE	en_only	835	none
-KIND_DASANJEONG	kr_only	-	none
-KIND_DEACON	en_only	197	en
-KIND_DEADMESSENGER	kr_only	-	kr
-KIND_DEATHSHIP	kr_only	-	none
-KIND_DEVILOUS	en_only	200	en
-KIND_DIPLOMATICSHIP	kr_only	-	none
-KIND_DOCTOR	shared	43	kr+en
-KIND_DOMAFIG	kr_only	-	kr
-KIND_DOMAFIG_FB	kr_only	-	kr
-KIND_DOOR_UDGI01	en_only	800	en
-KIND_DOOR_UDGI02	en_only	801	en
-KIND_DOOR_UDGI03	en_only	940	en
-KIND_DRACULA	shared	202	kr+en
-KIND_DRAGONKING	shared	32	kr+en
-KIND_DRAGONKING_BOSS	en_only	914	none
-KIND_DRAGON_BABY	en_only	401	none
-KIND_DRAGON_EGG	en_only	400	none
-KIND_DRAGON_YONGGARY	en_only	402	none
-KIND_DRAKE	en_only	822	en
-KIND_DRAKEFLY	en_only	365	en
-KIND_DREAMTREE_LV1	shared	690	none
-KIND_DREAMTREE_LV2	shared	691	none
-KIND_DREAMTREE_LV3	shared	692	none
-KIND_DRINKER	kr_only	-	kr
-KIND_DR_GURI	kr_only	-	kr
-KIND_DUCHESS	en_only	445	en
-KIND_DUCHESS_1	kr_only	-	kr
-KIND_DUCHESS_2	kr_only	-	kr
-KIND_DUCHESS_3	kr_only	-	kr
-KIND_DUCHESS_4	kr_only	-	kr
-KIND_DUCHESS_5	kr_only	-	kr
-KIND_DUMEORI	kr_only	-	kr
-KIND_DUNDIS	shared	535	en
-KIND_DUNGPIG	kr_only	-	kr
-KIND_DeepSeaWhale	en_only	918	en
-KIND_Doc_Raccoonie	en_only	763	none
-KIND_Dragon_BLACK	kr_only	-	none
-KIND_Dragon_Green	kr_only	-	none
-KIND_Dragon_RED	kr_only	-	none
-KIND_Dragon_WHITE	kr_only	-	none
-KIND_EASTGUARDIAN	kr_only	-	kr
-KIND_EBlueFrog	unrostered	-	kr
-KIND_EGGGHOST	kr_only	-	kr
-KIND_EGoldFrog	unrostered	-	kr
-KIND_ELEPHANTSANG	kr_only	-	kr
-KIND_ELIANA	en_only	193	en
-KIND_ELIXIRNPC	en_only	357	en
-KIND_EMPERORARCHER	shared	157	kr+en
-KIND_EMPERORCAVALRY	en_only	299	en
-KIND_EMPERORMASTER	shared	302	en
-KIND_EMPERORPORTER	en_only	301	en
-KIND_EMPERORROBBER	en_only	300	en
-KIND_EMPERORSOLDIER	shared	158	kr+en
-KIND_EMPERORWARRIOR	en_only	303	en
-KIND_EMPERORWIZARD	kr_only	-	kr
-KIND_EMPERORWORKER	kr_only	-	kr
-KIND_ERZJUNGR	shared	532	en
-KIND_ERedFrog	unrostered	-	kr
-KIND_EUNCHE	kr_only	-	none
-KIND_EUNHO	kr_only	-	none
-KIND_EUNHO_N	kr_only	-	none
-KIND_EVENTDAMO	kr_only	-	none
-KIND_EVENTGATE	en_only	327	none
-KIND_EVENTNPC	kr_only	-	none
-KIND_EVENT_BIGRABBIT	kr_only	-	kr
-KIND_EVENT_HWANGJINYI	kr_only	-	none
-KIND_EVENT_RABBIT	kr_only	-	kr
-KIND_EVENT_YETI	kr_only	-	kr
-KIND_EVENT_ZODIAC_RABBIT	kr_only	-	kr
-KIND_EVILEYE	en_only	248	en
-KIND_EVILEYE_SANTA	en_only	188	en
-KIND_EVILPIG	shared	306	kr
-KIND_EVIRGINGHOST	unrostered	-	kr
-KIND_EXCESSIVEMAID	kr_only	-	kr
-KIND_Edestus	en_only	783	none
-KIND_Edestus_T	en_only	784	none
-KIND_Eiyuu_Melee	en_only	741	none
-KIND_Eiyuu_Range	en_only	742	none
-KIND_Elite_Mant_Melee	en_only	713	none
-KIND_Elite_Scylla_Range	en_only	714	none
-KIND_Elves_Melee	en_only	527	none
-KIND_Elves_Range	en_only	528	none
-KIND_Emo	en_only	731	none
-KIND_Emo_T	en_only	732	none
-KIND_FAIRYMELEE	en_only	394	none
-KIND_FAIRYRANGE	en_only	395	none
-KIND_FANPRIEST	kr_only	-	kr
-KIND_FANTAIGOING	shared	945	kr+en
-KIND_FESTIVALGATE	en_only	416	none
-KIND_FIFTHCAKE_LV1	kr_only	-	none
-KIND_FIFTHCAKE_LV2	kr_only	-	none
-KIND_FIGHTINGBOX	kr_only	-	none
-KIND_FIGHTINGMENMELEE	en_only	373	none
-KIND_FIGHTINGMENRANGE	en_only	374	none
-KIND_FIREBIRD	kr_only	-	kr
-KIND_FIREDRAGON	kr_only	-	kr
-KIND_FIREGOBLIN	shared	66	kr
-KIND_FIREHAETAE	kr_only	-	kr
-KIND_FIREMAN	kr_only	-	kr
-KIND_FIRESTAR	en_only	249	en
-KIND_FLOWERPIG	shared	18	kr+en
-KIND_FOGBRIDE	en_only	436	en
-KIND_FOGBRIDE_1	kr_only	-	kr
-KIND_FOGBRIDE_2	kr_only	-	kr
-KIND_FOGBRIDE_3	kr_only	-	kr
-KIND_FOGBRIDE_4	kr_only	-	kr
-KIND_FOGBRIDE_5	kr_only	-	kr
-KIND_FOX	en_only	825	en
-KIND_FREDRIC	en_only	362	en
-KIND_FREESIA	en_only	296	en
-KIND_FROKEN	en_only	225	en
-KIND_FROZENGOLEM	en_only	228	en
-KIND_FROZENKNIGHT	shared	229	kr+en
-KIND_FROZENQUEEN	en_only	231	en
-KIND_FROZENSORCERER	en_only	227	en
-KIND_FROZENWIZARD	kr_only	-	kr
-KIND_FRUITBROS	shared	136	kr+en
-KIND_FULLMOON	kr_only	-	none
-KIND_FireCrystal_State	shared	-	none
-KIND_GAGOIL	kr_only	-	kr
-KIND_GALE_RANGE	en_only	930	none
-KIND_GANGHWACANNON	kr_only	-	none
-KIND_GANGHWAGATE	kr_only	-	none
-KIND_GANGSI	en_only	201	en
-KIND_GARGOYLE	en_only	203	en
-KIND_GARLIC	shared	15	kr
-KIND_GARLICTANK	kr_only	-	kr
-KIND_GEMBOX	kr_only	-	none
-KIND_GENTLEMAN	en_only	447	en
-KIND_GENTLEMAN_1	kr_only	-	kr
-KIND_GENTLEMAN_2	kr_only	-	kr
-KIND_GENTLEMAN_3	kr_only	-	kr
-KIND_GENTLEMAN_4	kr_only	-	kr
-KIND_GENTLEMAN_5	kr_only	-	kr
-KIND_GIFTRACCOON	en_only	452	none
-KIND_GIRAFFE	en_only	212	none
-KIND_GIRAFFE_2	en_only	304	none
-KIND_GMEVENTGATE	en_only	487	none
-KIND_GMONBONUS	en_only	274	en
-KIND_GOD01	en_only	460	none
-KIND_GOD02	en_only	461	none
-KIND_GOD03	en_only	462	none
-KIND_GOD04	en_only	463	none
-KIND_GOD05	en_only	464	none
-KIND_GOD06	en_only	465	none
-KIND_GOD07	en_only	466	none
-KIND_GOD08	en_only	467	none
-KIND_GOD09	en_only	468	none
-KIND_GOD10	en_only	469	none
-KIND_GODHAND	en_only	198	en
-KIND_GOESUSON	kr_only	-	kr
-KIND_GOLDBEETLE	shared	65	kr+en
-KIND_GOLDGEMBOX	kr_only	-	none
-KIND_GOLD_CKNIGHT	en_only	599	none
-KIND_GOLEM	kr_only	-	kr
-KIND_GOMG	kr_only	-	none
-KIND_GOONZUDAY	kr_only	-	none
-KIND_GOONZUDAYNPC	en_only	693	none
-KIND_GOONZUDEV	kr_only	-	none
-KIND_GOONZUDEV_2	shared	953	none
-KIND_GOONZUGM	kr_only	-	none
-KIND_GOONZUMASTER	shared	80	none
-KIND_GOTPA	en_only	22	en
-KIND_GOURDVINE	kr_only	-	none
-KIND_GOURDVINE1	kr_only	-	none
-KIND_GRAVEROBBERY	kr_only	-	kr
-KIND_GREATWALLASURA	en_only	318	en
-KIND_GREATWALLMAGICIAN	en_only	313	en
-KIND_GREATWALLSLIME	en_only	316	en
-KIND_GREATWALLSOLDIER	en_only	312	en
-KIND_GREATWALLSOUL	en_only	315	en
-KIND_GREATWALLSPIDER	en_only	317	en
-KIND_GREATWALLTWINHEAD	en_only	314	en
-KIND_GREENFLY	en_only	78	none
-KIND_GREENSHABEL	en_only	221	none
-KIND_GREENTURTLE	shared	62	kr+en
-KIND_GREENTURTLE_2	en_only	118	en
-KIND_GREEN_CKNIGHT	en_only	597	none
-KIND_GRPAPAGOBLIN	kr_only	-	kr
-KIND_GRZOMMAN	shared	970	none
-KIND_GRZOMWMAN	shared	971	none
-KIND_GURIROCKET1	kr_only	-	none
-KIND_GURIROCKET2	kr_only	-	none
-KIND_GURIROCKET3	kr_only	-	none
-KIND_GURIROCKET4	kr_only	-	none
-KIND_GURISOLDIER	kr_only	-	none
-KIND_GURI_CHANSUN	kr_only	-	kr
-KIND_GURI_DOCTOR	kr_only	-	none
-KIND_GURI_GOLD	kr_only	-	none
-KIND_GURI_LUCK	kr_only	-	kr
-KIND_GURI_MERCHANT	kr_only	-	kr
-KIND_GURI_PARTY	kr_only	-	none
-KIND_GURI_RESEARCHER	en_only	948	kr
-KIND_GURI_ROULETTE	kr_only	-	kr
-KIND_GURI_SMITHY	kr_only	-	kr
-KIND_GURI_STATUE	kr_only	-	none
-KIND_GURI_YANGGO	kr_only	-	none
-KIND_GUYAJA	en_only	237	none
-KIND_GWANCHANG_FAR	kr_only	-	none
-KIND_GWANCHANG_NEAR	kr_only	-	none
-KIND_GWANGGAETOMONUMENT	kr_only	-	none
-KIND_GWANWOO	kr_only	-	none
-KIND_GWIWANGCRAB	en_only	947	none
-KIND_GWONYOOL	kr_only	-	none
-KIND_Galahad_Melee	en_only	806	none
-KIND_Galahad_Range	en_only	807	none
-KIND_Ghost	en_only	572	none
-KIND_GhostT	en_only	573	none
-KIND_Ghost_FaceMan	en_only	603	none
-KIND_Ghost_Gate	en_only	620	none
-KIND_Ghost_NvGui1	en_only	604	en
-KIND_Ghost_NvGui2	en_only	608	en
-KIND_Ghost_NvGui3	en_only	612	en
-KIND_Ghost_NvGui4	en_only	616	en
-KIND_Ghost_Samurai1	en_only	605	en
-KIND_Ghost_Samurai2	en_only	609	en
-KIND_Ghost_Samurai3	en_only	613	en
-KIND_Ghost_Samurai4	en_only	617	en
-KIND_Ghost_Wuliannan1	en_only	606	en
-KIND_Ghost_Wuliannan2	en_only	610	en
-KIND_Ghost_Wuliannan3	en_only	614	en
-KIND_Ghost_Wuliannan4	en_only	618	en
-KIND_Ghost_Yifanmumian1	en_only	607	en
-KIND_Ghost_Yifanmumian2	en_only	611	en
-KIND_Ghost_Yifanmumian3	en_only	615	en
-KIND_Ghost_Yifanmumian4	en_only	619	en
-KIND_GoldFrog	kr_only	-	kr
-KIND_GoldenGuri2	en_only	974	none
-KIND_Gum_I	kr_only	-	none
-KIND_Gunner_Range	en_only	684	none
-KIND_HALLOWEEN	en_only	338	none
-KIND_HALLOWEENBASE	en_only	337	none
-KIND_HALLOWEENGHOST	shared	342	none
-KIND_HALLOWEENPC	en_only	340	none
-KIND_HALLOWEENPUMPKIN	shared	341	none
-KIND_HAMEL	kr_only	-	kr
-KIND_HAPPYBEAN_NPC1	en_only	53	none
-KIND_HAPPYBEAN_NPC2	en_only	54	none
-KIND_HAPPYBEAN_NPC3	en_only	55	none
-KIND_HARPY	en_only	146	en
-KIND_HARU1	kr_only	-	kr
-KIND_HARU2	kr_only	-	kr
-KIND_HARU3	kr_only	-	kr
-KIND_HARU4	kr_only	-	kr
-KIND_HAYABUNESHIP	kr_only	-	kr
-KIND_HEDGEHOG	shared	184	kr+en
-KIND_HELLDOG	shared	96	kr+en
-KIND_HELLDOG_2	en_only	155	en
-KIND_HELLMANTLE	kr_only	-	kr
-KIND_HELLSOLDIER	shared	246	kr+en
-KIND_HELLSPIDER	kr_only	-	kr
-KIND_HERO1	shared	1	none
-KIND_HERO2	shared	3	none
-KIND_HERO3	en_only	5	none
-KIND_HERO4	en_only	7	none
-KIND_HERO5	en_only	676	none
-KIND_HERO6	en_only	678	none
-KIND_HEROINE1	shared	2	none
-KIND_HEROINE1NPC	kr_only	-	kr
-KIND_HEROINE2	en_only	4	none
-KIND_HEROINE3	en_only	6	none
-KIND_HEROINE4	en_only	8	none
-KIND_HEROINE5	en_only	677	none
-KIND_HEROINE6	en_only	679	none
-KIND_HEROUP1	kr_only	-	none
-KIND_HEROUP2	kr_only	-	none
-KIND_HEROUP3	kr_only	-	none
-KIND_HEROUP4	kr_only	-	none
-KIND_HERO_BREADMAN	kr_only	-	none
-KIND_HERO_BREADMANEX	kr_only	-	none
-KIND_HERO_SNOWMAN	kr_only	-	none
-KIND_HERO_SNOWMANEX	kr_only	-	none
-KIND_HINADOLL	en_only	236	none
-KIND_HINEAS	en_only	161	en
-KIND_HONGGILDONG	shared	210	kr+en
-KIND_HONGYUY	shared	534	kr+en
-KIND_HOR01YOUNG	shared	57	en
-KIND_HOR02YOUNG	shared	112	en
-KIND_HOR03YOUNG	shared	113	en
-KIND_HOR04YOUNG	shared	152	en
-KIND_HOR05YOUNG	shared	168	none
-KIND_HOR06YOUNG	shared	180	en
-KIND_HOR07YOUNG	shared	190	en
-KIND_HOR08YOUNG	shared	208	en
-KIND_HOR09YOUNG	shared	209	en
-KIND_HOR10YOUNG	en_only	252	en
-KIND_HOR11YOUNG	en_only	58	en
-KIND_HOR12YOUNG	en_only	140	en
-KIND_HOR13YOUNG	en_only	323	en
-KIND_HOR14YOUNG	en_only	331	none
-KIND_HOR15YOUNG	en_only	336	none
-KIND_HOR16YOUNG	en_only	358	en
-KIND_HOR17YOUNG	en_only	370	en
-KIND_HOR18YOUNG	en_only	450	none
-KIND_HOR19YOUNG	en_only	488	none
-KIND_HOR20YOUNG	en_only	491	none
-KIND_HOR21YOUNG	shared	506	none
-KIND_HOR22YOUNG	shared	512	none
-KIND_HOR23YOUNG	en_only	519	none
-KIND_HOR24YOUNG	shared	529	none
-KIND_HOR25YOUNG	shared	544	none
-KIND_HOR26YOUNG	shared	546	none
-KIND_HOR27YOUNG	shared	574	none
-KIND_HOR28YOUNG	shared	576	none
-KIND_HOR29YOUNG	shared	577	none
-KIND_HOR30YOUNG	shared	586	none
-KIND_HOR31YOUNG	shared	587	none
-KIND_HOR32YOUNG	kr_only	-	none
-KIND_HOR33YOUNG	kr_only	-	none
-KIND_HOR34YOUNG	shared	590	none
-KIND_HOR35YOUNG	shared	591	none
-KIND_HOR36YOUNG	shared	592	none
-KIND_HOR37YOUNG	kr_only	-	none
-KIND_HOR38YOUNG	shared	633	none
-KIND_HOR39YOUNG	shared	634	none
-KIND_HOR40YOUNG	kr_only	-	none
-KIND_HOR41YOUNG	kr_only	-	none
-KIND_HOR42YOUNG	kr_only	-	none
-KIND_HOR43YOUNG	shared	645	none
-KIND_HOR44YOUNG	shared	646	none
-KIND_HOR45YOUNG	kr_only	-	none
-KIND_HOR46YOUNG	kr_only	-	none
-KIND_HOR47YOUNG	shared	653	none
-KIND_HOR48YOUNG	shared	654	none
-KIND_HOR49YOUNG	shared	681	none
-KIND_HOR50YOUNG	shared	682	none
-KIND_HOR51YOUNG	shared	685	none
-KIND_HOR52YOUNG	kr_only	-	none
-KIND_HOR53YOUNG	kr_only	-	none
-KIND_HOR54YOUNG	shared	703	none
-KIND_HOR55YOUNG	shared	704	none
-KIND_HOR56YOUNG	shared	708	none
-KIND_HOR57YOUNG	shared	718	none
-KIND_HOR58YOUNG	shared	738	none
-KIND_HOR59YOUNG	shared	747	none
-KIND_HOR60YOUNG	en_only	748	none
-KIND_HOR61YOUNG	en_only	761	none
-KIND_HOR62YOUNG	en_only	762	none
-KIND_HOR63YOUNG	en_only	768	none
-KIND_HOR64YOUNG	en_only	769	none
-KIND_HOR65YOUNG	en_only	770	none
-KIND_HOR66YOUNG	en_only	771	none
-KIND_HOR67YOUNG	en_only	786	none
-KIND_HOR68YOUNG	en_only	787	none
-KIND_HOR69YOUNG	en_only	788	none
-KIND_HOR70YOUNG	en_only	789	none
-KIND_HOR71YOUNG	en_only	804	none
-KIND_HOR72YOUNG	en_only	805	none
-KIND_HOR73YOUNG	en_only	830	none
-KIND_HOR74YOUNG	en_only	831	none
-KIND_HOR79YOUNG	en_only	912	none
-KIND_HOR80YOUNG	en_only	913	none
-KIND_HOR81YOUNG	en_only	927	none
-KIND_HOR82YOUNG	en_only	928	none
-KIND_HOR83YOUNG	en_only	932	none
-KIND_HOR84YOUNG	en_only	933	none
-KIND_HOR85YOUNG	en_only	954	none
-KIND_HOR86YOUNG	en_only	955	none
-KIND_HOR87YOUNG	en_only	958	none
-KIND_HOR88YOUNG	en_only	959	none
-KIND_HOR89YOUNG	en_only	975	none
-KIND_HOR90YOUNG	en_only	976	none
-KIND_HORSEMA	kr_only	-	kr
-KIND_HORSERACING	kr_only	-	none
-KIND_HOR_PLUSSUPERUNISUS	kr_only	-	none
-KIND_HOR_SUPERUNISUS	kr_only	-	none
-KIND_HOR_UNISUS	kr_only	-	none
-KIND_HUNGRYGOBLIN	shared	185	kr
-KIND_HUNTER_MELEE	en_only	931	none
-KIND_HWAMA	kr_only	-	kr
-KIND_HWAMA_TEST	kr_only	-	kr
-KIND_HWANGJINYI	kr_only	-	none
-KIND_HYDRA	en_only	509	none
-KIND_HYDRA_BABY	en_only	510	none
-KIND_Husky	en_only	515	none
-KIND_Hyeonmu	kr_only	-	none
-KIND_ICEGENERAL	kr_only	-	kr
-KIND_ICEHOUND	en_only	230	en
-KIND_ICEMELEE	en_only	419	none
-KIND_ICERANGE	en_only	420	none
-KIND_ICEWITCH	kr_only	-	kr
-KIND_ILGIMAE	kr_only	-	none
-KIND_INDIACANNON	kr_only	-	kr
-KIND_INHWASANG	kr_only	-	kr
-KIND_INSTANCEBOSS	kr_only	-	kr
-KIND_INSTANCEMON1	kr_only	-	kr
-KIND_INSTANCEMON2	kr_only	-	kr
-KIND_INSTANCEMON3	kr_only	-	kr
-KIND_INVESTMENT	shared	151	kr+en
-KIND_ISABU	kr_only	-	none
-KIND_JAE	en_only	680	en
-KIND_JANGBOGO	kr_only	189	none
-KIND_JANGGILSAN	shared	114	kr+en
-KIND_JANGGUMI	shared	35	kr+en
-KIND_JANGYOUNGSIL	shared	94	kr+en
-KIND_JAPANCOMMANDER2	unrostered	-	kr
-KIND_JAPANGUNSOL2	unrostered	-	kr
-KIND_JAPANHEALER2	unrostered	-	kr
-KIND_JAPANPORTERSOL	kr_only	-	none
-KIND_JAPANSWORDSOL2	unrostered	-	kr
-KIND_JAPANTRADER	shared	49	kr+en
-KIND_JAR	shared	125	kr+en
-KIND_JEFFREY	en_only	166	en
-KIND_JOAN	en_only	826	none
-KIND_JOKER	shared	253	none
-KIND_JOUNSUN	kr_only	-	none
-KIND_JUDE	kr_only	-	kr
-KIND_JUNZDAZHEN	en_only	537	none
-KIND_JYSHANZEI	shared	950	kr+en
-KIND_JYSishen	en_only	721	none
-KIND_JYSishen_T	en_only	722	none
-KIND_KADOMACH	en_only	235	none
-KIND_KELAN	en_only	167	en
-KIND_KEY_RACCOON	en_only	267	en
-KIND_KIMCHOONGSUN	kr_only	-	kr
-KIND_KIMSIMIN	kr_only	-	none
-KIND_KINGCRAB	kr_only	-	kr
-KIND_KINGCRYSTAL	shared	183	kr+en
-KIND_KINGCUTTLEFISH	kr_only	-	kr
-KIND_KINGMONUMENT	shared	30	none
-KIND_KINGMONUMENT2	en_only	589	none
-KIND_KINGPIG	en_only	137	en
-KIND_KINGRACCOON_AGIT	en_only	259	en
-KIND_KINGYACHA	shared	61	en
-KIND_KINGYACHA_2	en_only	117	en
-KIND_KITERACCOON	en_only	179	none
-KIND_KOINOBORY	en_only	250	none
-KIND_KOINOBORYBLUE	en_only	177	none
-KIND_KOINOBORYENG	en_only	254	en
-KIND_KOINOBORYGREEN	en_only	372	none
-KIND_KOINOBORYPET	en_only	476	none
-KIND_KOINOBORYRED	en_only	176	none
-KIND_KOINOBORYYELLOW	en_only	175	none
-KIND_KONMYEONG	kr_only	-	kr
-KIND_KRAKEN	kr_only	-	kr
-KIND_KRAKEN_T	kr_only	-	none
-KIND_KUIJIAB	shared	751	kr+en
-KIND_KUIJIAJ	shared	749	kr+en
-KIND_KUIJIAY	shared	750	kr+en
-KIND_KYLIN	kr_only	-	kr
-KIND_KingArthur_Melee	en_only	779	none
-KIND_KingArthur_Range	en_only	780	none
-KIND_Knight_Melee	en_only	683	none
-KIND_KoryuGURI_STATUE	shared	-	none
-KIND_Koryu_CORALMUSHROOM	shared	-	none
-KIND_Koryu_CRABGURI	shared	-	none
-KIND_Koryu_SAMURAIBoss	shared	-	none
-KIND_Koryu_SAMURAICRAB	shared	-	none
-KIND_Kracken	en_only	635	none
-KIND_Kracken_T	en_only	636	none
-KIND_LADYBUG	shared	36	kr+en
-KIND_LADYGENERAL	kr_only	-	kr
-KIND_LEEWONIK	kr_only	-	kr
-KIND_LEEYOUNGA	kr_only	-	kr
-KIND_LIAN	en_only	539	en
-KIND_LIGHTSOLDIER	kr_only	-	kr
-KIND_LIHU	en_only	538	none
-KIND_LIONMASK	kr_only	-	kr
-KIND_LITTLEBIRD	en_only	495	none
-KIND_LLOYD	en_only	371	en
-KIND_LOBSTER	kr_only	-	kr
-KIND_LOCUST	shared	38	kr+en
-KIND_LUCKYEE	kr_only	-	none
-KIND_LUCKYTREE_LV1	kr_only	-	none
-KIND_LUCKYTREE_LV2	kr_only	-	none
-KIND_LUCKYTREE_LV3	kr_only	-	none
-KIND_LYANSKAPULUO	shared	536	en
-KIND_LandCrystal_State	shared	-	none
-KIND_MADOGHOST	kr_only	-	kr
-KIND_MAGARGOYLE	en_only	496	none
-KIND_MAGARGOYLE_AncientTower5F	en_only	781	en
-KIND_MAGICALRACCOON	en_only	171	none
-KIND_MAGICALRACCOON_AGIT	en_only	263	en
-KIND_MAGICALRACCOON_AGIT2	en_only	408	none
-KIND_MAGICALRACCOON_FAKE	en_only	479	none
-KIND_MAGICALRACCOON_NPC	en_only	103	en
-KIND_MAGICALRACCOON_NPC2	en_only	397	en
-KIND_MAMARACCOON	en_only	170	none
-KIND_MAMARACCOON_AGIT	en_only	265	en
-KIND_MAMARACCOON_AGIT2	en_only	410	none
-KIND_MAMARACCOON_FAKE	en_only	481	none
-KIND_MANDEOCK	kr_only	-	kr
-KIND_MANDRAGORA	en_only	147	en
-KIND_MANTISRAPTOR	en_only	366	en
-KIND_MARIONETTE	en_only	226	en
-KIND_MARIONETTE_SANTA	en_only	182	en
-KIND_MARIONETTE_SANTA_1	en_only	348	en
-KIND_MARIONETTE_SANTA_2	en_only	101	en
-KIND_MARIONETTE_SANTA_3	en_only	660	en
-KIND_MARIONETTE_SANTA_4	en_only	667	en
-KIND_MARU	kr_only	-	kr
-KIND_MASHIMARO	kr_only	-	none
-KIND_MASHIMARO_PAJAMA	kr_only	-	none
-KIND_MASHIMARO_PIRATE	kr_only	-	none
-KIND_MASHIMARO_SANTA	kr_only	-	none
-KIND_MASKB	en_only	752	en
-KIND_MASKBS	en_only	754	en
-KIND_MASKH	en_only	753	en
-KIND_MASKMAN	kr_only	-	kr
-KIND_MASKMONK	kr_only	-	kr
-KIND_MEDICALJANGGUM	kr_only	-	none
-KIND_MEORIMAN	kr_only	-	kr
-KIND_MERCHANTBELT	kr_only	-	none
-KIND_MERCHANTBOW	kr_only	-	none
-KIND_MERCHANTCLOTHES	kr_only	-	none
-KIND_MERCHANTFOOD	kr_only	-	none
-KIND_MERCHANTHARDWARE	kr_only	-	none
-KIND_MERCHANTHAT	kr_only	-	none
-KIND_MERCHANTHEAL	kr_only	-	none
-KIND_MERCHANTHORSE	shared	52	kr+en
-KIND_MERCHANTNECKLACE	kr_only	-	none
-KIND_MERCHANTPOTTER	shared	82	kr+en
-KIND_MERCHANTRING	kr_only	-	none
-KIND_MERCHANTSHOES	kr_only	-	none
-KIND_MERIEL	en_only	51	en
-KIND_MIMIC	en_only	75	none
-KIND_MINEGIRL	en_only	79	none
-KIND_MINICERBERUS	en_only	486	none
-KIND_MINIFROZENQUEEN	en_only	485	none
-KIND_MINIGOBLIN	shared	67	kr
-KIND_MINIRABBIT_BOY	kr_only	-	none
-KIND_MINIRABBIT_GIRL	kr_only	-	none
-KIND_MIR	kr_only	-	none
-KIND_MISA	kr_only	-	kr
-KIND_MISSIONFLAG	kr_only	-	none
-KIND_MISSIONSTONE	kr_only	-	none
-KIND_MOGOOKGI	kr_only	-	kr
-KIND_MOLDA	en_only	216	en
-KIND_MOLEMINER	shared	160	kr+en
-KIND_MONKEY	shared	169	kr+en
-KIND_MONKEYBOXER	kr_only	-	kr
-KIND_MONKEYSON	en_only	24	en
-KIND_MONSTER_ArmoredBeast	en_only	797	kr+en
-KIND_MONSTER_ArmoredBeast_2	unrostered	-	kr
-KIND_MONSTER_ArmoredBeast_3	unrostered	-	kr
-KIND_MONSTER_ArmoredBeast_4	unrostered	-	kr
-KIND_MONSTER_ArmoredBeast_5	unrostered	-	kr
-KIND_MONSTER_BOSS_WarMecha	en_only	799	none
-KIND_MONSTER_EW7102	en_only	798	kr+en
-KIND_MONSTER_EW7102_2	unrostered	-	kr
-KIND_MONSTER_EW7102_3	unrostered	-	kr
-KIND_MONSTER_EW7102_4	unrostered	-	kr
-KIND_MONSTER_EW7102_5	unrostered	-	kr
-KIND_MONSTER_PatrolRobot	en_only	795	kr+en
-KIND_MONSTER_PatrolRobot_2	unrostered	-	kr
-KIND_MONSTER_PatrolRobot_3	unrostered	-	kr
-KIND_MONSTER_PatrolRobot_4	unrostered	-	kr
-KIND_MONSTER_PatrolRobot_5	unrostered	-	kr
-KIND_MONSTER_SelfPropelledGun	en_only	796	kr+en
-KIND_MONSTER_SelfPropelledGun_2	unrostered	-	kr
-KIND_MONSTER_SelfPropelledGun_3	unrostered	-	kr
-KIND_MONSTER_SelfPropelledGun_4	unrostered	-	kr
-KIND_MONSTER_SelfPropelledGun_5	unrostered	-	kr
-KIND_MONSTER_Sentinel	en_only	794	kr+en
-KIND_MONSTER_Sentinel_2	unrostered	-	kr
-KIND_MONSTER_Sentinel_3	unrostered	-	kr
-KIND_MONSTER_Sentinel_4	unrostered	-	kr
-KIND_MONSTER_Sentinel_5	unrostered	-	kr
-KIND_MONV	kr_only	-	none
-KIND_MON_APPLE	kr_only	-	none
-KIND_MOON	en_only	332	none
-KIND_MOONRABBITMAN	shared	964	none
-KIND_MOONRABBITWOMAN	shared	965	none
-KIND_MOONRABBIT_LV1	kr_only	-	none
-KIND_MOONRABBIT_LV2	kr_only	-	none
-KIND_MOONRABBIT_LV3	kr_only	-	none
-KIND_MORTAR	kr_only	-	kr
-KIND_MOWINGSNOWMAN	shared	307	kr
-KIND_MTBASE1	kr_only	-	none
-KIND_MTBASE2	kr_only	-	none
-KIND_MTBASE3	kr_only	-	none
-KIND_MTFASTNESSBACK	kr_only	-	none
-KIND_MTFASTNESSFRONT	kr_only	-	none
-KIND_MUDANG	shared	139	kr+en
-KIND_MUSHROOM	shared	13	kr+en
-KIND_MUSHROOMBOSS	en_only	214	en
-KIND_M_GirlMelee	en_only	513	none
-KIND_M_GirlRange	en_only	514	none
-KIND_Mant_Melee	en_only	711	none
-KIND_MetalDragon_Elite	en_only	808	none
-KIND_MetalDragon_Elite_T	en_only	809	none
-KIND_MetalDragon_Epic	en_only	810	none
-KIND_MetalDragon_Epic_T	en_only	811	none
-KIND_Mir_BLACK	kr_only	-	none
-KIND_Mir_GREEN	kr_only	-	none
-KIND_Mir_PINK	kr_only	-	none
-KIND_Mushroom_Basket	en_only	649	none
-KIND_NAESI	kr_only	-	kr
-KIND_NAIN	kr_only	-	kr
-KIND_NAMI	shared	925	none
-KIND_NAMI_T	en_only	926	none
-KIND_NANJEON	kr_only	-	kr
-KIND_NAPOLEON	en_only	827	none
-KIND_NATALIA	en_only	444	kr+en
-KIND_NEWBRIDEGURI	kr_only	-	none
-KIND_NEWCATAR	en_only	84	none
-KIND_NEWDAEGUM	en_only	85	none
-KIND_NEWGOMG	kr_only	-	none
-KIND_NEWJAPANTRADER	kr_only	-	kr
-KIND_NEWRIFLE	en_only	83	none
-KIND_NEWYEARBASE	kr_only	-	none
-KIND_NEWYEARGURI	kr_only	-	none
-KIND_NEWYEARTREE	shared	129	none
-KIND_NEWYEARTREEBASE	en_only	354	none
-KIND_NIAOTOU	en_only	755	none
-KIND_NIAOTOU_T	en_only	756	none
-KIND_NINJA	kr_only	-	kr
-KIND_NINJA2	kr_only	-	none
-KIND_NINJA2_DOKDO	kr_only	-	none
-KIND_NINJAGIRL	en_only	206	none
-KIND_NINJAMAN	en_only	191	none
-KIND_NINJAPANDA	en_only	23	en
-KIND_NPCDRAGONKING	kr_only	-	none
-KIND_NPCKINGRACOON	kr_only	-	none
-KIND_NPC_Andromeda	shared	803	kr+en
-KIND_NPC_ResearcherAndromeda	en_only	949	en
-KIND_NYANGYI	kr_only	-	none
-KIND_Naga_Bow_Range	en_only	706	none
-KIND_Naga_Spear_Melee	en_only	705	none
-KIND_Nightmare_Melee	en_only	583	none
-KIND_Nightmare_Range	en_only	584	none
-KIND_OCTOPUS	shared	124	kr+en
-KIND_OFFICIATOR	en_only	391	none
-KIND_OGONG	kr_only	-	kr
-KIND_ONDAL	shared	149	none
-KIND_ONDAL_N	kr_only	-	none
-KIND_ONEEYEMONSTER	kr_only	-	kr
-KIND_ORYE	shared	840	none
-KIND_ORYE_T	en_only	841	none
-KIND_OSAKACANNON	kr_only	-	none
-KIND_OSAKACASTLE	kr_only	-	none
-KIND_OSAKAGATE	kr_only	-	none
-KIND_OSU	kr_only	-	none
-KIND_OTOHIME	shared	243	kr+en
-KIND_OTOHIME_FIRE	kr_only	-	none
-KIND_OTOHIME_LAND	kr_only	-	none
-KIND_OTOHIME_SANTA	en_only	187	en
-KIND_OTOHIME_WATER	kr_only	-	none
-KIND_OTOHIME_WIND	kr_only	-	none
-KIND_Owl_Baby	en_only	581	none
-KIND_PALMTREE_LV1	kr_only	-	none
-KIND_PALMTREE_LV2	kr_only	-	none
-KIND_PALMTREE_LV3	kr_only	-	none
-KIND_PANG	en_only	403	en
-KIND_PANOCKSUN	kr_only	-	none
-KIND_PAPAGOBLIN	shared	68	kr
-KIND_PAPAGOBLIN_2	en_only	305	none
-KIND_PAPAGOBLIN_FB	kr_only	-	kr
-KIND_PARKMOONSOO	kr_only	-	none
-KIND_PARROT	kr_only	-	none
-KIND_PARTYMATCHING	kr_only	-	kr
-KIND_PARTYNPC	en_only	295	en
-KIND_PARTYQUESTNPC	en_only	437	en
-KIND_PBARBECUE	en_only	277	none
-KIND_PCAKE	en_only	275	none
-KIND_PCHAMPAGNE	en_only	276	none
-KIND_PELICANA	en_only	360	none
-KIND_PELICANODON	en_only	363	en
-KIND_PELICCANEER	en_only	823	en
-KIND_PERRY	en_only	828	en
-KIND_PGARLAND	en_only	278	none
-KIND_PHOENIX	en_only	454	none
-KIND_PICESTATUE	en_only	279	none
-KIND_PIG_GOLD	kr_only	-	none
-KIND_PINE_TREE	en_only	87	none
-KIND_PINK_FIGHTINGBOX	kr_only	-	none
-KIND_PIRATEARCHER	en_only	270	en
-KIND_PIRATECHEF	en_only	271	en
-KIND_PIRATEMASTER	en_only	272	en
-KIND_PIRATESHIP_GATE	en_only	268	none
-KIND_PIRATESOLDIER	en_only	269	en
-KIND_PKMAPARBEIT	en_only	443	en
-KIND_PK_COMMANDCENTER	kr_only	-	none
-KIND_POLLINGGATE	en_only	311	none
-KIND_POTRACCOON	en_only	439	en
-KIND_POWERCRAB	kr_only	-	kr
-KIND_PRIEST	en_only	199	en
-KIND_PRISONER	shared	74	kr+en
-KIND_PTIMEBONUS	en_only	273	en
-KIND_PYEONGGANG	shared	33	none
-KIND_PYEONGGANG_N	kr_only	-	none
-KIND_PosolOctopus	en_only	917	en
-KIND_QIUXIMM	en_only	524	none
-KIND_QUESTEMPERORMASTER	en_only	361	none
-KIND_QUESTETC1	unrostered	-	en
-KIND_QUESTNPC1	unrostered	-	en
-KIND_QUESTNPC2	unrostered	-	en
-KIND_Qita	en_only	557	none
-KIND_QitaT	en_only	558	none
-KIND_QitaT_HJ	en_only	570	none
-KIND_Qita_HJ	en_only	569	none
-KIND_Queen_Bee	en_only	715	none
-KIND_RABBIT	shared	10	kr+en
-KIND_RABBITBIG	en_only	217	en
-KIND_RABBITGIRL	en_only	474	none
-KIND_RACCOON	shared	12	kr+en
-KIND_RACCOON2	en_only	405	none
-KIND_RACCOONDOG	en_only	25	en
-KIND_RACCOONDOG_SANTA	en_only	181	en
-KIND_RACCOONDOG_SANTA_1	en_only	347	en
-KIND_RACCOONDOG_SANTA_2	en_only	89	en
-KIND_RACCOONDOG_SANTA_3	en_only	659	en
-KIND_RACCOONDOG_SANTA_4	en_only	666	en
-KIND_RACCOONLORD	en_only	172	none
-KIND_RACCOONLORD_AGIT	en_only	260	en
-KIND_RACCOONLORD_AGIT2	en_only	406	none
-KIND_RACCOONLORD_FAKE	en_only	477	none
-KIND_RACCOONLORD_NPC1	en_only	105	en
-KIND_RACCOONLORD_NPC2	en_only	106	en
-KIND_RACCOONLORD_NPC3	en_only	107	en
-KIND_RACCOONTOWER	en_only	173	none
-KIND_RACCOONTOWER_AGIT	en_only	264	en
-KIND_RACCOONTOWER_AGIT2	en_only	409	none
-KIND_RACCOONTOWER_FAKE	en_only	480	none
-KIND_RACCOONTOWER_SRP	en_only	398	en
-KIND_RACCOONTREE	en_only	441	none
-KIND_RACCOONTREEBASE	en_only	440	none
-KIND_RACCOON_AGIT	en_only	258	en
-KIND_RAINBOWWING	en_only	520	none
-KIND_RAT	shared	14	kr+en
-KIND_RATBOSS	en_only	213	none
-KIND_RECEIPT	en_only	493	en
-KIND_RECOMMENDER	en_only	251	en
-KIND_REDBALLON	kr_only	-	none
-KIND_REDBAT	shared	70	kr+en
-KIND_REDBAT_2	en_only	121	en
-KIND_REDBEAR	shared	73	kr+en
-KIND_REDBEAR_2	en_only	154	en
-KIND_REDFLAG	kr_only	-	none
-KIND_REDSHABEL	en_only	222	none
-KIND_RED_CKNIGHT	en_only	595	none
-KIND_REPAIRMAN	en_only	412	en
-KIND_RETURNTOWER	en_only	257	none
-KIND_REVISENPC	en_only	320	en
-KIND_REWARD	en_only	219	en
-KIND_REWARD_newstockman	en_only	785	none
-KIND_RICH	en_only	245	en
-KIND_RIFLE	en_only	239	none
-KIND_ROBIGATE	en_only	329	en
-KIND_ROBOMBER	en_only	821	en
-KIND_ROBOSOLDIERTYPEA	en_only	818	en
-KIND_ROBOSOLDIERTYPEB	en_only	819	en
-KIND_ROBOSOLDIERTYPEC	en_only	820	en
-KIND_ROBSTER	en_only	824	en
-KIND_ROIPLANCARD1	kr_only	-	none
-KIND_ROIPLANCARD2	kr_only	-	none
-KIND_ROIPLANCARD3	kr_only	-	none
-KIND_ROIPLANCARD4	kr_only	-	none
-KIND_ROLLINGSTEGO	en_only	368	en
-KIND_ROULETTESTATUE	en_only	325	none
-KIND_ROULETTESTATUEBASE	en_only	324	none
-KIND_ROYALGUARD	shared	41	kr+en
-KIND_RUDOLF	kr_only	-	none
-KIND_RUDOLPH	en_only	86	en
-KIND_RUDOLPHPET	en_only	345	none
-KIND_RUDOLPHPET_T	en_only	423	none
-KIND_RUSSIATRADER	shared	50	kr+en
-KIND_RYU	en_only	951	none
-KIND_RYU_T	en_only	952	none
-KIND_RabbitSanta_Melee	en_only	657	none
-KIND_RedFrog	kr_only	-	kr
-KIND_Royal_Bee	en_only	716	none
-KIND_SAHOOSUN	kr_only	-	none
-KIND_SAMDURANG	kr_only	-	kr
-KIND_SAMURAICRAB	shared	946	kr+en
-KIND_SAMYOUNGSAINT	kr_only	-	none
-KIND_SANGOKLIM	kr_only	-	none
-KIND_SANTAFAIRY	kr_only	-	none
-KIND_SANTAGATE	en_only	346	none
-KIND_SANTAGURI	kr_only	-	none
-KIND_SANTAGURI_XMAS2007	kr_only	-	none
-KIND_SANTAMAID	kr_only	-	none
-KIND_SANTAMISA	kr_only	-	kr
-KIND_SANTARACCOON	shared	233	none
-KIND_SANTARACCOON_AGIT	en_only	262	en
-KIND_SANTARACCOON_ZIQ	en_only	232	none
-KIND_SANTARUDOLF_HORSE	kr_only	-	none
-KIND_SANTAYAIN	kr_only	-	none
-KIND_SANTA_CLAUS	kr_only	-	kr
-KIND_SASURI	kr_only	-	kr
-KIND_SEBRINO	en_only	207	en
-KIND_SEOAERYU	kr_only	-	none
-KIND_SEOLOK	shared	972	none
-KIND_SEOLOK_T	en_only	973	none
-KIND_SEOSANSAINT	shared	97	kr+en
-KIND_SERVERGATE	en_only	326	en
-KIND_SHARK	shared	123	kr+en
-KIND_SHARKPYRAMY	en_only	915	none
-KIND_SHELLFISH	shared	133	kr+en
-KIND_SHIRLEY_N	kr_only	-	none
-KIND_SICKTIGER	kr_only	-	kr
-KIND_SIEGEFLAG	en_only	484	none
-KIND_SILVER_CKNIGHT	en_only	600	none
-KIND_SIMTORYONG	shared	150	kr+en
-KIND_SIRI	shared	919	none
-KIND_SIRI_T	en_only	920	none
-KIND_SKELETONBOSS	kr_only	-	none
-KIND_SKELETONBYEONGSA	kr_only	-	kr
-KIND_SKELETONGUNG	kr_only	-	kr
-KIND_SKULLBAT	shared	95	kr
-KIND_SKULLMINI	en_only	143	en
-KIND_SM_EVENT	kr_only	-	none
-KIND_SNACKBAR1	en_only	413	en
-KIND_SNACKBAR2	en_only	414	en
-KIND_SNACKBAR3	en_only	415	en
-KIND_SNACKBAR4	en_only	417	en
-KIND_SNOWELF	shared	109	kr+en
-KIND_SNOWELF_1	en_only	350	en
-KIND_SNOWELF_2	en_only	28	en
-KIND_SNOWELF_3	en_only	662	en
-KIND_SNOWELF_4	en_only	669	en
-KIND_SNOWMAN	shared	110	kr+en
-KIND_SNOWMAN_1	en_only	351	en
-KIND_SNOWMAN_2	en_only	127	en
-KIND_SNOWMAN_3	en_only	663	en
-KIND_SNOWMAN_4	en_only	670	en
-KIND_SNOWQUEEN	kr_only	-	none
-KIND_SOLDIER	kr_only	-	kr
-KIND_SOL_FIREHEA	kr_only	-	none
-KIND_SOL_LANDWAUK	kr_only	-	none
-KIND_SOL_TINKY	kr_only	-	none
-KIND_SOL_WATERCHUNG	kr_only	-	none
-KIND_SOL_WINDJUNG	kr_only	-	none
-KIND_SOMANGSUN	kr_only	-	none
-KIND_SOPHIA	en_only	16	en
-KIND_SOSERNO	kr_only	-	none
-KIND_SOULGUARD_ANGARIKA	shared	767	none
-KIND_SOULGUARD_Aegis	en_only	923	none
-KIND_SOULGUARD_Asgard	en_only	580	none
-KIND_SOULGUARD_BROWNIE	en_only	492	none
-KIND_SOULGUARD_Balrog_Elite	en_only	792	none
-KIND_SOULGUARD_Balrog_Epic	en_only	793	none
-KIND_SOULGUARD_Bubbles	shared	707	none
-KIND_SOULGUARD_BubleMouse	en_only	967	none
-KIND_SOULGUARD_Cactace	en_only	966	none
-KIND_SOULGUARD_CamelotAngel	en_only	782	none
-KIND_SOULGUARD_Chiro_Elite	en_only	832	none
-KIND_SOULGUARD_Chiro_Epic	en_only	833	none
-KIND_SOULGUARD_Cupid	en_only	545	none
-KIND_SOULGUARD_Eagle	shared	556	none
-KIND_SOULGUARD_FIRESPIRIT	en_only	396	none
-KIND_SOULGUARD_FlameBird	en_only	968	none
-KIND_SOULGUARD_Ghostman	en_only	699	none
-KIND_SOULGUARD_Ghostwoman	en_only	698	none
-KIND_SOULGUARD_GodEagle	kr_only	-	none
-KIND_SOULGUARD_GoldEagle	en_only	571	none
-KIND_SOULGUARD_Halloween	en_only	655	none
-KIND_SOULGUARD_ICESPIRIT	en_only	432	none
-KIND_SOULGUARD_LAND	en_only	494	none
-KIND_SOULGUARD_Luna	en_only	717	none
-KIND_SOULGUARD_Magra	shared	622	none
-KIND_SOULGUARD_ManGhost	kr_only	-	none
-KIND_SOULGUARD_Mermaid	en_only	588	none
-KIND_SOULGUARD_Miho_Elite	en_only	816	none
-KIND_SOULGUARD_Miho_Epic	en_only	817	none
-KIND_SOULGUARD_PUMPKIN	shared	399	none
-KIND_SOULGUARD_SHENPU	en_only	518	none
-KIND_SOULGUARD_SHUQINSPIRIT	shared	523	none
-KIND_SOULGUARD_SPARKELVES	en_only	511	none
-KIND_SOULGUARD_SkyBird	en_only	969	none
-KIND_SOULGUARD_Squirrel	shared	675	none
-KIND_SOULGUARD_Sword	shared	740	none
-KIND_SOULGUARD_TINK	en_only	404	none
-KIND_SOULGUARD_TINKY	en_only	393	none
-KIND_SOULGUARD_TK_EVENT	en_only	430	none
-KIND_SOULGUARD_Tamie	en_only	568	none
-KIND_SOULGUARD_UFO	en_only	759	none
-KIND_SOULGUARD_WINDSPIRIT	en_only	453	none
-KIND_SOULGUARD_WomanGhost	kr_only	-	none
-KIND_SOULSOLDIER	kr_only	-	kr
-KIND_SOUTHGUARDIAN	kr_only	-	kr
-KIND_SPAMONKEY	kr_only	-	kr
-KIND_SPAPANDA	kr_only	-	kr
-KIND_SPARACCON	kr_only	-	kr
-KIND_SPARKY	en_only	256	en
-KIND_SPASPECTRE	kr_only	-	kr
-KIND_SPATOAD	kr_only	-	kr
-KIND_SPIDERMON	kr_only	-	kr
-KIND_SRPDALIN	kr_only	-	kr
-KIND_STAGBEETLE	shared	64	kr+en
-KIND_STEIN	en_only	504	en
-KIND_STELLAR_CHEEP	en_only	594	none
-KIND_STONE	en_only	916	none
-KIND_STONECOW	shared	128	kr+en
-KIND_STONEKING_FB	kr_only	-	kr
-KIND_STONEOLDMAN	kr_only	-	kr
-KIND_STONE_LANTERN	kr_only	-	kr
-KIND_STRATEGICPOSITION	kr_only	-	none
-KIND_STRETCHTREE	shared	192	kr+en
-KIND_SUAEK	kr_only	-	kr
-KIND_SUCCUBUS	kr_only	-	kr
-KIND_SUMMER	kr_only	-	none
-KIND_SUMMER_BGHOST	unrostered	-	kr
-KIND_SUMMER_DEADMESSENGER	unrostered	-	kr
-KIND_SUMMER_EGG	unrostered	-	kr
-KIND_SUMMER_GGHOST	unrostered	-	kr
-KIND_SUMMONMERCHANT	shared	46	kr+en
-KIND_SUMMON_BABYGOBLIN	kr_only	-	none
-KIND_SUPERBEARTANG	en_only	330	none
-KIND_SUPERBEARTANG_T	en_only	421	none
-KIND_SUPERMASHIMARO	kr_only	-	none
-KIND_SUPERRABBITGIRL	en_only	475	none
-KIND_SUPPLY	en_only	470	none
-KIND_SURA	kr_only	-	kr
-KIND_SYULLY	kr_only	-	none
-KIND_Saraphina	en_only	836	none
-KIND_Saraphina_T	en_only	837	none
-KIND_Scylla_Range	en_only	712	none
-KIND_Sheepie	en_only	709	none
-KIND_Sheepie_T	en_only	710	none
-KIND_Sishen	en_only	719	none
-KIND_Sishen_T	en_only	720	none
-KIND_Skeleton	en_only	525	none
-KIND_Skeleton_King	en_only	526	none
-KIND_Skeleton_Melee	en_only	695	none
-KIND_Skeleton_Range	en_only	696	none
-KIND_Smokey_Raccoonies	en_only	764	none
-KIND_Soulguard_Miho	kr_only	-	none
-KIND_Sulday_RABBIT	kr_only	-	none
-KIND_Sulday_RACCOON	kr_only	-	none
-KIND_SummerDRAGON	kr_only	-	none
-KIND_SummerKRAKEN	kr_only	-	none
-KIND_SummerSEA_CROCODILE	kr_only	-	none
-KIND_SummerSEA_WHALE	kr_only	-	none
-KIND_SunWuKong_Melee	en_only	790	none
-KIND_SunWuKong_Range	en_only	791	none
-KIND_SuperGuri	kr_only	-	none
-KIND_TANJACU	en_only	490	none
-KIND_TANJACUBASE	en_only	489	none
-KIND_THIEFCANNON	kr_only	-	none
-KIND_THIEFDAGGERCRIMINAL	kr_only	-	none
-KIND_THIEFNINJA	kr_only	-	none
-KIND_THIEFWOLFNINJA	kr_only	-	none
-KIND_THIRTEENFACE	en_only	449	en
-KIND_THIRTEENFACE_1	kr_only	-	kr
-KIND_THIRTEENFACE_2	kr_only	-	kr
-KIND_THIRTEENFACE_3	kr_only	-	kr
-KIND_THIRTEENFACE_4	kr_only	-	kr
-KIND_THIRTEENFACE_5	kr_only	-	kr
-KIND_TIGER	shared	11	kr+en
-KIND_TITLENPC	en_only	148	en
-KIND_TOAD	en_only	26	en
-KIND_TOHANG	shared	88	kr+en
-KIND_TONGGOOMIN	kr_only	-	none
-KIND_TONGUEGIRL	shared	131	kr
-KIND_TONGUEGIRL_1	en_only	353	none
-KIND_TONGUEGIRL_2	en_only	81	none
-KIND_TONGUEGIRL_3	en_only	665	none
-KIND_TONGUEGIRL_4	en_only	672	none
-KIND_TORPEDO	kr_only	-	none
-KIND_TOWER_D	en_only	455	none
-KIND_TOWER_F	en_only	456	none
-KIND_TOWER_L	en_only	458	none
-KIND_TOWER_T	en_only	457	none
-KIND_TOWER_W	en_only	459	none
-KIND_TOWNVAULT	en_only	977	en
-KIND_TOYO1	kr_only	-	none
-KIND_TOYO2	kr_only	-	none
-KIND_TOYO3	kr_only	-	none
-KIND_TREASURE_BLUESHABEL	en_only	384	none
-KIND_TREASURE_CATAR1	en_only	378	none
-KIND_TREASURE_CATAR2	en_only	381	none
-KIND_TREASURE_DAEGUM1	en_only	377	none
-KIND_TREASURE_DAEGUM2	en_only	380	none
-KIND_TREASURE_REDSHABEL	en_only	383	none
-KIND_TREASURE_RIFLE1	en_only	379	none
-KIND_TREASURE_RIFLE2	en_only	382	none
-KIND_TREEMON	shared	134	kr+en
-KIND_TRICERAMONS	en_only	367	en
-KIND_TRIPLETMASK	kr_only	-	kr
-KIND_TURKEY	en_only	255	none
-KIND_TURTLE	shared	29	kr+en
-KIND_TURTLESHIP	kr_only	-	none
-KIND_TUTORIAL	kr_only	-	none
-KIND_TUTORIALGURI	kr_only	-	kr
-KIND_TWISTERM	kr_only	-	kr
-KIND_Tianshi	en_only	729	none
-KIND_Tianshi_T	en_only	730	none
-KIND_TimeArcher	unrostered	-	kr
-KIND_TimeArcher_PK	unrostered	-	kr
-KIND_TimeTank	unrostered	-	kr
-KIND_TimeTank_PK	unrostered	-	kr
-KIND_Toysoldiers	en_only	673	none
-KIND_Toysoldiers_T	en_only	674	none
-KIND_Trihornbishop	en_only	688	none
-KIND_Trihornbishop_T	en_only	689	none
-KIND_UGLYPILLAR	kr_only	-	kr
-KIND_UNDERSEA_CROCODILE	kr_only	-	kr
-KIND_UNDERSEA_WHALE	kr_only	-	kr
-KIND_UNDINE	kr_only	-	kr
-KIND_UNIVERSALGENERAL	kr_only	-	kr
-KIND_VALKYRIELONG	en_only	508	none
-KIND_VALKYRIESHORT	en_only	507	none
-KIND_VEGA	shared	483	none
-KIND_VERGIL	en_only	834	none
-KIND_VINE	shared	135	kr+en
-KIND_VIRGINGHOST	kr_only	-	kr
-KIND_Vulcan	en_only	765	none
-KIND_Vulcan_T	en_only	766	none
-KIND_WAITINGMAN	shared	40	kr+en
-KIND_WAITINGMAN2	shared	159	kr+en
-KIND_WAITINGMAN3	kr_only	-	kr
-KIND_WAITINGMAN4	kr_only	-	none
-KIND_WAITINGWOMAN	shared	56	kr+en
-KIND_WALRUS	kr_only	-	kr
-KIND_WANGCHO	kr_only	-	none
-KIND_WANTEDEVENT	kr_only	-	none
-KIND_WELCOMEHERO1	kr_only	-	none
-KIND_WELCOMEHERO2	kr_only	-	none
-KIND_WELCOMEHERO3	kr_only	-	none
-KIND_WELCOMEHERO4	kr_only	-	none
-KIND_WELCOMEHERO5	kr_only	-	none
-KIND_WELCOMEHERO6	kr_only	-	none
-KIND_WELCOMEHERO7	kr_only	-	none
-KIND_WENNYOLDMAN	shared	108	kr+en
-KIND_WEREWOLF	en_only	196	en
-KIND_WERWOLF	kr_only	-	kr
-KIND_WESTBATTLEBOAT	kr_only	-	none
-KIND_WESTBOAT	kr_only	-	none
-KIND_WESTGUNSOL	kr_only	-	kr
-KIND_WESTGUNSOL_DOKDO	kr_only	-	none
-KIND_WESTGUNSOL_KANGHWA	kr_only	-	none
-KIND_WESTMEDICAL	kr_only	-	kr
-KIND_WESTMEDICAL_DOKDO	kr_only	-	none
-KIND_WESTMOTHERSHIP	kr_only	-	none
-KIND_WESTOFFICER	kr_only	-	kr
-KIND_WESTOFFICER_DOKDO	kr_only	-	none
-KIND_WESTOFFICER_KANGHWA	kr_only	-	none
-KIND_WESTPATROLSOL	kr_only	-	kr
-KIND_WESTSWORDSOL	kr_only	-	kr
-KIND_WESTSWORDSOL_DOKDO	kr_only	-	none
-KIND_WESTSWORDSOL_KANGHWA	kr_only	-	none
-KIND_WHALE	kr_only	-	kr
-KIND_WHIRLWIND	kr_only	-	kr
-KIND_WHITEBEAR	shared	60	kr+en
-KIND_WHITEBEAR_2	en_only	116	en
-KIND_WHITERABIT	kr_only	-	none
-KIND_WHITETOWER	kr_only	-	none
-KIND_WHITEWOLF	shared	59	kr+en
-KIND_WHITEWOLF_2	en_only	115	en
-KIND_WILDBOAR	shared	17	kr+en
-KIND_WILDBOARBOSS	en_only	215	none
-KIND_WILDCAT	en_only	145	en
-KIND_WILDCAT_SANTA	en_only	186	en
-KIND_WILDCAT_SANTA_1	en_only	349	en
-KIND_WILDCAT_SANTA_2	en_only	111	en
-KIND_WILDCAT_SANTA_3	en_only	661	none
-KIND_WILDCAT_SANTA_4	en_only	668	en
-KIND_WITHINSTANCECHICKEN	kr_only	-	kr
-KIND_WITHINSTANCEMUSHROOM	kr_only	-	kr
-KIND_WITHINSTANCEPIG	kr_only	-	kr
-KIND_WITHINSTANCERABBIT	kr_only	-	kr
-KIND_WITHINSTANCERAT	kr_only	-	kr
-KIND_WOLFNINJA	kr_only	-	kr
-KIND_WOLFNINJA2	kr_only	-	none
-KIND_WOLFNINJA2_DOKDO	kr_only	-	none
-KIND_WORKER	en_only	979	none
-KIND_WORKEROFFICE	en_only	978	en
-KIND_WORLDTREE_LV1	kr_only	-	none
-KIND_WORLDTREE_LV2	kr_only	-	none
-KIND_WORLDTREE_LV3	kr_only	-	none
-KIND_WUDAOXRZ	shared	531	kr+en
-KIND_WULOUBOSS	en_only	775	en
-KIND_WaterCrystal_State	shared	-	none
-KIND_WhiteOwl	en_only	582	none
-KIND_WindCrystal_State	shared	-	none
-KIND_WorldCupPet	en_only	697	none
-KIND_XMASSNOWMANTREE_LV1	kr_only	-	none
-KIND_XMASSNOWMANTREE_LV2	kr_only	-	none
-KIND_XMASSNOWMANTREE_LV3	kr_only	-	none
-KIND_XMASTREE	kr_only	-	none
-KIND_XMASTREE_LV1	kr_only	-	none
-KIND_XMASTREE_LV2	kr_only	-	none
-KIND_XUANWU	kr_only	-	kr
-KIND_Xmas_Penguin	kr_only	-	none
-KIND_XunShou01	en_only	643	none
-KIND_XunShou02	en_only	644	en
-KIND_YACHAKING_SUMMON	kr_only	-	none
-KIND_YAIN	shared	19	kr+en
-KIND_YAMA	kr_only	-	kr
-KIND_YELLOWBOAT	kr_only	-	kr
-KIND_YELLOWFLAG	kr_only	-	none
-KIND_YELLOWSHABEL	en_only	220	none
-KIND_YELLOW_CKNIGHT	en_only	598	none
-KIND_YETI	shared	130	kr
-KIND_YETI_1	en_only	352	none
-KIND_YETI_2	en_only	37	none
-KIND_YETI_3	en_only	664	none
-KIND_YETI_4	en_only	671	none
-KIND_YIMGGEOCKJEONG	kr_only	-	kr
-KIND_YISOONSIN	kr_only	-	none
-KIND_YISOONSIN_T	kr_only	-	none
-KIND_YISUNSIN	kr_only	-	kr
-KIND_YONGCHUNI	shared	91	kr+en
-KIND_YONGPAL	shared	45	kr+en
-KIND_YONGSAMI	shared	100	kr+en
-KIND_YONGTAGI	shared	98	kr+en
-KIND_YUBOK	shared	962	none
-KIND_YUBOK_T	en_only	963	none
-KIND_YUNGAESOMOON	kr_only	-	none
-KIND_YUNGAESOMOON_N	kr_only	-	none
-KIND_ZANGWON	kr_only	-	none
-KIND_ZHAOHUANYIZI1	en_only	517	none
-KIND_ZODIAC_BOAR	shared	501	kr+en
-KIND_ZODIAC_DRAGON	shared	503	en
-KIND_ZODIAC_MONKEY	shared	500	kr+en
-KIND_ZODIAC_RABBIT	shared	497	kr+en
-KIND_ZODIAC_ROOSTER	shared	498	kr+en
-KIND_ZODIAC_SNAKE	shared	499	kr+en
-KIND_ZODIAC_TIGER	shared	502	kr+en
-KIND_ZOMBICHEF	kr_only	-	kr
-KIND_ZORRORACCOON	en_only	174	none
-KIND_ZORRORACCOON_AGIT	en_only	261	en
-KIND_ZORRORACCOON_AGIT2	en_only	407	none
-KIND_ZORRORACCOON_FAKE	en_only	478	none
-KIND_ZORRORACCOON_NPC	en_only	104	en
-KIND_beastmaster	kr_only	-	kr
-KIND_breadtiger	kr_only	-	kr
-KIND_doora	en_only	776	en
-KIND_doorb	en_only	777	en
-KIND_doorc	en_only	778	en
-KIND_indian	en_only	814	none
-KIND_indian_T	en_only	815	none
-KIND_kelan	en_only	167	kr
-KIND_memorialST_LV1	kr_only	-	none
-KIND_memorialST_LV2	kr_only	-	none
-KIND_memorialST_LV3	kr_only	-	none
-KIND_pirate	en_only	812	none
-KIND_pirate_T	en_only	813	none
-KIND_suzaku	kr_only	-	none
-KIND_ticketbox_LV1	kr_only	-	none
-KIND_ticketbox_LV2	kr_only	-	none
-KIND_ticketbox_LV3	kr_only	-	none
+code	tier	en_wire_id	spawnable	pairs_to
+KIND_10cake	en_only	838	none	-
+KIND_11cake	en_only	839	none	-
+KIND_17THCAKE_LV1	kr_only	-	none	-
+KIND_17THCAKE_LV2	kr_only	-	none	-
+KIND_3LEAVES	kr_only	-	kr	-
+KIND_9th_M1_BOAR	en_only	561	en	-
+KIND_9th_M1_chailang	en_only	562	en	-
+KIND_9th_M2_Nuhly	en_only	563	en	-
+KIND_9th_M2_SNAKE	en_only	564	en	-
+KIND_9th_M3_Jigws	en_only	565	en	-
+KIND_9th_M3_Sphinx	en_only	567	en	-
+KIND_9th_M3_TIGER	en_only	566	en	-
+KIND_AGATE	kr_only	-	none	-
+KIND_AIRIN	en_only	319	en	-
+KIND_AJI	kr_only	-	none	-
+KIND_ALEX	en_only	359	en	-
+KIND_ALTAIR	shared	482	none	-
+KIND_AMBERSAURUS	en_only	364	en	-
+KIND_ANNIVERSARY	en_only	335	en	-
+KIND_ANTIQUITY	en_only	375	none	-
+KIND_ANT_CHICKEN	kr_only	-	none	-
+KIND_ARA	en_only	376	en	-
+KIND_ARCHER	kr_only	-	kr	-
+KIND_ARO	kr_only	-	kr	-
+KIND_ARTIFACTNPC	en_only	298	en	-
+KIND_ASADAL	kr_only	-	none	-
+KIND_ASURA	kr_only	-	none	-
+KIND_AURA_STONE	shared	929	none	-
+KIND_Ancient_Gate	en_only	700	none	-
+KIND_Ancient_Sorcerer01	unrostered	-	kr	-
+KIND_Ancient_Sorcerer02	unrostered	-	kr	-
+KIND_Ancient_Xingshi01	shared	701	kr+en	-
+KIND_Ancient_Xingshi02	shared	702	kr+en	-
+KIND_Ancient_Xingshi03	shared	772	kr+en	-
+KIND_Ancient_Xingshi04	shared	773	kr+en	-
+KIND_Ancient_Xingshi06	shared	774	kr+en	-
+KIND_AnimalBox	kr_only	-	none	-
+KIND_Aries	en_only	540	none	-
+KIND_Aries_T	en_only	541	none	-
+KIND_BABY_BOSSMONKEY	kr_only	-	kr	-
+KIND_BABY_ICEWITCH	kr_only	-	kr	-
+KIND_BABY_KINGYACHA	kr_only	-	kr	-
+KIND_BABY_SAMDURANG	kr_only	-	kr	-
+KIND_BABY_SKELETONBOSS	kr_only	-	kr	-
+KIND_BACHELORGHOST	kr_only	-	kr	-
+KIND_BADTOOL	kr_only	-	kr	-
+KIND_BAIYUY	shared	533	kr+en	-
+KIND_BALLON	kr_only	-	none	-
+KIND_BALLOTBOX	en_only	310	en	-
+KIND_BAMBI	kr_only	-	none	-
+KIND_BAMBI_N	kr_only	-	none	-
+KIND_BATTLECAR	kr_only	-	none	-
+KIND_BATTLEZONE	shared	244	kr+en	-
+KIND_BEARLADY	kr_only	-	kr	-
+KIND_BEARTANG	shared	328	none	-
+KIND_BEAST01YOUNG	shared	224	none	-
+KIND_BEAST02YOUNG	kr_only	-	none	-
+KIND_BEAST03YOUNG	kr_only	-	none	-
+KIND_BEAST04YOUNG	kr_only	-	none	-
+KIND_BEAST05YOUNG	kr_only	-	none	-
+KIND_BEAST06YOUNG	kr_only	331	none	KIND_HOR14YOUNG
+KIND_BEAST07YOUNG	kr_only	-	none	-
+KIND_BEAST08YOUNG	kr_only	-	none	-
+KIND_BEEGIRL	en_only	76	none	-
+KIND_BELITA	en_only	156	kr+en	-
+KIND_BERSERKER	en_only	238	none	-
+KIND_BIG3LEAVES	kr_only	-	none	-
+KIND_BIGRACCOON	en_only	178	none	-
+KIND_BIGRACCOON_AGIT	en_only	266	en	-
+KIND_BINGO	kr_only	-	kr	-
+KIND_BLACKBAT	shared	69	kr+en	-
+KIND_BLACKBAT_2	en_only	120	en	-
+KIND_BLACKBEAR	shared	63	kr+en	-
+KIND_BLACKBEAR_2	en_only	119	en	-
+KIND_BLACKBOSS	en_only	240	none	-
+KIND_BLACKPRIEST	en_only	446	en	-
+KIND_BLACKPRIEST_1	kr_only	-	kr	-
+KIND_BLACKPRIEST_2	kr_only	-	kr	-
+KIND_BLACKPRIEST_3	kr_only	-	kr	-
+KIND_BLACKPRIEST_4	kr_only	-	kr	-
+KIND_BLACKPRIEST_5	kr_only	-	kr	-
+KIND_BLACKRABIT	kr_only	-	none	-
+KIND_BLACKSOUL	en_only	448	en	-
+KIND_BLACKSOUL_1	kr_only	-	kr	-
+KIND_BLACKSOUL_2	kr_only	-	kr	-
+KIND_BLACKSOUL_3	kr_only	-	kr	-
+KIND_BLACKSOUL_4	kr_only	-	kr	-
+KIND_BLACKSOUL_5	kr_only	-	kr	-
+KIND_BLACKSPIDER	en_only	247	en	-
+KIND_BLACKTIGER	kr_only	961	none	KIND_BLACKTIGER_MELEE
+KIND_BLACKTIGER_MELEE	en_only	961	none	-
+KIND_BLACKWING	kr_only	-	kr	-
+KIND_BLACKWING_SUMMON	kr_only	-	none	-
+KIND_BLACKWOLF	shared	71	kr+en	-
+KIND_BLACKWOLF_2	en_only	122	en	-
+KIND_BLADE_BLUE	kr_only	-	none	-
+KIND_BLADE_GREEN	kr_only	-	none	-
+KIND_BLADE_RED	kr_only	-	none	-
+KIND_BLADE_YELLOW	kr_only	-	none	-
+KIND_BLESSINGCLARA	en_only	387	none	-
+KIND_BLESSINGHIRO	en_only	390	none	-
+KIND_BLESSINGJEAN	en_only	385	none	-
+KIND_BLESSINGMERIEL	en_only	386	none	-
+KIND_BLESSINGSPARKY	en_only	388	none	-
+KIND_BLOODBAT	shared	195	kr+en	-
+KIND_BLOODDEACON	kr_only	197	kr	KIND_DEACON
+KIND_BLOODHAND	kr_only	-	kr	-
+KIND_BLOODIRON	kr_only	-	kr	-
+KIND_BLOODPRIEST	kr_only	199	kr	KIND_PRIEST
+KIND_BLUEBUG	en_only	77	none	-
+KIND_BLUEFLAG	kr_only	-	none	-
+KIND_BLUEFLY	shared	39	kr+en	-
+KIND_BLUESHABEL	en_only	223	none	-
+KIND_BLUE_CKNIGHT	en_only	596	none	-
+KIND_BOKBULBOKNPC	en_only	411	en	-
+KIND_BOMBDRAGON	kr_only	34	none	-
+KIND_BOMBWHALE	kr_only	-	none	-
+KIND_BONETYRANNO	shared	369	en	-
+KIND_BONG	shared	42	kr+en	-
+KIND_BONGDAL	shared	44	kr+en	-
+KIND_BONGSAMI	shared	93	kr+en	-
+KIND_BONGSUNI	shared	92	kr+en	-
+KIND_BONGTAGI	shared	90	kr+en	-
+KIND_BOSSBANDIT	kr_only	-	none	-
+KIND_BOSSINVASIONMAINBOSS	en_only	829	none	-
+KIND_BOSSMONKEY	shared	27	kr+en	-
+KIND_BOXERCRAB	shared	943	kr+en	-
+KIND_BRAI	en_only	138	en	-
+KIND_BROWNWOLF	shared	72	kr+en	-
+KIND_BROWNWOLF_2	en_only	153	en	-
+KIND_BUBOSANG	kr_only	-	kr	-
+KIND_BULGASARI	shared	141	none	-
+KIND_BUTCHER	kr_only	-	kr	-
+KIND_Baby_Melee	en_only	521	none	-
+KIND_Baby_Range	en_only	522	none	-
+KIND_BasicFrog	unrostered	-	kr	-
+KIND_BattleRoyalKatar	en_only	425	none	-
+KIND_BattleRoyalKatar2	en_only	428	none	-
+KIND_BattleRoyalNPC	en_only	431	en	-
+KIND_BattleRoyalRifle	en_only	426	none	-
+KIND_BattleRoyalRifle2	en_only	429	none	-
+KIND_BattleRoyalSword	en_only	424	none	-
+KIND_BattleRoyalSword2	en_only	427	none	-
+KIND_BearSanta_Range	en_only	658	none	-
+KIND_Bear_Melee	en_only	601	none	-
+KIND_Beastmaster_Melee	en_only	559	none	-
+KIND_Beastmaster_Range	en_only	560	none	-
+KIND_Bee_Range	en_only	602	none	-
+KIND_Big_husky	en_only	516	none	-
+KIND_BlueFrog	kr_only	-	kr	-
+KIND_Bum_I	kr_only	931	none	KIND_HUNTER_MELEE
+KIND_CAMAOSS	shared	530	kr+en	-
+KIND_CANNON	kr_only	-	kr	-
+KIND_CANNONMOL	en_only	144	en	-
+KIND_CASTLE	shared	99	none	-
+KIND_CATAR	en_only	241	none	-
+KIND_CATFISH	shared	31	kr+en	-
+KIND_CATMELEE	en_only	321	none	-
+KIND_CATPET	en_only	339	none	-
+KIND_CATPET_T	en_only	422	none	-
+KIND_CATRANGE	en_only	322	none	-
+KIND_CAULDRON_LV1	kr_only	-	none	-
+KIND_CAULDRON_LV2	kr_only	-	none	-
+KIND_CAULDRON_LV3	kr_only	-	none	-
+KIND_CAVINE_RANGE	en_only	960	none	-
+KIND_CERBERUS	en_only	204	en	-
+KIND_CHEONGU	kr_only	-	none	-
+KIND_CHERRYWOOD_1	en_only	163	none	-
+KIND_CHERRYWOOD_2	en_only	164	none	-
+KIND_CHERRYWOOD_3	en_only	165	none	-
+KIND_CHERRY_Event	kr_only	-	kr	-
+KIND_CHERRY_FB	kr_only	-	kr	-
+KIND_CHICKCOMMANDER	kr_only	-	kr	-
+KIND_CHICKEN	shared	21	kr+en	-
+KIND_CHICKENBIG	en_only	218	none	-
+KIND_CHIMERA	en_only	211	none	-
+KIND_CHINAMERCHANT	shared	47	kr+en	-
+KIND_CHINATRADER	shared	48	kr+en	-
+KIND_CHOCHIEF	kr_only	-	kr	-
+KIND_CHOCOLATE	en_only	442	en	-
+KIND_CHOIMOOSUN	kr_only	-	none	-
+KIND_CHRISTMASMELEE	en_only	343	none	-
+KIND_CHRISTMASRANGE	en_only	344	none	-
+KIND_CHRISTMASTREE	en_only	234	none	-
+KIND_CHRISTMASTREE1	en_only	356	none	-
+KIND_CHRISTMASTREEBASE	en_only	355	none	-
+KIND_CHRISTMASTREELV1	en_only	921	none	-
+KIND_CHRISTMASTREELV2	en_only	922	none	-
+KIND_CHRISTMASWORLDTREE01	en_only	433	none	-
+KIND_CHRISTMASWORLDTREE02	en_only	434	none	-
+KIND_CLONESTEIN	en_only	505	none	-
+KIND_CLOWN	en_only	435	en	-
+KIND_CLOWN_1	kr_only	-	kr	-
+KIND_CLOWN_2	kr_only	-	kr	-
+KIND_CLOWN_3	kr_only	-	kr	-
+KIND_CLOWN_4	kr_only	-	kr	-
+KIND_CLOWN_5	kr_only	-	kr	-
+KIND_CLUBCAR	kr_only	-	kr	-
+KIND_COMMANDER	kr_only	-	kr	-
+KIND_COPFIELD	en_only	418	en	-
+KIND_CORALMUSHROOM	shared	944	kr+en	-
+KIND_CORNUCOW	shared	194	kr+en	-
+KIND_COSMIC_EGG	en_only	593	none	-
+KIND_COSMOSRABBIT1	en_only	333	none	-
+KIND_COSMOSRABBIT2	en_only	334	none	-
+KIND_COW	shared	20	kr+en	-
+KIND_CRAB	shared	132	kr+en	-
+KIND_CRABSPIDER	en_only	142	en	-
+KIND_CRAB_GURI	shared	942	kr+en	-
+KIND_CRANE	shared	162	kr+en	-
+KIND_CROWBLUE	en_only	641	none	-
+KIND_CROWRED	en_only	642	none	-
+KIND_CURSEHIRO	en_only	389	none	-
+KIND_CUTEGIRL	kr_only	-	none	-
+KIND_CYCLOPS	en_only	308	none	-
+KIND_Catpenguin_Melee	en_only	650	none	-
+KIND_Catpenguin_Range	en_only	651	none	-
+KIND_DAEGIL	kr_only	-	none	-
+KIND_DAEGUM	en_only	242	none	-
+KIND_DAEJAEHACK	kr_only	-	kr	-
+KIND_DAEMAARMOR_FB	kr_only	-	kr	-
+KIND_DAEMA_ARMOR	kr_only	-	kr	-
+KIND_DAEMA_ARMOR_T	shared	957	kr	-
+KIND_DAEMA_BADGER	kr_only	-	kr	-
+KIND_DAEMA_DARKNINJA	kr_only	-	kr	-
+KIND_DAEMA_FOX	kr_only	-	kr	-
+KIND_DAEMA_FOXMAN	kr_only	-	kr	-
+KIND_DAEMA_GWIWANG	shared	956	kr	-
+KIND_DAEMA_NINJA	kr_only	-	kr	-
+KIND_DAGGERCRIMINAL	kr_only	-	kr	-
+KIND_DAILYQUEST	shared	102	kr+en	-
+KIND_DAILYQUEST2	en_only	297	en	-
+KIND_DAILYQUEST3	en_only	309	en	-
+KIND_DAMDUK	kr_only	-	none	-
+KIND_DAMO	kr_only	-	none	-
+KIND_DANTE	en_only	835	none	-
+KIND_DASANJEONG	kr_only	-	none	-
+KIND_DEACON	en_only	197	en	-
+KIND_DEADMESSENGER	kr_only	-	kr	-
+KIND_DEATHSHIP	kr_only	-	none	-
+KIND_DEVILOUS	en_only	200	en	-
+KIND_DIPLOMATICSHIP	kr_only	-	none	-
+KIND_DOCTOR	shared	43	kr+en	-
+KIND_DOMAFIG	kr_only	-	kr	-
+KIND_DOMAFIG_FB	kr_only	-	kr	-
+KIND_DOOR_UDGI01	en_only	800	en	-
+KIND_DOOR_UDGI02	en_only	801	en	-
+KIND_DOOR_UDGI03	en_only	940	en	-
+KIND_DRACULA	shared	202	kr+en	-
+KIND_DRAGONKING	shared	32	kr+en	-
+KIND_DRAGONKING_BOSS	en_only	914	none	-
+KIND_DRAGON_BABY	en_only	401	none	-
+KIND_DRAGON_EGG	en_only	400	none	-
+KIND_DRAGON_YONGGARY	en_only	402	none	-
+KIND_DRAKE	en_only	822	en	-
+KIND_DRAKEFLY	en_only	365	en	-
+KIND_DREAMTREE_LV1	shared	690	none	-
+KIND_DREAMTREE_LV2	shared	691	none	-
+KIND_DREAMTREE_LV3	shared	692	none	-
+KIND_DRINKER	kr_only	-	kr	-
+KIND_DR_GURI	kr_only	-	kr	-
+KIND_DUCHESS	en_only	445	en	-
+KIND_DUCHESS_1	kr_only	-	kr	-
+KIND_DUCHESS_2	kr_only	-	kr	-
+KIND_DUCHESS_3	kr_only	-	kr	-
+KIND_DUCHESS_4	kr_only	-	kr	-
+KIND_DUCHESS_5	kr_only	-	kr	-
+KIND_DUMEORI	kr_only	-	kr	-
+KIND_DUNDIS	shared	535	en	-
+KIND_DUNGPIG	kr_only	-	kr	-
+KIND_DeepSeaWhale	en_only	918	en	-
+KIND_Doc_Raccoonie	en_only	763	none	-
+KIND_Dragon_BLACK	kr_only	-	none	-
+KIND_Dragon_Green	kr_only	-	none	-
+KIND_Dragon_RED	kr_only	-	none	-
+KIND_Dragon_WHITE	kr_only	-	none	-
+KIND_EASTGUARDIAN	kr_only	-	kr	-
+KIND_EBlueFrog	unrostered	-	kr	-
+KIND_EGGGHOST	kr_only	-	kr	-
+KIND_EGoldFrog	unrostered	-	kr	-
+KIND_ELEPHANTSANG	kr_only	-	kr	-
+KIND_ELIANA	en_only	193	en	-
+KIND_ELIXIRNPC	en_only	357	en	-
+KIND_EMPERORARCHER	shared	157	kr+en	-
+KIND_EMPERORCAVALRY	en_only	299	en	-
+KIND_EMPERORMASTER	shared	302	en	-
+KIND_EMPERORPORTER	en_only	301	en	-
+KIND_EMPERORROBBER	en_only	300	en	-
+KIND_EMPERORSOLDIER	shared	158	kr+en	-
+KIND_EMPERORWARRIOR	en_only	303	en	-
+KIND_EMPERORWIZARD	kr_only	299	kr	KIND_EMPERORCAVALRY
+KIND_EMPERORWORKER	kr_only	301	kr	KIND_EMPERORPORTER
+KIND_ERZJUNGR	shared	532	en	-
+KIND_ERedFrog	unrostered	-	kr	-
+KIND_EUNCHE	kr_only	-	none	-
+KIND_EUNHO	kr_only	-	none	-
+KIND_EUNHO_N	kr_only	-	none	-
+KIND_EVENTDAMO	kr_only	-	none	-
+KIND_EVENTGATE	en_only	327	none	-
+KIND_EVENTNPC	kr_only	-	none	-
+KIND_EVENT_BIGRABBIT	kr_only	-	kr	-
+KIND_EVENT_HWANGJINYI	kr_only	-	none	-
+KIND_EVENT_RABBIT	kr_only	-	kr	-
+KIND_EVENT_YETI	kr_only	-	kr	-
+KIND_EVENT_ZODIAC_RABBIT	kr_only	-	kr	-
+KIND_EVILEYE	en_only	248	en	-
+KIND_EVILEYE_SANTA	en_only	188	en	-
+KIND_EVILPIG	shared	306	kr	-
+KIND_EVIRGINGHOST	unrostered	-	kr	-
+KIND_EXCESSIVEMAID	kr_only	-	kr	-
+KIND_Edestus	en_only	783	none	-
+KIND_Edestus_T	en_only	784	none	-
+KIND_Eiyuu_Melee	en_only	741	none	-
+KIND_Eiyuu_Range	en_only	742	none	-
+KIND_Elite_Mant_Melee	en_only	713	none	-
+KIND_Elite_Scylla_Range	en_only	714	none	-
+KIND_Elves_Melee	en_only	527	none	-
+KIND_Elves_Range	en_only	528	none	-
+KIND_Emo	en_only	731	none	-
+KIND_Emo_T	en_only	732	none	-
+KIND_FAIRYMELEE	en_only	394	none	-
+KIND_FAIRYRANGE	en_only	395	none	-
+KIND_FANPRIEST	kr_only	-	kr	-
+KIND_FANTAIGOING	shared	945	kr+en	-
+KIND_FESTIVALGATE	en_only	416	none	-
+KIND_FIFTHCAKE_LV1	kr_only	-	none	-
+KIND_FIFTHCAKE_LV2	kr_only	-	none	-
+KIND_FIGHTINGBOX	kr_only	-	none	-
+KIND_FIGHTINGMENMELEE	en_only	373	none	-
+KIND_FIGHTINGMENRANGE	en_only	374	none	-
+KIND_FIREBIRD	kr_only	-	kr	-
+KIND_FIREDRAGON	kr_only	-	kr	-
+KIND_FIREGOBLIN	shared	66	kr	-
+KIND_FIREHAETAE	kr_only	358	kr	KIND_HOR16YOUNG
+KIND_FIREMAN	kr_only	-	kr	-
+KIND_FIRESTAR	en_only	249	en	-
+KIND_FLOWERPIG	shared	18	kr+en	-
+KIND_FOGBRIDE	en_only	436	en	-
+KIND_FOGBRIDE_1	kr_only	-	kr	-
+KIND_FOGBRIDE_2	kr_only	-	kr	-
+KIND_FOGBRIDE_3	kr_only	-	kr	-
+KIND_FOGBRIDE_4	kr_only	-	kr	-
+KIND_FOGBRIDE_5	kr_only	-	kr	-
+KIND_FOX	en_only	825	en	-
+KIND_FREDRIC	en_only	362	en	-
+KIND_FREESIA	en_only	296	en	-
+KIND_FROKEN	en_only	225	en	-
+KIND_FROZENGOLEM	en_only	228	en	-
+KIND_FROZENKNIGHT	shared	229	kr+en	-
+KIND_FROZENQUEEN	en_only	231	en	-
+KIND_FROZENSORCERER	en_only	227	en	-
+KIND_FROZENWIZARD	kr_only	-	kr	-
+KIND_FRUITBROS	shared	136	kr+en	-
+KIND_FULLMOON	kr_only	332	none	KIND_MOON
+KIND_FireCrystal_State	shared	-	none	-
+KIND_GAGOIL	kr_only	203	kr	KIND_GARGOYLE
+KIND_GALE_RANGE	en_only	930	none	-
+KIND_GANGHWACANNON	kr_only	-	none	-
+KIND_GANGHWAGATE	kr_only	-	none	-
+KIND_GANGSI	en_only	201	en	-
+KIND_GARGOYLE	en_only	203	en	-
+KIND_GARLIC	shared	15	kr	-
+KIND_GARLICTANK	kr_only	-	kr	-
+KIND_GEMBOX	kr_only	-	none	-
+KIND_GENTLEMAN	en_only	447	en	-
+KIND_GENTLEMAN_1	kr_only	-	kr	-
+KIND_GENTLEMAN_2	kr_only	-	kr	-
+KIND_GENTLEMAN_3	kr_only	-	kr	-
+KIND_GENTLEMAN_4	kr_only	-	kr	-
+KIND_GENTLEMAN_5	kr_only	-	kr	-
+KIND_GIFTRACCOON	en_only	452	none	-
+KIND_GIRAFFE	en_only	212	none	-
+KIND_GIRAFFE_2	en_only	304	none	-
+KIND_GMEVENTGATE	en_only	487	none	-
+KIND_GMONBONUS	en_only	274	en	-
+KIND_GOD01	en_only	460	none	-
+KIND_GOD02	en_only	461	none	-
+KIND_GOD03	en_only	462	none	-
+KIND_GOD04	en_only	463	none	-
+KIND_GOD05	en_only	464	none	-
+KIND_GOD06	en_only	465	none	-
+KIND_GOD07	en_only	466	none	-
+KIND_GOD08	en_only	467	none	-
+KIND_GOD09	en_only	468	none	-
+KIND_GOD10	en_only	469	none	-
+KIND_GODHAND	en_only	198	en	-
+KIND_GOESUSON	kr_only	-	kr	-
+KIND_GOLDBEETLE	shared	65	kr+en	-
+KIND_GOLDGEMBOX	kr_only	-	none	-
+KIND_GOLD_CKNIGHT	en_only	599	none	-
+KIND_GOLEM	kr_only	-	kr	-
+KIND_GOMG	kr_only	-	none	-
+KIND_GOONZUDAY	kr_only	-	none	-
+KIND_GOONZUDAYNPC	en_only	693	none	-
+KIND_GOONZUDEV	kr_only	-	none	-
+KIND_GOONZUDEV_2	shared	953	none	-
+KIND_GOONZUGM	kr_only	-	none	-
+KIND_GOONZUMASTER	shared	80	none	-
+KIND_GOTPA	en_only	22	en	-
+KIND_GOURDVINE	kr_only	-	none	-
+KIND_GOURDVINE1	kr_only	-	none	-
+KIND_GRAVEROBBERY	kr_only	300	kr	KIND_EMPERORROBBER
+KIND_GREATWALLASURA	en_only	318	en	-
+KIND_GREATWALLMAGICIAN	en_only	313	en	-
+KIND_GREATWALLSLIME	en_only	316	en	-
+KIND_GREATWALLSOLDIER	en_only	312	en	-
+KIND_GREATWALLSOUL	en_only	315	en	-
+KIND_GREATWALLSPIDER	en_only	317	en	-
+KIND_GREATWALLTWINHEAD	en_only	314	en	-
+KIND_GREENFLY	en_only	78	none	-
+KIND_GREENSHABEL	en_only	221	none	-
+KIND_GREENTURTLE	shared	62	kr+en	-
+KIND_GREENTURTLE_2	en_only	118	en	-
+KIND_GREEN_CKNIGHT	en_only	597	none	-
+KIND_GRPAPAGOBLIN	kr_only	-	kr	-
+KIND_GRZOMMAN	shared	970	none	-
+KIND_GRZOMWMAN	shared	971	none	-
+KIND_GURIROCKET1	kr_only	-	none	-
+KIND_GURIROCKET2	kr_only	-	none	-
+KIND_GURIROCKET3	kr_only	-	none	-
+KIND_GURIROCKET4	kr_only	-	none	-
+KIND_GURISOLDIER	kr_only	-	none	-
+KIND_GURI_CHANSUN	kr_only	-	kr	-
+KIND_GURI_DOCTOR	kr_only	-	none	-
+KIND_GURI_GOLD	kr_only	-	none	-
+KIND_GURI_LUCK	kr_only	-	kr	-
+KIND_GURI_MERCHANT	kr_only	-	kr	-
+KIND_GURI_PARTY	kr_only	-	none	-
+KIND_GURI_RESEARCHER	en_only	948	kr	-
+KIND_GURI_ROULETTE	kr_only	-	kr	-
+KIND_GURI_SMITHY	kr_only	-	kr	-
+KIND_GURI_STATUE	kr_only	-	none	-
+KIND_GURI_YANGGO	kr_only	-	none	-
+KIND_GUYAJA	en_only	237	none	-
+KIND_GWANCHANG_FAR	kr_only	-	none	-
+KIND_GWANCHANG_NEAR	kr_only	-	none	-
+KIND_GWANGGAETOMONUMENT	kr_only	-	none	-
+KIND_GWANWOO	kr_only	-	none	-
+KIND_GWIWANGCRAB	en_only	947	none	-
+KIND_GWONYOOL	kr_only	-	none	-
+KIND_Galahad_Melee	en_only	806	none	-
+KIND_Galahad_Range	en_only	807	none	-
+KIND_Ghost	en_only	572	none	-
+KIND_GhostT	en_only	573	none	-
+KIND_Ghost_FaceMan	en_only	603	none	-
+KIND_Ghost_Gate	en_only	620	none	-
+KIND_Ghost_NvGui1	en_only	604	en	-
+KIND_Ghost_NvGui2	en_only	608	en	-
+KIND_Ghost_NvGui3	en_only	612	en	-
+KIND_Ghost_NvGui4	en_only	616	en	-
+KIND_Ghost_Samurai1	en_only	605	en	-
+KIND_Ghost_Samurai2	en_only	609	en	-
+KIND_Ghost_Samurai3	en_only	613	en	-
+KIND_Ghost_Samurai4	en_only	617	en	-
+KIND_Ghost_Wuliannan1	en_only	606	en	-
+KIND_Ghost_Wuliannan2	en_only	610	en	-
+KIND_Ghost_Wuliannan3	en_only	614	en	-
+KIND_Ghost_Wuliannan4	en_only	618	en	-
+KIND_Ghost_Yifanmumian1	en_only	607	en	-
+KIND_Ghost_Yifanmumian2	en_only	611	en	-
+KIND_Ghost_Yifanmumian3	en_only	615	en	-
+KIND_Ghost_Yifanmumian4	en_only	619	en	-
+KIND_GoldFrog	kr_only	-	kr	-
+KIND_GoldenGuri2	en_only	974	none	-
+KIND_Gum_I	kr_only	930	none	KIND_GALE_RANGE
+KIND_Gunner_Range	en_only	684	none	-
+KIND_HALLOWEEN	en_only	338	none	-
+KIND_HALLOWEENBASE	en_only	337	none	-
+KIND_HALLOWEENGHOST	shared	342	none	-
+KIND_HALLOWEENPC	en_only	340	none	-
+KIND_HALLOWEENPUMPKIN	shared	341	none	-
+KIND_HAMEL	kr_only	-	kr	-
+KIND_HAPPYBEAN_NPC1	en_only	53	none	-
+KIND_HAPPYBEAN_NPC2	en_only	54	none	-
+KIND_HAPPYBEAN_NPC3	en_only	55	none	-
+KIND_HARPY	en_only	146	en	-
+KIND_HARU1	kr_only	-	kr	-
+KIND_HARU2	kr_only	-	kr	-
+KIND_HARU3	kr_only	-	kr	-
+KIND_HARU4	kr_only	-	kr	-
+KIND_HAYABUNESHIP	kr_only	-	kr	-
+KIND_HEDGEHOG	shared	184	kr+en	-
+KIND_HELLDOG	shared	96	kr+en	-
+KIND_HELLDOG_2	en_only	155	en	-
+KIND_HELLMANTLE	kr_only	-	kr	-
+KIND_HELLSOLDIER	shared	246	kr+en	-
+KIND_HELLSPIDER	kr_only	-	kr	-
+KIND_HERO1	shared	1	none	-
+KIND_HERO2	shared	3	none	-
+KIND_HERO3	en_only	5	none	-
+KIND_HERO4	en_only	7	none	-
+KIND_HERO5	en_only	676	none	-
+KIND_HERO6	en_only	678	none	-
+KIND_HEROINE1	shared	2	none	-
+KIND_HEROINE1NPC	kr_only	-	kr	-
+KIND_HEROINE2	en_only	4	none	-
+KIND_HEROINE3	en_only	6	none	-
+KIND_HEROINE4	en_only	8	none	-
+KIND_HEROINE5	en_only	677	none	-
+KIND_HEROINE6	en_only	679	none	-
+KIND_HEROUP1	kr_only	-	none	-
+KIND_HEROUP2	kr_only	-	none	-
+KIND_HEROUP3	kr_only	-	none	-
+KIND_HEROUP4	kr_only	-	none	-
+KIND_HERO_BREADMAN	kr_only	-	none	-
+KIND_HERO_BREADMANEX	kr_only	-	none	-
+KIND_HERO_SNOWMAN	kr_only	-	none	-
+KIND_HERO_SNOWMANEX	kr_only	-	none	-
+KIND_HINADOLL	en_only	236	none	-
+KIND_HINEAS	en_only	161	en	-
+KIND_HONGGILDONG	shared	210	kr+en	-
+KIND_HONGYUY	shared	534	kr+en	-
+KIND_HOR01YOUNG	shared	57	en	-
+KIND_HOR02YOUNG	shared	112	en	-
+KIND_HOR03YOUNG	shared	113	en	-
+KIND_HOR04YOUNG	shared	152	en	-
+KIND_HOR05YOUNG	shared	168	none	-
+KIND_HOR06YOUNG	shared	180	en	-
+KIND_HOR07YOUNG	shared	190	en	-
+KIND_HOR08YOUNG	shared	208	en	-
+KIND_HOR09YOUNG	shared	209	en	-
+KIND_HOR10YOUNG	en_only	252	en	-
+KIND_HOR11YOUNG	en_only	58	en	-
+KIND_HOR12YOUNG	en_only	140	en	-
+KIND_HOR13YOUNG	en_only	323	en	-
+KIND_HOR14YOUNG	en_only	331	none	-
+KIND_HOR15YOUNG	en_only	336	none	-
+KIND_HOR16YOUNG	en_only	358	en	-
+KIND_HOR17YOUNG	en_only	370	en	-
+KIND_HOR18YOUNG	en_only	450	none	-
+KIND_HOR19YOUNG	en_only	488	none	-
+KIND_HOR20YOUNG	en_only	491	none	-
+KIND_HOR21YOUNG	shared	506	none	-
+KIND_HOR22YOUNG	shared	512	none	-
+KIND_HOR23YOUNG	en_only	519	none	-
+KIND_HOR24YOUNG	shared	529	none	-
+KIND_HOR25YOUNG	shared	544	none	-
+KIND_HOR26YOUNG	shared	546	none	-
+KIND_HOR27YOUNG	shared	574	none	-
+KIND_HOR28YOUNG	shared	576	none	-
+KIND_HOR29YOUNG	shared	577	none	-
+KIND_HOR30YOUNG	shared	586	none	-
+KIND_HOR31YOUNG	shared	587	none	-
+KIND_HOR32YOUNG	kr_only	-	none	-
+KIND_HOR33YOUNG	kr_only	-	none	-
+KIND_HOR34YOUNG	shared	590	none	-
+KIND_HOR35YOUNG	shared	591	none	-
+KIND_HOR36YOUNG	shared	592	none	-
+KIND_HOR37YOUNG	kr_only	-	none	-
+KIND_HOR38YOUNG	shared	633	none	-
+KIND_HOR39YOUNG	shared	634	none	-
+KIND_HOR40YOUNG	kr_only	-	none	-
+KIND_HOR41YOUNG	kr_only	-	none	-
+KIND_HOR42YOUNG	kr_only	-	none	-
+KIND_HOR43YOUNG	shared	645	none	-
+KIND_HOR44YOUNG	shared	646	none	-
+KIND_HOR45YOUNG	kr_only	-	none	-
+KIND_HOR46YOUNG	kr_only	-	none	-
+KIND_HOR47YOUNG	shared	653	none	-
+KIND_HOR48YOUNG	shared	654	none	-
+KIND_HOR49YOUNG	shared	681	none	-
+KIND_HOR50YOUNG	shared	682	none	-
+KIND_HOR51YOUNG	shared	685	none	-
+KIND_HOR52YOUNG	kr_only	-	none	-
+KIND_HOR53YOUNG	kr_only	-	none	-
+KIND_HOR54YOUNG	shared	703	none	-
+KIND_HOR55YOUNG	shared	704	none	-
+KIND_HOR56YOUNG	shared	708	none	-
+KIND_HOR57YOUNG	shared	718	none	-
+KIND_HOR58YOUNG	shared	738	none	-
+KIND_HOR59YOUNG	shared	747	none	-
+KIND_HOR60YOUNG	en_only	748	none	-
+KIND_HOR61YOUNG	en_only	761	none	-
+KIND_HOR62YOUNG	en_only	762	none	-
+KIND_HOR63YOUNG	en_only	768	none	-
+KIND_HOR64YOUNG	en_only	769	none	-
+KIND_HOR65YOUNG	en_only	770	none	-
+KIND_HOR66YOUNG	en_only	771	none	-
+KIND_HOR67YOUNG	en_only	786	none	-
+KIND_HOR68YOUNG	en_only	787	none	-
+KIND_HOR69YOUNG	en_only	788	none	-
+KIND_HOR70YOUNG	en_only	789	none	-
+KIND_HOR71YOUNG	en_only	804	none	-
+KIND_HOR72YOUNG	en_only	805	none	-
+KIND_HOR73YOUNG	en_only	830	none	-
+KIND_HOR74YOUNG	en_only	831	none	-
+KIND_HOR79YOUNG	en_only	912	none	-
+KIND_HOR80YOUNG	en_only	913	none	-
+KIND_HOR81YOUNG	en_only	927	none	-
+KIND_HOR82YOUNG	en_only	928	none	-
+KIND_HOR83YOUNG	en_only	932	none	-
+KIND_HOR84YOUNG	en_only	933	none	-
+KIND_HOR85YOUNG	en_only	954	none	-
+KIND_HOR86YOUNG	en_only	955	none	-
+KIND_HOR87YOUNG	en_only	958	none	-
+KIND_HOR88YOUNG	en_only	959	none	-
+KIND_HOR89YOUNG	en_only	975	none	-
+KIND_HOR90YOUNG	en_only	976	none	-
+KIND_HORSEMA	kr_only	-	kr	-
+KIND_HORSERACING	kr_only	-	none	-
+KIND_HOR_PLUSSUPERUNISUS	kr_only	-	none	-
+KIND_HOR_SUPERUNISUS	kr_only	-	none	-
+KIND_HOR_UNISUS	kr_only	-	none	-
+KIND_HUNGRYGOBLIN	shared	185	kr	-
+KIND_HUNTER_MELEE	en_only	931	none	-
+KIND_HWAMA	kr_only	-	kr	-
+KIND_HWAMA_TEST	kr_only	-	kr	-
+KIND_HWANGJINYI	kr_only	-	none	-
+KIND_HYDRA	en_only	509	none	-
+KIND_HYDRA_BABY	en_only	510	none	-
+KIND_Husky	en_only	515	none	-
+KIND_Hyeonmu	kr_only	-	none	-
+KIND_ICEGENERAL	kr_only	-	kr	-
+KIND_ICEHOUND	en_only	230	en	-
+KIND_ICEMELEE	en_only	419	none	-
+KIND_ICERANGE	en_only	420	none	-
+KIND_ICEWITCH	kr_only	-	kr	-
+KIND_ILGIMAE	kr_only	-	none	-
+KIND_INDIACANNON	kr_only	-	kr	-
+KIND_INHWASANG	kr_only	-	kr	-
+KIND_INSTANCEBOSS	kr_only	-	kr	-
+KIND_INSTANCEMON1	kr_only	-	kr	-
+KIND_INSTANCEMON2	kr_only	-	kr	-
+KIND_INSTANCEMON3	kr_only	-	kr	-
+KIND_INVESTMENT	shared	151	kr+en	-
+KIND_ISABU	kr_only	-	none	-
+KIND_JAE	en_only	680	en	-
+KIND_JANGBOGO	kr_only	189	none	-
+KIND_JANGGILSAN	shared	114	kr+en	-
+KIND_JANGGUMI	shared	35	kr+en	-
+KIND_JANGYOUNGSIL	shared	94	kr+en	-
+KIND_JAPANCOMMANDER2	unrostered	-	kr	-
+KIND_JAPANGUNSOL2	unrostered	-	kr	-
+KIND_JAPANHEALER2	unrostered	-	kr	-
+KIND_JAPANPORTERSOL	kr_only	-	none	-
+KIND_JAPANSWORDSOL2	unrostered	-	kr	-
+KIND_JAPANTRADER	shared	49	kr+en	-
+KIND_JAR	shared	125	kr+en	-
+KIND_JEFFREY	en_only	166	en	-
+KIND_JOAN	en_only	826	none	-
+KIND_JOKER	shared	253	none	-
+KIND_JOUNSUN	kr_only	-	none	-
+KIND_JUDE	kr_only	-	kr	-
+KIND_JUNZDAZHEN	en_only	537	none	-
+KIND_JYSHANZEI	shared	950	kr+en	-
+KIND_JYSishen	en_only	721	none	-
+KIND_JYSishen_T	en_only	722	none	-
+KIND_KADOMACH	en_only	235	none	-
+KIND_KELAN	en_only	167	en	-
+KIND_KEY_RACCOON	en_only	267	en	-
+KIND_KIMCHOONGSUN	kr_only	-	kr	-
+KIND_KIMSIMIN	kr_only	-	none	-
+KIND_KINGCRAB	kr_only	-	kr	-
+KIND_KINGCRYSTAL	shared	183	kr+en	-
+KIND_KINGCUTTLEFISH	kr_only	-	kr	-
+KIND_KINGMONUMENT	shared	30	none	-
+KIND_KINGMONUMENT2	en_only	589	none	-
+KIND_KINGPIG	en_only	137	en	-
+KIND_KINGRACCOON_AGIT	en_only	259	en	-
+KIND_KINGYACHA	shared	61	en	-
+KIND_KINGYACHA_2	en_only	117	en	-
+KIND_KITERACCOON	en_only	179	none	-
+KIND_KOINOBORY	en_only	250	none	-
+KIND_KOINOBORYBLUE	en_only	177	none	-
+KIND_KOINOBORYENG	en_only	254	en	-
+KIND_KOINOBORYGREEN	en_only	372	none	-
+KIND_KOINOBORYPET	en_only	476	none	-
+KIND_KOINOBORYRED	en_only	176	none	-
+KIND_KOINOBORYYELLOW	en_only	175	none	-
+KIND_KONMYEONG	kr_only	-	kr	-
+KIND_KRAKEN	kr_only	635	kr	KIND_Kracken
+KIND_KRAKEN_T	kr_only	-	none	-
+KIND_KUIJIAB	shared	751	kr+en	-
+KIND_KUIJIAJ	shared	749	kr+en	-
+KIND_KUIJIAY	shared	750	kr+en	-
+KIND_KYLIN	kr_only	-	kr	-
+KIND_KingArthur_Melee	en_only	779	none	-
+KIND_KingArthur_Range	en_only	780	none	-
+KIND_Knight_Melee	en_only	683	none	-
+KIND_KoryuGURI_STATUE	shared	-	none	-
+KIND_Koryu_CORALMUSHROOM	shared	-	none	-
+KIND_Koryu_CRABGURI	shared	-	none	-
+KIND_Koryu_SAMURAIBoss	shared	-	none	-
+KIND_Koryu_SAMURAICRAB	shared	-	none	-
+KIND_Kracken	en_only	635	none	-
+KIND_Kracken_T	en_only	636	none	-
+KIND_LADYBUG	shared	36	kr+en	-
+KIND_LADYGENERAL	kr_only	-	kr	-
+KIND_LEEWONIK	kr_only	-	kr	-
+KIND_LEEYOUNGA	kr_only	-	kr	-
+KIND_LIAN	en_only	539	en	-
+KIND_LIGHTSOLDIER	kr_only	-	kr	-
+KIND_LIHU	en_only	538	none	-
+KIND_LIONMASK	kr_only	-	kr	-
+KIND_LITTLEBIRD	en_only	495	none	-
+KIND_LLOYD	en_only	371	en	-
+KIND_LOBSTER	kr_only	-	kr	-
+KIND_LOCUST	shared	38	kr+en	-
+KIND_LUCKYEE	kr_only	-	none	-
+KIND_LUCKYTREE_LV1	kr_only	-	none	-
+KIND_LUCKYTREE_LV2	kr_only	-	none	-
+KIND_LUCKYTREE_LV3	kr_only	-	none	-
+KIND_LYANSKAPULUO	shared	536	en	-
+KIND_LandCrystal_State	shared	-	none	-
+KIND_MADOGHOST	kr_only	-	kr	-
+KIND_MAGARGOYLE	en_only	496	none	-
+KIND_MAGARGOYLE_AncientTower5F	en_only	781	en	-
+KIND_MAGICALRACCOON	en_only	171	none	-
+KIND_MAGICALRACCOON_AGIT	en_only	263	en	-
+KIND_MAGICALRACCOON_AGIT2	en_only	408	none	-
+KIND_MAGICALRACCOON_FAKE	en_only	479	none	-
+KIND_MAGICALRACCOON_NPC	en_only	103	en	-
+KIND_MAGICALRACCOON_NPC2	en_only	397	en	-
+KIND_MAMARACCOON	en_only	170	none	-
+KIND_MAMARACCOON_AGIT	en_only	265	en	-
+KIND_MAMARACCOON_AGIT2	en_only	410	none	-
+KIND_MAMARACCOON_FAKE	en_only	481	none	-
+KIND_MANDEOCK	kr_only	-	kr	-
+KIND_MANDRAGORA	en_only	147	en	-
+KIND_MANTISRAPTOR	en_only	366	en	-
+KIND_MARIONETTE	en_only	226	en	-
+KIND_MARIONETTE_SANTA	en_only	182	en	-
+KIND_MARIONETTE_SANTA_1	en_only	348	en	-
+KIND_MARIONETTE_SANTA_2	en_only	101	en	-
+KIND_MARIONETTE_SANTA_3	en_only	660	en	-
+KIND_MARIONETTE_SANTA_4	en_only	667	en	-
+KIND_MARU	kr_only	-	kr	-
+KIND_MASHIMARO	kr_only	-	none	-
+KIND_MASHIMARO_PAJAMA	kr_only	-	none	-
+KIND_MASHIMARO_PIRATE	kr_only	-	none	-
+KIND_MASHIMARO_SANTA	kr_only	-	none	-
+KIND_MASKB	en_only	752	en	-
+KIND_MASKBS	en_only	754	en	-
+KIND_MASKH	en_only	753	en	-
+KIND_MASKMAN	kr_only	-	kr	-
+KIND_MASKMONK	kr_only	-	kr	-
+KIND_MEDICALJANGGUM	kr_only	-	none	-
+KIND_MEORIMAN	kr_only	-	kr	-
+KIND_MERCHANTBELT	kr_only	-	none	-
+KIND_MERCHANTBOW	kr_only	-	none	-
+KIND_MERCHANTCLOTHES	kr_only	-	none	-
+KIND_MERCHANTFOOD	kr_only	-	none	-
+KIND_MERCHANTHARDWARE	kr_only	-	none	-
+KIND_MERCHANTHAT	kr_only	-	none	-
+KIND_MERCHANTHEAL	kr_only	-	none	-
+KIND_MERCHANTHORSE	shared	52	kr+en	-
+KIND_MERCHANTNECKLACE	kr_only	-	none	-
+KIND_MERCHANTPOTTER	shared	82	kr+en	-
+KIND_MERCHANTRING	kr_only	-	none	-
+KIND_MERCHANTSHOES	kr_only	-	none	-
+KIND_MERIEL	en_only	51	en	-
+KIND_MIMIC	en_only	75	none	-
+KIND_MINEGIRL	en_only	79	none	-
+KIND_MINICERBERUS	en_only	486	none	-
+KIND_MINIFROZENQUEEN	en_only	485	none	-
+KIND_MINIGOBLIN	shared	67	kr	-
+KIND_MINIRABBIT_BOY	kr_only	-	none	-
+KIND_MINIRABBIT_GIRL	kr_only	-	none	-
+KIND_MIR	kr_only	-	none	-
+KIND_MISA	kr_only	-	kr	-
+KIND_MISSIONFLAG	kr_only	-	none	-
+KIND_MISSIONSTONE	kr_only	-	none	-
+KIND_MOGOOKGI	kr_only	-	kr	-
+KIND_MOLDA	en_only	216	en	-
+KIND_MOLEMINER	shared	160	kr+en	-
+KIND_MONKEY	shared	169	kr+en	-
+KIND_MONKEYBOXER	kr_only	-	kr	-
+KIND_MONKEYSON	en_only	24	en	-
+KIND_MONSTER_ArmoredBeast	en_only	797	kr+en	-
+KIND_MONSTER_ArmoredBeast_2	unrostered	-	kr	-
+KIND_MONSTER_ArmoredBeast_3	unrostered	-	kr	-
+KIND_MONSTER_ArmoredBeast_4	unrostered	-	kr	-
+KIND_MONSTER_ArmoredBeast_5	unrostered	-	kr	-
+KIND_MONSTER_BOSS_WarMecha	en_only	799	none	-
+KIND_MONSTER_EW7102	en_only	798	kr+en	-
+KIND_MONSTER_EW7102_2	unrostered	-	kr	-
+KIND_MONSTER_EW7102_3	unrostered	-	kr	-
+KIND_MONSTER_EW7102_4	unrostered	-	kr	-
+KIND_MONSTER_EW7102_5	unrostered	-	kr	-
+KIND_MONSTER_PatrolRobot	en_only	795	kr+en	-
+KIND_MONSTER_PatrolRobot_2	unrostered	-	kr	-
+KIND_MONSTER_PatrolRobot_3	unrostered	-	kr	-
+KIND_MONSTER_PatrolRobot_4	unrostered	-	kr	-
+KIND_MONSTER_PatrolRobot_5	unrostered	-	kr	-
+KIND_MONSTER_SelfPropelledGun	en_only	796	kr+en	-
+KIND_MONSTER_SelfPropelledGun_2	unrostered	-	kr	-
+KIND_MONSTER_SelfPropelledGun_3	unrostered	-	kr	-
+KIND_MONSTER_SelfPropelledGun_4	unrostered	-	kr	-
+KIND_MONSTER_SelfPropelledGun_5	unrostered	-	kr	-
+KIND_MONSTER_Sentinel	en_only	794	kr+en	-
+KIND_MONSTER_Sentinel_2	unrostered	-	kr	-
+KIND_MONSTER_Sentinel_3	unrostered	-	kr	-
+KIND_MONSTER_Sentinel_4	unrostered	-	kr	-
+KIND_MONSTER_Sentinel_5	unrostered	-	kr	-
+KIND_MONV	kr_only	-	none	-
+KIND_MON_APPLE	kr_only	-	none	-
+KIND_MOON	en_only	332	none	-
+KIND_MOONRABBITMAN	shared	964	none	-
+KIND_MOONRABBITWOMAN	shared	965	none	-
+KIND_MOONRABBIT_LV1	kr_only	-	none	-
+KIND_MOONRABBIT_LV2	kr_only	-	none	-
+KIND_MOONRABBIT_LV3	kr_only	-	none	-
+KIND_MORTAR	kr_only	-	kr	-
+KIND_MOWINGSNOWMAN	shared	307	kr	-
+KIND_MTBASE1	kr_only	-	none	-
+KIND_MTBASE2	kr_only	-	none	-
+KIND_MTBASE3	kr_only	-	none	-
+KIND_MTFASTNESSBACK	kr_only	-	none	-
+KIND_MTFASTNESSFRONT	kr_only	-	none	-
+KIND_MUDANG	shared	139	kr+en	-
+KIND_MUSHROOM	shared	13	kr+en	-
+KIND_MUSHROOMBOSS	en_only	214	en	-
+KIND_M_GirlMelee	en_only	513	none	-
+KIND_M_GirlRange	en_only	514	none	-
+KIND_Mant_Melee	en_only	711	none	-
+KIND_MetalDragon_Elite	en_only	808	none	-
+KIND_MetalDragon_Elite_T	en_only	809	none	-
+KIND_MetalDragon_Epic	en_only	810	none	-
+KIND_MetalDragon_Epic_T	en_only	811	none	-
+KIND_Mir_BLACK	kr_only	-	none	-
+KIND_Mir_GREEN	kr_only	-	none	-
+KIND_Mir_PINK	kr_only	-	none	-
+KIND_Mushroom_Basket	en_only	649	none	-
+KIND_NAESI	kr_only	-	kr	-
+KIND_NAIN	kr_only	-	kr	-
+KIND_NAMI	shared	925	none	-
+KIND_NAMI_T	en_only	926	none	-
+KIND_NANJEON	kr_only	-	kr	-
+KIND_NAPOLEON	en_only	827	none	-
+KIND_NATALIA	en_only	444	kr+en	-
+KIND_NEWBRIDEGURI	kr_only	-	none	-
+KIND_NEWCATAR	en_only	84	none	-
+KIND_NEWDAEGUM	en_only	85	none	-
+KIND_NEWGOMG	kr_only	-	none	-
+KIND_NEWJAPANTRADER	kr_only	-	kr	-
+KIND_NEWRIFLE	en_only	83	none	-
+KIND_NEWYEARBASE	kr_only	-	none	-
+KIND_NEWYEARGURI	kr_only	-	none	-
+KIND_NEWYEARTREE	shared	129	none	-
+KIND_NEWYEARTREEBASE	en_only	354	none	-
+KIND_NIAOTOU	en_only	755	none	-
+KIND_NIAOTOU_T	en_only	756	none	-
+KIND_NINJA	kr_only	-	kr	-
+KIND_NINJA2	kr_only	-	none	-
+KIND_NINJA2_DOKDO	kr_only	-	none	-
+KIND_NINJAGIRL	en_only	206	none	-
+KIND_NINJAMAN	en_only	191	none	-
+KIND_NINJAPANDA	en_only	23	en	-
+KIND_NPCDRAGONKING	kr_only	-	none	-
+KIND_NPCKINGRACOON	kr_only	-	none	-
+KIND_NPC_Andromeda	shared	803	kr+en	-
+KIND_NPC_ResearcherAndromeda	en_only	949	en	-
+KIND_NYANGYI	kr_only	-	none	-
+KIND_Naga_Bow_Range	en_only	706	none	-
+KIND_Naga_Spear_Melee	en_only	705	none	-
+KIND_Nightmare_Melee	en_only	583	none	-
+KIND_Nightmare_Range	en_only	584	none	-
+KIND_OCTOPUS	shared	124	kr+en	-
+KIND_OFFICIATOR	en_only	391	none	-
+KIND_OGONG	kr_only	-	kr	-
+KIND_ONDAL	shared	149	none	-
+KIND_ONDAL_N	kr_only	-	none	-
+KIND_ONEEYEMONSTER	kr_only	-	kr	-
+KIND_ORYE	shared	840	none	-
+KIND_ORYE_T	en_only	841	none	-
+KIND_OSAKACANNON	kr_only	-	none	-
+KIND_OSAKACASTLE	kr_only	-	none	-
+KIND_OSAKAGATE	kr_only	-	none	-
+KIND_OSU	kr_only	-	none	-
+KIND_OTOHIME	shared	243	kr+en	-
+KIND_OTOHIME_FIRE	kr_only	-	none	-
+KIND_OTOHIME_LAND	kr_only	-	none	-
+KIND_OTOHIME_SANTA	en_only	187	en	-
+KIND_OTOHIME_WATER	kr_only	-	none	-
+KIND_OTOHIME_WIND	kr_only	-	none	-
+KIND_Owl_Baby	en_only	581	none	-
+KIND_PALMTREE_LV1	kr_only	-	none	-
+KIND_PALMTREE_LV2	kr_only	-	none	-
+KIND_PALMTREE_LV3	kr_only	-	none	-
+KIND_PANG	en_only	403	en	-
+KIND_PANOCKSUN	kr_only	-	none	-
+KIND_PAPAGOBLIN	shared	68	kr	-
+KIND_PAPAGOBLIN_2	en_only	305	none	-
+KIND_PAPAGOBLIN_FB	kr_only	-	kr	-
+KIND_PARKMOONSOO	kr_only	-	none	-
+KIND_PARROT	kr_only	-	none	-
+KIND_PARTYMATCHING	kr_only	-	kr	-
+KIND_PARTYNPC	en_only	295	en	-
+KIND_PARTYQUESTNPC	en_only	437	en	-
+KIND_PBARBECUE	en_only	277	none	-
+KIND_PCAKE	en_only	275	none	-
+KIND_PCHAMPAGNE	en_only	276	none	-
+KIND_PELICANA	en_only	360	none	-
+KIND_PELICANODON	en_only	363	en	-
+KIND_PELICCANEER	en_only	823	en	-
+KIND_PERRY	en_only	828	en	-
+KIND_PGARLAND	en_only	278	none	-
+KIND_PHOENIX	en_only	454	none	-
+KIND_PICESTATUE	en_only	279	none	-
+KIND_PIG_GOLD	kr_only	-	none	-
+KIND_PINE_TREE	en_only	87	none	-
+KIND_PINK_FIGHTINGBOX	kr_only	-	none	-
+KIND_PIRATEARCHER	en_only	270	en	-
+KIND_PIRATECHEF	en_only	271	en	-
+KIND_PIRATEMASTER	en_only	272	en	-
+KIND_PIRATESHIP_GATE	en_only	268	none	-
+KIND_PIRATESOLDIER	en_only	269	en	-
+KIND_PKMAPARBEIT	en_only	443	en	-
+KIND_PK_COMMANDCENTER	kr_only	-	none	-
+KIND_POLLINGGATE	en_only	311	none	-
+KIND_POTRACCOON	en_only	439	en	-
+KIND_POWERCRAB	kr_only	-	kr	-
+KIND_PRIEST	en_only	199	en	-
+KIND_PRISONER	shared	74	kr+en	-
+KIND_PTIMEBONUS	en_only	273	en	-
+KIND_PYEONGGANG	shared	33	none	-
+KIND_PYEONGGANG_N	kr_only	-	none	-
+KIND_PosolOctopus	en_only	917	en	-
+KIND_QIUXIMM	en_only	524	none	-
+KIND_QUESTEMPERORMASTER	en_only	361	none	-
+KIND_QUESTETC1	unrostered	-	en	-
+KIND_QUESTNPC1	unrostered	-	en	-
+KIND_QUESTNPC2	unrostered	-	en	-
+KIND_Qita	en_only	557	none	-
+KIND_QitaT	en_only	558	none	-
+KIND_QitaT_HJ	en_only	570	none	-
+KIND_Qita_HJ	en_only	569	none	-
+KIND_Queen_Bee	en_only	715	none	-
+KIND_RABBIT	shared	10	kr+en	-
+KIND_RABBITBIG	en_only	217	en	-
+KIND_RABBITGIRL	en_only	474	none	-
+KIND_RACCOON	shared	12	kr+en	-
+KIND_RACCOON2	en_only	405	none	-
+KIND_RACCOONDOG	en_only	25	en	-
+KIND_RACCOONDOG_SANTA	en_only	181	en	-
+KIND_RACCOONDOG_SANTA_1	en_only	347	en	-
+KIND_RACCOONDOG_SANTA_2	en_only	89	en	-
+KIND_RACCOONDOG_SANTA_3	en_only	659	en	-
+KIND_RACCOONDOG_SANTA_4	en_only	666	en	-
+KIND_RACCOONLORD	en_only	172	none	-
+KIND_RACCOONLORD_AGIT	en_only	260	en	-
+KIND_RACCOONLORD_AGIT2	en_only	406	none	-
+KIND_RACCOONLORD_FAKE	en_only	477	none	-
+KIND_RACCOONLORD_NPC1	en_only	105	en	-
+KIND_RACCOONLORD_NPC2	en_only	106	en	-
+KIND_RACCOONLORD_NPC3	en_only	107	en	-
+KIND_RACCOONTOWER	en_only	173	none	-
+KIND_RACCOONTOWER_AGIT	en_only	264	en	-
+KIND_RACCOONTOWER_AGIT2	en_only	409	none	-
+KIND_RACCOONTOWER_FAKE	en_only	480	none	-
+KIND_RACCOONTOWER_SRP	en_only	398	en	-
+KIND_RACCOONTREE	en_only	441	none	-
+KIND_RACCOONTREEBASE	en_only	440	none	-
+KIND_RACCOON_AGIT	en_only	258	en	-
+KIND_RAINBOWWING	en_only	520	none	-
+KIND_RAT	shared	14	kr+en	-
+KIND_RATBOSS	en_only	213	none	-
+KIND_RECEIPT	en_only	493	en	-
+KIND_RECOMMENDER	en_only	251	en	-
+KIND_REDBALLON	kr_only	-	none	-
+KIND_REDBAT	shared	70	kr+en	-
+KIND_REDBAT_2	en_only	121	en	-
+KIND_REDBEAR	shared	73	kr+en	-
+KIND_REDBEAR_2	en_only	154	en	-
+KIND_REDFLAG	kr_only	-	none	-
+KIND_REDSHABEL	en_only	222	none	-
+KIND_RED_CKNIGHT	en_only	595	none	-
+KIND_REPAIRMAN	en_only	412	en	-
+KIND_RETURNTOWER	en_only	257	none	-
+KIND_REVISENPC	en_only	320	en	-
+KIND_REWARD	en_only	219	en	-
+KIND_REWARD_newstockman	en_only	785	none	-
+KIND_RICH	en_only	245	en	-
+KIND_RIFLE	en_only	239	none	-
+KIND_ROBIGATE	en_only	329	en	-
+KIND_ROBOMBER	en_only	821	en	-
+KIND_ROBOSOLDIERTYPEA	en_only	818	en	-
+KIND_ROBOSOLDIERTYPEB	en_only	819	en	-
+KIND_ROBOSOLDIERTYPEC	en_only	820	en	-
+KIND_ROBSTER	en_only	824	en	-
+KIND_ROIPLANCARD1	kr_only	-	none	-
+KIND_ROIPLANCARD2	kr_only	-	none	-
+KIND_ROIPLANCARD3	kr_only	-	none	-
+KIND_ROIPLANCARD4	kr_only	-	none	-
+KIND_ROLLINGSTEGO	en_only	368	en	-
+KIND_ROULETTESTATUE	en_only	325	none	-
+KIND_ROULETTESTATUEBASE	en_only	324	none	-
+KIND_ROYALGUARD	shared	41	kr+en	-
+KIND_RUDOLF	kr_only	-	none	-
+KIND_RUDOLPH	en_only	86	en	-
+KIND_RUDOLPHPET	en_only	345	none	-
+KIND_RUDOLPHPET_T	en_only	423	none	-
+KIND_RUSSIATRADER	shared	50	kr+en	-
+KIND_RYU	en_only	951	none	-
+KIND_RYU_T	en_only	952	none	-
+KIND_RabbitSanta_Melee	en_only	657	none	-
+KIND_RedFrog	kr_only	-	kr	-
+KIND_Royal_Bee	en_only	716	none	-
+KIND_SAHOOSUN	kr_only	-	none	-
+KIND_SAMDURANG	kr_only	-	kr	-
+KIND_SAMURAICRAB	shared	946	kr+en	-
+KIND_SAMYOUNGSAINT	kr_only	-	none	-
+KIND_SANGOKLIM	kr_only	-	none	-
+KIND_SANTAFAIRY	kr_only	-	none	-
+KIND_SANTAGATE	en_only	346	none	-
+KIND_SANTAGURI	kr_only	-	none	-
+KIND_SANTAGURI_XMAS2007	kr_only	-	none	-
+KIND_SANTAMAID	kr_only	-	none	-
+KIND_SANTAMISA	kr_only	-	kr	-
+KIND_SANTARACCOON	shared	233	none	-
+KIND_SANTARACCOON_AGIT	en_only	262	en	-
+KIND_SANTARACCOON_ZIQ	en_only	232	none	-
+KIND_SANTARUDOLF_HORSE	kr_only	-	none	-
+KIND_SANTAYAIN	kr_only	-	none	-
+KIND_SANTA_CLAUS	kr_only	-	kr	-
+KIND_SASURI	kr_only	450	kr	KIND_HOR18YOUNG
+KIND_SEBRINO	en_only	207	en	-
+KIND_SEOAERYU	kr_only	-	none	-
+KIND_SEOLOK	shared	972	none	-
+KIND_SEOLOK_T	en_only	973	none	-
+KIND_SEOSANSAINT	shared	97	kr+en	-
+KIND_SERVERGATE	en_only	326	en	-
+KIND_SHARK	shared	123	kr+en	-
+KIND_SHARKPYRAMY	en_only	915	none	-
+KIND_SHELLFISH	shared	133	kr+en	-
+KIND_SHIRLEY_N	kr_only	-	none	-
+KIND_SICKTIGER	kr_only	-	kr	-
+KIND_SIEGEFLAG	en_only	484	none	-
+KIND_SILVER_CKNIGHT	en_only	600	none	-
+KIND_SIMTORYONG	shared	150	kr+en	-
+KIND_SIRI	shared	919	none	-
+KIND_SIRI_T	en_only	920	none	-
+KIND_SKELETONBOSS	kr_only	-	none	-
+KIND_SKELETONBYEONGSA	kr_only	-	kr	-
+KIND_SKELETONGUNG	kr_only	-	kr	-
+KIND_SKULLBAT	shared	95	kr	-
+KIND_SKULLMINI	en_only	143	en	-
+KIND_SM_EVENT	kr_only	-	none	-
+KIND_SNACKBAR1	en_only	413	en	-
+KIND_SNACKBAR2	en_only	414	en	-
+KIND_SNACKBAR3	en_only	415	en	-
+KIND_SNACKBAR4	en_only	417	en	-
+KIND_SNOWELF	shared	109	kr+en	-
+KIND_SNOWELF_1	en_only	350	en	-
+KIND_SNOWELF_2	en_only	28	en	-
+KIND_SNOWELF_3	en_only	662	en	-
+KIND_SNOWELF_4	en_only	669	en	-
+KIND_SNOWMAN	shared	110	kr+en	-
+KIND_SNOWMAN_1	en_only	351	en	-
+KIND_SNOWMAN_2	en_only	127	en	-
+KIND_SNOWMAN_3	en_only	663	en	-
+KIND_SNOWMAN_4	en_only	670	en	-
+KIND_SNOWQUEEN	kr_only	-	none	-
+KIND_SOLDIER	kr_only	-	kr	-
+KIND_SOL_FIREHEA	kr_only	-	none	-
+KIND_SOL_LANDWAUK	kr_only	-	none	-
+KIND_SOL_TINKY	kr_only	-	none	-
+KIND_SOL_WATERCHUNG	kr_only	-	none	-
+KIND_SOL_WINDJUNG	kr_only	-	none	-
+KIND_SOMANGSUN	kr_only	-	none	-
+KIND_SOPHIA	en_only	16	en	-
+KIND_SOSERNO	kr_only	-	none	-
+KIND_SOULGUARD_ANGARIKA	shared	767	none	-
+KIND_SOULGUARD_Aegis	en_only	923	none	-
+KIND_SOULGUARD_Asgard	en_only	580	none	-
+KIND_SOULGUARD_BROWNIE	en_only	492	none	-
+KIND_SOULGUARD_Balrog_Elite	en_only	792	none	-
+KIND_SOULGUARD_Balrog_Epic	en_only	793	none	-
+KIND_SOULGUARD_Bubbles	shared	707	none	-
+KIND_SOULGUARD_BubleMouse	en_only	967	none	-
+KIND_SOULGUARD_Cactace	en_only	966	none	-
+KIND_SOULGUARD_CamelotAngel	en_only	782	none	-
+KIND_SOULGUARD_Chiro_Elite	en_only	832	none	-
+KIND_SOULGUARD_Chiro_Epic	en_only	833	none	-
+KIND_SOULGUARD_Cupid	en_only	545	none	-
+KIND_SOULGUARD_Eagle	shared	556	none	-
+KIND_SOULGUARD_FIRESPIRIT	en_only	396	none	-
+KIND_SOULGUARD_FlameBird	en_only	968	none	-
+KIND_SOULGUARD_Ghostman	en_only	699	none	-
+KIND_SOULGUARD_Ghostwoman	en_only	698	none	-
+KIND_SOULGUARD_GodEagle	kr_only	-	none	-
+KIND_SOULGUARD_GoldEagle	en_only	571	none	-
+KIND_SOULGUARD_Halloween	en_only	655	none	-
+KIND_SOULGUARD_ICESPIRIT	en_only	432	none	-
+KIND_SOULGUARD_LAND	en_only	494	none	-
+KIND_SOULGUARD_Luna	en_only	717	none	-
+KIND_SOULGUARD_Magra	shared	622	none	-
+KIND_SOULGUARD_ManGhost	kr_only	-	none	-
+KIND_SOULGUARD_Mermaid	en_only	588	none	-
+KIND_SOULGUARD_Miho_Elite	en_only	816	none	-
+KIND_SOULGUARD_Miho_Epic	en_only	817	none	-
+KIND_SOULGUARD_PUMPKIN	shared	399	none	-
+KIND_SOULGUARD_SHENPU	en_only	518	none	-
+KIND_SOULGUARD_SHUQINSPIRIT	shared	523	none	-
+KIND_SOULGUARD_SPARKELVES	en_only	511	none	-
+KIND_SOULGUARD_SkyBird	en_only	969	none	-
+KIND_SOULGUARD_Squirrel	shared	675	none	-
+KIND_SOULGUARD_Sword	shared	740	none	-
+KIND_SOULGUARD_TINK	en_only	404	none	-
+KIND_SOULGUARD_TINKY	en_only	393	none	-
+KIND_SOULGUARD_TK_EVENT	en_only	430	none	-
+KIND_SOULGUARD_Tamie	en_only	568	none	-
+KIND_SOULGUARD_UFO	en_only	759	none	-
+KIND_SOULGUARD_WINDSPIRIT	en_only	453	none	-
+KIND_SOULGUARD_WomanGhost	kr_only	-	none	-
+KIND_SOULSOLDIER	kr_only	-	kr	-
+KIND_SOUTHGUARDIAN	kr_only	-	kr	-
+KIND_SPAMONKEY	kr_only	24	kr	KIND_MONKEYSON
+KIND_SPAPANDA	kr_only	23	kr	KIND_NINJAPANDA
+KIND_SPARACCON	kr_only	25	kr	KIND_RACCOONDOG
+KIND_SPARKY	en_only	256	en	-
+KIND_SPASPECTRE	kr_only	-	kr	-
+KIND_SPATOAD	kr_only	26	kr	KIND_TOAD
+KIND_SPIDERMON	kr_only	-	kr	-
+KIND_SRPDALIN	kr_only	-	kr	-
+KIND_STAGBEETLE	shared	64	kr+en	-
+KIND_STEIN	en_only	504	en	-
+KIND_STELLAR_CHEEP	en_only	594	none	-
+KIND_STONE	en_only	916	none	-
+KIND_STONECOW	shared	128	kr+en	-
+KIND_STONEKING_FB	kr_only	-	kr	-
+KIND_STONEOLDMAN	kr_only	-	kr	-
+KIND_STONE_LANTERN	kr_only	-	kr	-
+KIND_STRATEGICPOSITION	kr_only	-	none	-
+KIND_STRETCHTREE	shared	192	kr+en	-
+KIND_SUAEK	kr_only	-	kr	-
+KIND_SUCCUBUS	kr_only	-	kr	-
+KIND_SUMMER	kr_only	-	none	-
+KIND_SUMMER_BGHOST	unrostered	-	kr	-
+KIND_SUMMER_DEADMESSENGER	unrostered	-	kr	-
+KIND_SUMMER_EGG	unrostered	-	kr	-
+KIND_SUMMER_GGHOST	unrostered	-	kr	-
+KIND_SUMMONMERCHANT	shared	46	kr+en	-
+KIND_SUMMON_BABYGOBLIN	kr_only	-	none	-
+KIND_SUPERBEARTANG	en_only	330	none	-
+KIND_SUPERBEARTANG_T	en_only	421	none	-
+KIND_SUPERMASHIMARO	kr_only	-	none	-
+KIND_SUPERRABBITGIRL	en_only	475	none	-
+KIND_SUPPLY	en_only	470	none	-
+KIND_SURA	kr_only	-	kr	-
+KIND_SYULLY	kr_only	-	none	-
+KIND_Saraphina	en_only	836	none	-
+KIND_Saraphina_T	en_only	837	none	-
+KIND_Scylla_Range	en_only	712	none	-
+KIND_Sheepie	en_only	709	none	-
+KIND_Sheepie_T	en_only	710	none	-
+KIND_Sishen	en_only	719	none	-
+KIND_Sishen_T	en_only	720	none	-
+KIND_Skeleton	en_only	525	none	-
+KIND_Skeleton_King	en_only	526	none	-
+KIND_Skeleton_Melee	en_only	695	none	-
+KIND_Skeleton_Range	en_only	696	none	-
+KIND_Smokey_Raccoonies	en_only	764	none	-
+KIND_Soulguard_Miho	kr_only	-	none	-
+KIND_Sulday_RABBIT	kr_only	-	none	-
+KIND_Sulday_RACCOON	kr_only	-	none	-
+KIND_SummerDRAGON	kr_only	-	none	-
+KIND_SummerKRAKEN	kr_only	-	none	-
+KIND_SummerSEA_CROCODILE	kr_only	-	none	-
+KIND_SummerSEA_WHALE	kr_only	-	none	-
+KIND_SunWuKong_Melee	en_only	790	none	-
+KIND_SunWuKong_Range	en_only	791	none	-
+KIND_SuperGuri	kr_only	-	none	-
+KIND_TANJACU	en_only	490	none	-
+KIND_TANJACUBASE	en_only	489	none	-
+KIND_THIEFCANNON	kr_only	-	none	-
+KIND_THIEFDAGGERCRIMINAL	kr_only	-	none	-
+KIND_THIEFNINJA	kr_only	-	none	-
+KIND_THIEFWOLFNINJA	kr_only	-	none	-
+KIND_THIRTEENFACE	en_only	449	en	-
+KIND_THIRTEENFACE_1	kr_only	-	kr	-
+KIND_THIRTEENFACE_2	kr_only	-	kr	-
+KIND_THIRTEENFACE_3	kr_only	-	kr	-
+KIND_THIRTEENFACE_4	kr_only	-	kr	-
+KIND_THIRTEENFACE_5	kr_only	-	kr	-
+KIND_TIGER	shared	11	kr+en	-
+KIND_TITLENPC	en_only	148	en	-
+KIND_TOAD	en_only	26	en	-
+KIND_TOHANG	shared	88	kr+en	-
+KIND_TONGGOOMIN	kr_only	-	none	-
+KIND_TONGUEGIRL	shared	131	kr	-
+KIND_TONGUEGIRL_1	en_only	353	none	-
+KIND_TONGUEGIRL_2	en_only	81	none	-
+KIND_TONGUEGIRL_3	en_only	665	none	-
+KIND_TONGUEGIRL_4	en_only	672	none	-
+KIND_TORPEDO	kr_only	-	none	-
+KIND_TOWER_D	en_only	455	none	-
+KIND_TOWER_F	en_only	456	none	-
+KIND_TOWER_L	en_only	458	none	-
+KIND_TOWER_T	en_only	457	none	-
+KIND_TOWER_W	en_only	459	none	-
+KIND_TOWNVAULT	en_only	977	en	-
+KIND_TOYO1	kr_only	-	none	-
+KIND_TOYO2	kr_only	-	none	-
+KIND_TOYO3	kr_only	-	none	-
+KIND_TREASURE_BLUESHABEL	en_only	384	none	-
+KIND_TREASURE_CATAR1	en_only	378	none	-
+KIND_TREASURE_CATAR2	en_only	381	none	-
+KIND_TREASURE_DAEGUM1	en_only	377	none	-
+KIND_TREASURE_DAEGUM2	en_only	380	none	-
+KIND_TREASURE_REDSHABEL	en_only	383	none	-
+KIND_TREASURE_RIFLE1	en_only	379	none	-
+KIND_TREASURE_RIFLE2	en_only	382	none	-
+KIND_TREEMON	shared	134	kr+en	-
+KIND_TRICERAMONS	en_only	367	en	-
+KIND_TRIPLETMASK	kr_only	-	kr	-
+KIND_TURKEY	en_only	255	none	-
+KIND_TURTLE	shared	29	kr+en	-
+KIND_TURTLESHIP	kr_only	-	none	-
+KIND_TUTORIAL	kr_only	-	none	-
+KIND_TUTORIALGURI	kr_only	-	kr	-
+KIND_TWISTERM	kr_only	-	kr	-
+KIND_Tianshi	en_only	729	none	-
+KIND_Tianshi_T	en_only	730	none	-
+KIND_TimeArcher	unrostered	-	kr	-
+KIND_TimeArcher_PK	unrostered	-	kr	-
+KIND_TimeTank	unrostered	-	kr	-
+KIND_TimeTank_PK	unrostered	-	kr	-
+KIND_Toysoldiers	en_only	673	none	-
+KIND_Toysoldiers_T	en_only	674	none	-
+KIND_Trihornbishop	en_only	688	none	-
+KIND_Trihornbishop_T	en_only	689	none	-
+KIND_UGLYPILLAR	kr_only	-	kr	-
+KIND_UNDERSEA_CROCODILE	kr_only	-	kr	-
+KIND_UNDERSEA_WHALE	kr_only	-	kr	-
+KIND_UNDINE	kr_only	-	kr	-
+KIND_UNIVERSALGENERAL	kr_only	-	kr	-
+KIND_VALKYRIELONG	en_only	508	none	-
+KIND_VALKYRIESHORT	en_only	507	none	-
+KIND_VEGA	shared	483	none	-
+KIND_VERGIL	en_only	834	none	-
+KIND_VINE	shared	135	kr+en	-
+KIND_VIRGINGHOST	kr_only	604	kr	KIND_Ghost_NvGui1
+KIND_Vulcan	en_only	765	none	-
+KIND_Vulcan_T	en_only	766	none	-
+KIND_WAITINGMAN	shared	40	kr+en	-
+KIND_WAITINGMAN2	shared	159	kr+en	-
+KIND_WAITINGMAN3	kr_only	-	kr	-
+KIND_WAITINGMAN4	kr_only	-	none	-
+KIND_WAITINGWOMAN	shared	56	kr+en	-
+KIND_WALRUS	kr_only	-	kr	-
+KIND_WANGCHO	kr_only	-	none	-
+KIND_WANTEDEVENT	kr_only	-	none	-
+KIND_WELCOMEHERO1	kr_only	-	none	-
+KIND_WELCOMEHERO2	kr_only	-	none	-
+KIND_WELCOMEHERO3	kr_only	-	none	-
+KIND_WELCOMEHERO4	kr_only	-	none	-
+KIND_WELCOMEHERO5	kr_only	-	none	-
+KIND_WELCOMEHERO6	kr_only	-	none	-
+KIND_WELCOMEHERO7	kr_only	-	none	-
+KIND_WENNYOLDMAN	shared	108	kr+en	-
+KIND_WEREWOLF	en_only	196	en	-
+KIND_WERWOLF	kr_only	196	kr	KIND_WEREWOLF
+KIND_WESTBATTLEBOAT	kr_only	-	none	-
+KIND_WESTBOAT	kr_only	-	none	-
+KIND_WESTGUNSOL	kr_only	-	kr	-
+KIND_WESTGUNSOL_DOKDO	kr_only	-	none	-
+KIND_WESTGUNSOL_KANGHWA	kr_only	-	none	-
+KIND_WESTMEDICAL	kr_only	-	kr	-
+KIND_WESTMEDICAL_DOKDO	kr_only	-	none	-
+KIND_WESTMOTHERSHIP	kr_only	-	none	-
+KIND_WESTOFFICER	kr_only	-	kr	-
+KIND_WESTOFFICER_DOKDO	kr_only	-	none	-
+KIND_WESTOFFICER_KANGHWA	kr_only	-	none	-
+KIND_WESTPATROLSOL	kr_only	-	kr	-
+KIND_WESTSWORDSOL	kr_only	-	kr	-
+KIND_WESTSWORDSOL_DOKDO	kr_only	-	none	-
+KIND_WESTSWORDSOL_KANGHWA	kr_only	-	none	-
+KIND_WHALE	kr_only	-	kr	-
+KIND_WHIRLWIND	kr_only	-	kr	-
+KIND_WHITEBEAR	shared	60	kr+en	-
+KIND_WHITEBEAR_2	en_only	116	en	-
+KIND_WHITERABIT	kr_only	-	none	-
+KIND_WHITETOWER	kr_only	-	none	-
+KIND_WHITEWOLF	shared	59	kr+en	-
+KIND_WHITEWOLF_2	en_only	115	en	-
+KIND_WILDBOAR	shared	17	kr+en	-
+KIND_WILDBOARBOSS	en_only	215	none	-
+KIND_WILDCAT	en_only	145	en	-
+KIND_WILDCAT_SANTA	en_only	186	en	-
+KIND_WILDCAT_SANTA_1	en_only	349	en	-
+KIND_WILDCAT_SANTA_2	en_only	111	en	-
+KIND_WILDCAT_SANTA_3	en_only	661	none	-
+KIND_WILDCAT_SANTA_4	en_only	668	en	-
+KIND_WITHINSTANCECHICKEN	kr_only	-	kr	-
+KIND_WITHINSTANCEMUSHROOM	kr_only	-	kr	-
+KIND_WITHINSTANCEPIG	kr_only	-	kr	-
+KIND_WITHINSTANCERABBIT	kr_only	-	kr	-
+KIND_WITHINSTANCERAT	kr_only	-	kr	-
+KIND_WOLFNINJA	kr_only	-	kr	-
+KIND_WOLFNINJA2	kr_only	-	none	-
+KIND_WOLFNINJA2_DOKDO	kr_only	-	none	-
+KIND_WORKER	en_only	979	none	-
+KIND_WORKEROFFICE	en_only	978	en	-
+KIND_WORLDTREE_LV1	kr_only	-	none	-
+KIND_WORLDTREE_LV2	kr_only	-	none	-
+KIND_WORLDTREE_LV3	kr_only	-	none	-
+KIND_WUDAOXRZ	shared	531	kr+en	-
+KIND_WULOUBOSS	en_only	775	en	-
+KIND_WaterCrystal_State	shared	-	none	-
+KIND_WhiteOwl	en_only	582	none	-
+KIND_WindCrystal_State	shared	-	none	-
+KIND_WorldCupPet	en_only	697	none	-
+KIND_XMASSNOWMANTREE_LV1	kr_only	-	none	-
+KIND_XMASSNOWMANTREE_LV2	kr_only	-	none	-
+KIND_XMASSNOWMANTREE_LV3	kr_only	-	none	-
+KIND_XMASTREE	kr_only	-	none	-
+KIND_XMASTREE_LV1	kr_only	-	none	-
+KIND_XMASTREE_LV2	kr_only	-	none	-
+KIND_XUANWU	kr_only	-	kr	-
+KIND_Xmas_Penguin	kr_only	-	none	-
+KIND_XunShou01	en_only	643	none	-
+KIND_XunShou02	en_only	644	en	-
+KIND_YACHAKING_SUMMON	kr_only	-	none	-
+KIND_YAIN	shared	19	kr+en	-
+KIND_YAMA	kr_only	-	kr	-
+KIND_YELLOWBOAT	kr_only	-	kr	-
+KIND_YELLOWFLAG	kr_only	-	none	-
+KIND_YELLOWSHABEL	en_only	220	none	-
+KIND_YELLOW_CKNIGHT	en_only	598	none	-
+KIND_YETI	shared	130	kr	-
+KIND_YETI_1	en_only	352	none	-
+KIND_YETI_2	en_only	37	none	-
+KIND_YETI_3	en_only	664	none	-
+KIND_YETI_4	en_only	671	none	-
+KIND_YIMGGEOCKJEONG	kr_only	-	kr	-
+KIND_YISOONSIN	kr_only	-	none	-
+KIND_YISOONSIN_T	kr_only	-	none	-
+KIND_YISUNSIN	kr_only	-	kr	-
+KIND_YONGCHUNI	shared	91	kr+en	-
+KIND_YONGPAL	shared	45	kr+en	-
+KIND_YONGSAMI	shared	100	kr+en	-
+KIND_YONGTAGI	shared	98	kr+en	-
+KIND_YUBOK	shared	962	none	-
+KIND_YUBOK_T	en_only	963	none	-
+KIND_YUNGAESOMOON	kr_only	-	none	-
+KIND_YUNGAESOMOON_N	kr_only	-	none	-
+KIND_ZANGWON	kr_only	-	none	-
+KIND_ZHAOHUANYIZI1	en_only	517	none	-
+KIND_ZODIAC_BOAR	shared	501	kr+en	-
+KIND_ZODIAC_DRAGON	shared	503	en	-
+KIND_ZODIAC_MONKEY	shared	500	kr+en	-
+KIND_ZODIAC_RABBIT	shared	497	kr+en	-
+KIND_ZODIAC_ROOSTER	shared	498	kr+en	-
+KIND_ZODIAC_SNAKE	shared	499	kr+en	-
+KIND_ZODIAC_TIGER	shared	502	kr+en	-
+KIND_ZOMBICHEF	kr_only	-	kr	-
+KIND_ZORRORACCOON	en_only	174	none	-
+KIND_ZORRORACCOON_AGIT	en_only	261	en	-
+KIND_ZORRORACCOON_AGIT2	en_only	407	none	-
+KIND_ZORRORACCOON_FAKE	en_only	478	none	-
+KIND_ZORRORACCOON_NPC	en_only	104	en	-
+KIND_beastmaster	kr_only	-	kr	-
+KIND_breadtiger	kr_only	-	kr	-
+KIND_doora	en_only	776	en	-
+KIND_doorb	en_only	777	en	-
+KIND_doorc	en_only	778	en	-
+KIND_indian	en_only	814	none	-
+KIND_indian_T	en_only	815	none	-
+KIND_kelan	en_only	167	kr	-
+KIND_memorialST_LV1	kr_only	-	none	-
+KIND_memorialST_LV2	kr_only	-	none	-
+KIND_memorialST_LV3	kr_only	-	none	-
+KIND_pirate	en_only	812	none	-
+KIND_pirate_T	en_only	813	none	-
+KIND_suzaku	kr_only	-	none	-
+KIND_ticketbox_LV1	kr_only	-	none	-
+KIND_ticketbox_LV2	kr_only	-	none	-
+KIND_ticketbox_LV3	kr_only	-	none	-

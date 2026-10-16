@@ -33,8 +33,10 @@
 //! merged by `scripts/generate-kr-canonical-tables.ps1`
 //! (`docs/DESIGN_MONSTER_KR_BASELINE_STRATEGY.md`). The EN rows are followed by the
 //! verified exact-code KR-only kinds (`KIND_BOMBDRAGON`, `KIND_JANGBOGO`) — KR-only
-//! codes that already carry an EN wire id, so the EN client can resolve them. The
-//! shipped EN file below has the same schema, so one parser reads both.
+//! codes that already carry an EN wire id, so the EN client can resolve them — and the
+//! human-confirmed rename pairs (Tier C, `docs/MONSTER_PAIRING_CANDIDATES.md`) upgrade
+//! the EN-only row of the paired EN code in place. The shipped EN file below has the
+//! same schema, so one parser reads both.
 //!
 //! # File mechanics (a port of `NDataLoader`)
 //!
@@ -692,6 +694,23 @@ mod tests {
         assert_eq!(jangbogo.attack_type, "ATTACKTYPE_WATERARROW");
         assert_eq!((jangbogo.min_dmg, jangbogo.max_dmg), (40, 50));
         assert_eq!((jangbogo.ac, jangbogo.vit, jangbogo.exp), (50, 80, 1));
+
+        // Tier C: the 20 human-confirmed rename pairs (docs/MONSTER_PAIRING_CANDIDATES.md
+        // section 2.1). The EN row keeps its code and English display name while taking
+        // the KR combat values; the EN-only columns (SortNUM, Luk, AttackE/R, DefenE/R,
+        // Wis) survive. KIND_DEACON <- KIND_BLOODDEACON.
+        let deacon = rows
+            .iter()
+            .find(|r| r.code == "KIND_DEACON")
+            .expect("DEACON row");
+        assert_eq!(deacon.attack_type, "ATTACKTYPE_SWORD");
+        assert_eq!((deacon.min_dmg, deacon.max_dmg, deacon.ac), (132, 149, 170));
+        assert_eq!(
+            (deacon.str, deacon.dex, deacon.vit, deacon.intl, deacon.exp),
+            (101, 121, 305, 206, 371)
+        );
+        // The EN-only columns (not in the KR header) are still the EN values.
+        assert_eq!((deacon.luk, deacon.wis), (5, 54));
     }
 
     /// The committed roster reconciliation and the spawn gate (strategy doc 3.4,
@@ -707,15 +726,21 @@ mod tests {
         ));
         let text = std::fs::read_to_string(path).expect("the reconciliation is committed");
         let mut lines = text.lines();
-        assert_eq!(lines.next(), Some("code\ttier\ten_wire_id\tspawnable"));
+        assert_eq!(
+            lines.next(),
+            Some("code\ttier\ten_wire_id\tspawnable\tpairs_to")
+        );
 
         let (mut rows, mut shared, mut en_only, mut kr_only) = (0, 0, 0, 0);
         let mut shared_without_id: Vec<&str> = Vec::new();
         let mut en_spawn_without_id: Vec<&str> = Vec::new();
+        // Tier C: a KR-only code that a human paired to an EN code carries the EN
+        // code's wire id and names the EN code it resolves to.
+        let mut pairs_to: Vec<(&str, &str, &str)> = Vec::new();
         for line in lines.filter(|l| !l.is_empty()) {
             rows += 1;
             let f: Vec<&str> = line.split('\t').collect();
-            assert_eq!(f.len(), 4, "row: {line}");
+            assert_eq!(f.len(), 5, "row: {line}");
             match f[1] {
                 "shared" => shared += 1,
                 "en_only" => en_only += 1,
@@ -736,6 +761,15 @@ mod tests {
                     );
                     en_spawn_without_id.push(f[0]);
                 }
+            }
+            if f[4] != "-" {
+                assert_eq!(
+                    f[1], "kr_only",
+                    "rename pair source {} is not KR-only",
+                    f[0]
+                );
+                assert_ne!(f[2], "-", "rename pair source {} carries no wire id", f[0]);
+                pairs_to.push((f[0], f[2], f[4]));
             }
         }
 
@@ -768,5 +802,34 @@ mod tests {
         expected_en.sort_unstable();
         en_spawn_without_id.sort_unstable();
         assert_eq!(en_spawn_without_id, expected_en);
+
+        // Tier C: the 20 human-confirmed rename pairs (docs/MONSTER_PAIRING_CANDIDATES.md
+        // section 2.1). Each KR-only code now resolves to its EN code's wire id, so it has
+        // left the quarantine while keeping its own row for the audit.
+        let mut expected_pairs = vec![
+            ("KIND_BEAST06YOUNG", "331", "KIND_HOR14YOUNG"),
+            ("KIND_BLACKTIGER", "961", "KIND_BLACKTIGER_MELEE"),
+            ("KIND_BLOODDEACON", "197", "KIND_DEACON"),
+            ("KIND_BLOODPRIEST", "199", "KIND_PRIEST"),
+            ("KIND_Bum_I", "931", "KIND_HUNTER_MELEE"),
+            ("KIND_EMPERORWIZARD", "299", "KIND_EMPERORCAVALRY"),
+            ("KIND_EMPERORWORKER", "301", "KIND_EMPERORPORTER"),
+            ("KIND_FIREHAETAE", "358", "KIND_HOR16YOUNG"),
+            ("KIND_FULLMOON", "332", "KIND_MOON"),
+            ("KIND_GAGOIL", "203", "KIND_GARGOYLE"),
+            ("KIND_GRAVEROBBERY", "300", "KIND_EMPERORROBBER"),
+            ("KIND_Gum_I", "930", "KIND_GALE_RANGE"),
+            ("KIND_KRAKEN", "635", "KIND_Kracken"),
+            ("KIND_SASURI", "450", "KIND_HOR18YOUNG"),
+            ("KIND_SPAMONKEY", "24", "KIND_MONKEYSON"),
+            ("KIND_SPAPANDA", "23", "KIND_NINJAPANDA"),
+            ("KIND_SPARACCON", "25", "KIND_RACCOONDOG"),
+            ("KIND_SPATOAD", "26", "KIND_TOAD"),
+            ("KIND_VIRGINGHOST", "604", "KIND_Ghost_NvGui1"),
+            ("KIND_WERWOLF", "196", "KIND_WEREWOLF"),
+        ];
+        expected_pairs.sort_unstable();
+        pairs_to.sort_unstable();
+        assert_eq!(pairs_to, expected_pairs);
     }
 }
