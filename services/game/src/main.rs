@@ -564,6 +564,10 @@ async fn handle_client(
                 }
             };
             logln!("game: {peer}: recv opcode {cmd} ({} bytes)", payload.len());
+            // The AFK clock reads here, before dispatch, so no arm's
+            // `continue` can skip it; which frames reset it is
+            // `Registry::note_activity`'s table.
+            registry.note_activity(session_key, cmd, now_tick());
 
             match cmd {
                 c if c == GameMsg::RequestLogin as u16 => {

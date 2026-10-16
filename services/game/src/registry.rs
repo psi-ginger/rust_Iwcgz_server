@@ -150,6 +150,13 @@ pub struct OnlineSession {
     /// `clFriend[i]` scan (`Server-Friend.cpp:52-64`) and the 6210/6219
     /// builders all read it.
     friends: Vec<FriendEntry>,
+    /// The AFK clock: the `now_tick()` stamp of the last inbound frame that
+    /// counted as player activity ([`Registry::note_activity`]), `None` until
+    /// any frame is observed after registration. Sitting, vending and the
+    /// client's automated keepalives are *not* activity, so they leave this
+    /// stamp where it is — which is exactly what keeps an idle shopkeeper's
+    /// clock running.
+    last_activity_ms: Option<u64>,
     tx: UnboundedSender<Outbound>,
 }
 
@@ -295,6 +302,7 @@ impl Registry {
                 head_chat: None,
                 basic_info: None,
                 friends: Vec::new(),
+                last_activity_ms: None,
                 tx,
             },
         );
@@ -395,6 +403,34 @@ impl Registry {
             session.info.x = x;
             session.info.y = y;
         }
+    }
+
+    /// Clocks one inbound frame for `key`: returns the idle time (ms) the
+    /// session had accumulated *before* this frame, and advances the AFK
+    /// clock only when `cmd` is a frame that proves a player is at the
+    /// keyboard ([`counts_as_activity`]). `None` when the session is not
+    /// registered — every frame a connection sends before
+    /// `REQUEST_SELECTCHAR`.
+    ///
+    /// The clock starts at the first frame observed after registration, so a
+    /// freshly entered character reports 0: the client's own automated
+    /// traffic (the 230 on its 30 s timer, the heartbeat) is guaranteed to
+    /// arrive within 30 s of world entry, which bounds how far the start can
+    /// lag the entry itself.
+    ///
+    /// Read and conditional write happen under one lock acquisition — this
+    /// sits on the per-frame path of every connection. The returned reading is
+    /// what the AI gate consumes (`gz_sim::ai::force_aggro`).
+    pub fn note_activity(&self, key: SessionKey, cmd: u16, now_ms: u64) -> Option<u64> {
+        let mut sessions = self.lock();
+        let session = sessions.get_mut(&key)?;
+        let idle_ms = session
+            .last_activity_ms
+            .map_or(0, |last| now_ms.saturating_sub(last));
+        if session.last_activity_ms.is_none() || counts_as_activity(cmd) {
+            session.last_activity_ms = Some(now_ms);
+        }
+        Some(idle_ms)
     }
 
     /// Stores (or, with `None`, clears) a character's head chat, the pair the
@@ -836,6 +872,44 @@ fn is_near(origin: &SessionInfo, other: &SessionInfo) -> bool {
         cell_of(origin.x, origin.y, origin.map_id),
         cell_of(other.x, other.y, other.map_id),
     )
+}
+
+/// Whether an inbound frame counts as the player *doing* something — i.e.
+/// resets the AFK clock ([`Registry::note_activity`]).
+///
+/// The default is **yes**: a frame resets the clock unless it is listed
+/// below. Anything unlisted — including opcodes this binary does not handle
+/// yet — is treated as player input, so a real action never fails to reset.
+/// What is listed is either traffic the client sends entirely on its own
+/// (it proves nothing about the human) or a posture the AFK rule deliberately
+/// does not excuse (sitting and vending are the states that must keep
+/// accumulating).
+///
+/// | opcode | why it is not the player |
+/// |---|---|
+/// | `100` heartbeat | automated keepalive; the legacy handler is an empty no-op (`Server-System.cpp:520-524`) |
+/// | `230` changestatusinfo | rides the client's process-global 30 s timer (the 230 arm in `main.rs`) |
+/// | `121` headchat, `275` addinfo, `6229` electionstump, `7000` personalshopbanner, `8345` newitemrepairrequestinfo | the client fires these **because another character appeared on screen** with the matching flag (`CommonLogic-SetChar.cpp:196-251`) — a passer-by's `SetChar`, not the sender's input |
+/// | `7231` sitdown | the sitting posture itself (sit and stand are one toggle) |
+/// | `7006`/`7008` start/stop personalshop | entering and leaving the vending posture; running a shop is AFK time |
+///
+/// shortcut: any *other* client-auto frame resets the clock until it is added
+/// here — the per-frame `recv opcode` log line in `main.rs` is how such a
+/// frame shows up in triage.
+fn counts_as_activity(cmd: u16) -> bool {
+    const NOT_PLAYER: &[u16] = &[
+        GameMsg::RequestHeartbeat as u16,
+        GameMsg::RequestChangestatusinfo as u16,
+        GameMsg::RequestHeadchat as u16,
+        GameMsg::RequestAddinfo as u16,
+        GameMsg::RequestElectionstump as u16,
+        GameMsg::RequestPersonalshopbanner as u16,
+        GameMsg::RequestNewitemrepairrequestinfo as u16,
+        GameMsg::RequestSitdown as u16,
+        GameMsg::RequestStartpersonalshop as u16,
+        GameMsg::RequestStoppersonalshop as u16,
+    ];
+    !NOT_PLAYER.contains(&cmd)
 }
 
 #[cfg(test)]
@@ -1575,5 +1649,168 @@ mod tests {
 
         registry.remove(key);
         assert_eq!(lookup(1471), None, "the block goes with the session");
+    }
+
+    /// The exempt table is the whole input side of the AFK rule: automated
+    /// keepalives, the `SetChar`-driven fetches and the two postures never
+    /// reset the clock; everything else — movement, chat, a real shop
+    /// transaction, even opcodes this binary does not handle yet — does, so
+    /// an unlisted *player* action can never fail to count.
+    #[test]
+    fn only_frames_that_prove_a_player_reset_the_idle_clock() {
+        for cmd in [
+            GameMsg::RequestHeartbeat as u16,
+            GameMsg::RequestChangestatusinfo as u16,
+            GameMsg::RequestHeadchat as u16,
+            GameMsg::RequestAddinfo as u16,
+            GameMsg::RequestElectionstump as u16,
+            GameMsg::RequestPersonalshopbanner as u16,
+            GameMsg::RequestNewitemrepairrequestinfo as u16,
+            GameMsg::RequestSitdown as u16,
+            GameMsg::RequestStartpersonalshop as u16,
+            GameMsg::RequestStoppersonalshop as u16,
+        ] {
+            assert!(!counts_as_activity(cmd), "opcode {cmd} must not reset");
+        }
+        for cmd in [
+            GameMsg::RequestUserorder as u16,       // movement
+            GameMsg::RequestChat as u16,            // player speech
+            GameMsg::RequestHit as u16,             // combat
+            GameMsg::RequestBuypersonalshop as u16, // a real shop transaction
+            4242,                                   // unknown: resets (safe for the player)
+        ] {
+            assert!(counts_as_activity(cmd), "opcode {cmd} must reset");
+        }
+    }
+
+    /// The clock itself: activity advances it, exempt frames read it without
+    /// touching it, and a connection with no session has no clock.
+    #[test]
+    fn the_idle_clock_advances_only_for_activity() {
+        let registry = Registry::new();
+        let (key, _rx) = join(&registry, info(11, "Idler", 0, 0));
+
+        // The first frame after registration seeds the clock — activity or
+        // not — and has read 0 idle so far.
+        assert_eq!(
+            registry.note_activity(key, GameMsg::RequestHeartbeat as u16, 1_000),
+            Some(0)
+        );
+        // A movement 4 s later: readings are taken *before* the frame lands,
+        // so this is the idle the movement is about to clear.
+        assert_eq!(
+            registry.note_activity(key, GameMsg::RequestUserorder as u16, 5_000),
+            Some(4_000)
+        );
+        // Keepalives read the running clock without advancing it...
+        assert_eq!(
+            registry.note_activity(key, GameMsg::RequestHeartbeat as u16, 9_000),
+            Some(4_000)
+        );
+        assert_eq!(
+            registry.note_activity(key, GameMsg::RequestChangestatusinfo as u16, 12_000),
+            Some(7_000)
+        );
+        // ...and neither does sitting.
+        assert_eq!(
+            registry.note_activity(key, GameMsg::RequestSitdown as u16, 20_000),
+            Some(15_000)
+        );
+        // The next real action lands on a clock that ran straight through,
+        // and only then moves it.
+        assert_eq!(
+            registry.note_activity(key, GameMsg::RequestChat as u16, 21_000),
+            Some(16_000)
+        );
+        assert_eq!(
+            registry.note_activity(key, GameMsg::RequestHeartbeat as u16, 21_500),
+            Some(500),
+            "the chat activity reset the clock"
+        );
+        // A connection that never selected a character has no clock.
+        assert_eq!(
+            registry.note_activity(
+                Registry::next_key(),
+                GameMsg::RequestUserorder as u16,
+                30_000
+            ),
+            None
+        );
+    }
+
+    /// Required behaviour 2: a player idle *less* 30 minutes is not
+    /// force-aggroed — a passive monster in detection range keeps ignoring
+    /// them.
+    #[test]
+    fn a_player_idle_under_thirty_minutes_is_not_force_aggroed() {
+        let registry = Registry::new();
+        let (key, _rx) = join(&registry, info(11, "Sitter", 0, 0));
+        // World entry, then nothing but sitting and the client's automated
+        // frames: none of them may reset the clock.
+        registry.note_activity(key, GameMsg::RequestSitdown as u16, 0);
+        registry.note_activity(key, GameMsg::RequestHeartbeat as u16, 600_000);
+        registry.note_activity(key, GameMsg::RequestChangestatusinfo as u16, 1_200_000);
+        let idle_ms = registry
+            .note_activity(key, GameMsg::RequestHeartbeat as u16, 1_799_000)
+            .unwrap();
+        assert_eq!(idle_ms, 1_799_000, "nothing reset the clock");
+
+        let idle_secs = idle_ms / 1000;
+        assert!(!gz_sim::ai::force_aggro(idle_secs));
+        assert!(!gz_sim::ai::acquires_target(false, true, idle_secs));
+    }
+
+    /// Required behaviour 3: thirty minutes of *any* posture — standing
+    /// (automated traffic only), sitting, or vending — runs the clock to the
+    /// threshold, and a *passive* monster in detection range then acquires
+    /// the player immediately.
+    #[test]
+    fn thirty_minutes_of_any_posture_feeds_the_force_aggro_gate() {
+        // Each posture's frames, exactly as an idle connection emits them.
+        let postures: &[(&str, &[u16])] = &[
+            (
+                "standing",
+                &[
+                    GameMsg::RequestHeartbeat as u16,
+                    GameMsg::RequestChangestatusinfo as u16,
+                ],
+            ),
+            (
+                "sitting",
+                &[
+                    GameMsg::RequestSitdown as u16,
+                    GameMsg::RequestHeartbeat as u16,
+                ],
+            ),
+            (
+                "vending",
+                &[
+                    GameMsg::RequestStartpersonalshop as u16,
+                    // a shop owner walked into view: the client auto-fetches
+                    // their banner (`CommonLogic-SetChar.cpp:203-209`)
+                    GameMsg::RequestPersonalshopbanner as u16,
+                    GameMsg::RequestHeartbeat as u16,
+                ],
+            ),
+        ];
+        for (posture, frames) in postures {
+            let registry = Registry::new();
+            let (key, _rx) = join(&registry, info(11, "Afk", 0, 0));
+            // World entry starts the clock...
+            registry.note_activity(key, frames[0], 0);
+            // ...thirty minutes pass with only this posture's traffic...
+            for frame in *frames {
+                registry.note_activity(key, *frame, 1_800_000);
+            }
+            let idle_ms = registry
+                .note_activity(key, GameMsg::RequestHeartbeat as u16, 1_800_000)
+                .unwrap();
+            assert_eq!(idle_ms, 1_800_000, "{posture}: the clock ran a full 30 min");
+            // ...and the nearby passive monster comes for them anyway.
+            assert!(
+                gz_sim::ai::acquires_target(false, true, idle_ms / 1000),
+                "{posture}: force aggro opens at the threshold"
+            );
+        }
     }
 }

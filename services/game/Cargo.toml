@@ -11,6 +11,9 @@ gz-db = { path = "../../crates/gz-db" }
 gz-lzf = { path = "../../crates/gz-lzf" }
 gz-net = { path = "../../crates/gz-net" }
 gz-proto = { path = "../../crates/gz-proto" }
+# The monster-AI policy (`gz_sim::ai`): the AFK force-aggro gate the session
+# idle clock in `registry.rs` feeds.
+gz-sim = { path = "../../crates/gz-sim" }
 tokio = { version = "1", features = ["full"] }
 # `SlotOccupancy` (the one item question a quest condition asks) and the
 # repository seams the quest handlers take are `async_trait` objects, like the
