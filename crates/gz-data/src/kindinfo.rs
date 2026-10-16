@@ -31,8 +31,10 @@
 //! carries, the EN values in the seven columns only EN has (`SortNUM`, `Luk`,
 //! `AttackE`, `AttackR`, `DefenE`, `DefenR`, `Wis`) and the English display names,
 //! merged by `scripts/generate-kr-canonical-tables.ps1`
-//! (`docs/DESIGN_MONSTER_KR_BASELINE_STRATEGY.md`). The shipped EN file below has
-//! the same schema, so one parser reads both.
+//! (`docs/DESIGN_MONSTER_KR_BASELINE_STRATEGY.md`). The EN rows are followed by the
+//! verified exact-code KR-only kinds (`KIND_BOMBDRAGON`, `KIND_JANGBOGO`) — KR-only
+//! codes that already carry an EN wire id, so the EN client can resolve them. The
+//! shipped EN file below has the same schema, so one parser reads both.
 //!
 //! # File mechanics (a port of `NDataLoader`)
 //!
@@ -605,7 +607,11 @@ mod tests {
         ));
         let bytes = std::fs::read(path).expect("the canonical table is committed");
         let rows = parse_char_attack(&bytes).expect("parses");
-        assert_eq!(rows.len(), 827, "the EN row set, in EN order");
+        assert_eq!(
+            rows.len(),
+            829,
+            "the EN row set plus the 2 Tier-B KR-only rows"
+        );
 
         // KIND_RACCOON (map 108 starter): the KR combat values, with the EN-only
         // columns kept alongside.
@@ -656,6 +662,36 @@ mod tests {
             (berserker.min_dmg, berserker.max_dmg, berserker.ac),
             (258, 460, 630)
         );
+
+        // Tier B: the 2 verified exact-code KR-only kinds (strategy doc 3.4) - a
+        // KR-only code that already carries an EN wire id, so the EN client can
+        // resolve it. Their KR rows are appended; the EN-only columns (SortNUM, Luk,
+        // AttackE/R, DefenE/R, Wis) come through empty.
+        let bombdragon = rows
+            .iter()
+            .find(|r| r.code == "KIND_BOMBDRAGON")
+            .expect("BOMBDRAGON row");
+        assert_eq!(bombdragon.attack_type, "ATTACKTYPE_SELFBOMB");
+        assert_eq!(
+            (bombdragon.min_dmg, bombdragon.max_dmg, bombdragon.ac),
+            (90, 100, 80)
+        );
+        assert_eq!(
+            (
+                bombdragon.str,
+                bombdragon.dex,
+                bombdragon.vit,
+                bombdragon.exp
+            ),
+            (100, 120, 150, 104)
+        );
+        let jangbogo = rows
+            .iter()
+            .find(|r| r.code == "KIND_JANGBOGO")
+            .expect("JANGBOGO row");
+        assert_eq!(jangbogo.attack_type, "ATTACKTYPE_WATERARROW");
+        assert_eq!((jangbogo.min_dmg, jangbogo.max_dmg), (40, 50));
+        assert_eq!((jangbogo.ac, jangbogo.vit, jangbogo.exp), (50, 80, 1));
     }
 
     /// The committed roster reconciliation and the spawn gate (strategy doc 3.4,

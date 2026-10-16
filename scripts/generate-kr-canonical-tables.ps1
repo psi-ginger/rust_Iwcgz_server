@@ -6,7 +6,10 @@
 #   * `crates/gz-data/data/CharAttackInfoCanonical.txt` - combat stats. EN 27-column
 #     schema; every column the KR baseline carries takes the KR value, the 7 columns
 #     only EN has (SortNUM, Luk, AttackE/R, DefenE/R, Wis) keep the EN value, and the
-#     `Name` column keeps the English display name.
+#     `Name` column keeps the English display name. The EN rows are followed by the
+#     verified exact-code KR-only kinds - KR-only codes that already carry an EN wire
+#     id, so the EN client can resolve them (`KIND_BOMBDRAGON`, `KIND_JANGBOGO`,
+#     strategy doc 3.4).
 #   * `crates/gz-data/data/CharItemInfoCanonical.txt` - capture + drops. EN 6-column
 #     schema, same merge rule; the `ItemInfo` drop string comes from KR verbatim.
 #   * `crates/gz-data/data/KindReconciliation.txt` - roster audit. Every kind in either
@@ -167,6 +170,7 @@ function Merge-Table($Kr, $En) {
         Dups      = @($dups | Sort-Object -Unique)
         CaseOnly  = $caseOnly
         KrOnly    = $krOnly
+        KrByCode  = $krByCode
     }
 }
 
@@ -236,6 +240,28 @@ foreach ($line in ([Text.Encoding]::Unicode.GetString([IO.File]::ReadAllBytes((J
     $c = $line -split "`t"
     if ($c.Count -ge 2 -and $c[1].Trim().StartsWith("KIND_")) { $unique[$c[1].Trim()] = [int]$c[0].Trim() }
 }
+$missingIds = $null # computed after the Tier-B append below
+
+# --- Tier B: verified exact-code KR-only kinds (strategy doc 3.4) ------------
+# A KR-only code that already carries an EN wire id is the same kind under the same
+# code - the EN client resolves the id - so its KR row joins the canonical master
+# instead of being quarantined. Appended after the EN rows, ordinal order. These are
+# the whole of Tier B today; they are dormant (no group spawns them), and the KR item
+# table has no row, so the drop table is untouched.
+$tierB = @()
+$krMap = ColMap $krAttack.Header
+$enMap = ColMap $attack.Header
+foreach ($code in (@($attack.KrOnly) | Sort-Object)) {
+    if (-not $unique.ContainsKey($code)) { continue }
+    $krRow = $attack.KrByCode[$code]
+    $cells = @("") * $attack.Header.Count
+    foreach ($c in $krMap.Keys) {
+        if ($enMap.ContainsKey($c) -and $krMap[$c] -lt $krRow.Count) { $cells[$enMap[$c]] = $krRow[$krMap[$c]].Trim() }
+    }
+    $cells[$enMap["Char"]] = $code
+    $attack.Rows += , $cells
+    $tierB += $code
+}
 $missingIds = @(($attack.Rows | ForEach-Object { $_[0].Trim() }) | Where-Object { -not $unique.ContainsKey($_) } | Sort-Object)
 
 # --- roster reconciliation (strategy doc 3.4 / 4) ----------------------------
@@ -281,7 +307,8 @@ Write-ReconTable (Join-Path $OutDir "KindReconciliation.txt") $recon
 
 # --- report -----------------------------------------------------------------
 Write-Host ""
-Write-Host "attack: $($attack.Rows.Count) rows - $($attack.Upgraded) KR-upgraded, $($attack.Provisional) EN-provisional; $($attack.KrOnly.Count) KR-only quarantined"
+Write-Host "attack: $($attack.Rows.Count) rows - $($attack.Upgraded) KR-upgraded, $($attack.Provisional) EN-provisional, $($tierB.Count) Tier-B exact-code KR-only appended; $($attack.KrOnly.Count - $tierB.Count) KR-only quarantined"
+if ($tierB.Count) { Write-Host "  Tier B appended: $($tierB -join ', ')" }
 if ($attack.Dups.Count) { Write-Host "  KR duplicate codes (last wins): $($attack.Dups -join ', ')" }
 if ($attack.CaseOnly.Count) { Write-Host "  case-only pairs: $($attack.CaseOnly -join '; ')" }
 Write-Host "drops : $($item.Rows.Count) rows - $($item.Upgraded) KR-upgraded, $($item.Provisional) EN-provisional; $($item.KrOnly.Count) KR-only quarantined"
