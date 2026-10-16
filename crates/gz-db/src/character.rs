@@ -299,6 +299,15 @@ pub trait CharacterRepository: Send + Sync {
         character_id: i32,
         stats: &StatsUpdate,
     ) -> Result<(), RepositoryError>;
+
+    /// Adds `delta` experience and returns the new total (`GetExp`'s
+    /// `pclCM->CR[myid]->ExpOperate(exp)`, `Server-Attack.cpp:4147`). A negative
+    /// `delta` is a spend (`:4105`), so the sign carries through.
+    ///
+    /// # Errors
+    ///
+    /// [`RepositoryError::Database`] if the update fails.
+    async fn add_exp(&self, character_id: i32, delta: i64) -> Result<i64, RepositoryError>;
 }
 
 /// PostgreSQL implementation. Cheap to clone (shares the pool).
@@ -654,6 +663,19 @@ impl CharacterRepository for PgCharacterRepository {
         .execute(&self.pool)
         .await?;
         Ok(())
+    }
+
+    async fn add_exp(&self, character_id: i32, delta: i64) -> Result<i64, RepositoryError> {
+        // A single statement, so concurrent grants cannot lose one another the
+        // way a read-then-write would.
+        let row: (i64,) = sqlx::query_as(
+            "UPDATE character_stats SET exp = exp + $2 WHERE character_id = $1 RETURNING exp",
+        )
+        .bind(character_id)
+        .bind(delta)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(row.0)
     }
 }
 

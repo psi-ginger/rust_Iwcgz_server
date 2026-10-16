@@ -214,6 +214,78 @@ pub fn parse_char_drops(bytes: &[u8]) -> Result<Vec<CharDropRow>, KindDataError>
     Ok(out)
 }
 
+/// The committed KR-baseline drop master, parsed once
+/// (`data\CharItemInfoCanonical.txt`, the table [`crate::drops::parse_char_drops`]
+/// reads at `docs\DESIGN_MONSTER_KR_BASELINE_STRATEGY.md`).
+///
+/// The kind code is the join key with the attack table, so a caller resolves a
+/// monster's kind code against this and rolls [`roll_drop`] on the row's
+/// entries.
+#[must_use]
+pub fn canonical_char_drops() -> &'static [CharDropRow] {
+    static ROWS: std::sync::OnceLock<Vec<CharDropRow>> = std::sync::OnceLock::new();
+    ROWS.get_or_init(|| {
+        parse_char_drops(include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/data/CharItemInfoCanonical.txt"
+        )))
+        .expect("the committed canonical drop table parses")
+    })
+}
+
+/// One kill's drop roll — `cltKindItemProbabilitySet::GetRandDropItem`
+/// (`kindinfo-Manager.cpp:68-107`).
+///
+/// At most **one** entry comes back per call, and the legacy makes exactly one
+/// call per kill, so a kind drops at most one item type per death. `roll` and
+/// `count_roll` are the two `rand()` draws the legacy takes, supplied by the
+/// caller so this stays pure; both must be non-negative.
+///
+/// `add_rate` is the percent bonus the legacy adds to each entry's probability
+/// (`:77-78`); the port has no bonus tables, so callers pass 0.
+///
+/// Returns `(item_unique, count)`, or `None` when the roll lands past every
+/// entry — the "nothing dropped" case, which is the common one.
+#[must_use]
+pub fn roll_drop(
+    entries: &[DropEntry],
+    add_rate: i32,
+    roll: i32,
+    count_roll: i32,
+) -> Option<(i32, i32)> {
+    // Each entry's weight, `p + p*AddRate/100` in C integer arithmetic.
+    let weight = |e: &DropEntry| e.probability + e.probability * add_rate / 100;
+
+    let total: i32 = entries
+        .iter()
+        .filter(|e| e.item_unique > 0)
+        .map(weight)
+        .sum();
+
+    // `if(sum >= 10000){ rand() % sum } else { rand() % 10000 }` (`:84-85`). The
+    // second arm is what makes a kind with a small total probability actually
+    // drop: the roll spans 10000 regardless, so a 2500 entry is 1-in-4.
+    let randdata = if total >= 10000 {
+        roll % total
+    } else {
+        roll % 10_000
+    };
+
+    let mut sum = 0;
+    for entry in entries.iter().filter(|e| e.item_unique > 0) {
+        sum += weight(entry);
+        if randdata < sum {
+            // `min + rand() % (max - min + 1)` (`:98-99`). The parser already
+            // normalises an out-of-order or missing pair, but `roll_drop` is
+            // public, so a malformed span cannot panic the caller.
+            let span = (entry.max_num - entry.min_num + 1).max(1);
+            let count = entry.min_num + count_roll % span;
+            return Some((entry.item_unique, count.max(1)));
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -389,5 +461,81 @@ mod tests {
             (60, 300, 55)
         );
         assert_eq!(hor16.drops.first(), Some(&entry(5045, 2000, 3, 1)));
+    }
+
+    /// The roll spans 10000 while the total is below 10000, so a probability is
+    /// exactly its chance in ten thousand — the whole reason a 2500 entry is
+    /// 1-in-4 and not 1-in-1.
+    #[test]
+    fn a_roll_below_a_kind_s_total_lands_on_its_entry() {
+        let drops = vec![entry(2002, 2500, 3, 1), entry(3070, 2500, 3, 1)];
+        // randdata = 0 and 2499 are both inside the first entry's weight;
+        // 2500 and 4999 are inside the second.
+        assert_eq!(roll_drop(&drops, 0, 0, 0), Some((2002, 1)));
+        assert_eq!(roll_drop(&drops, 0, 2499, 2), Some((2002, 3)));
+        assert_eq!(roll_drop(&drops, 0, 2500, 0), Some((3070, 1)));
+        assert_eq!(roll_drop(&drops, 0, 4999, 0), Some((3070, 1)));
+        // Past both: nothing drops.
+        assert_eq!(roll_drop(&drops, 0, 5000, 0), None);
+        assert_eq!(roll_drop(&drops, 0, 9999, 0), None);
+    }
+
+    /// Above 10000 the roll spans the total instead, so a kind cannot drop more
+    /// than it is weighted to (`:84-85`).
+    #[test]
+    fn a_total_at_or_above_ten_thousand_spans_the_total() {
+        let drops = vec![entry(2002, 6000, 1, 1), entry(3070, 4000, 1, 1)];
+        assert_eq!(roll_drop(&drops, 0, 5999, 0), Some((2002, 1)));
+        assert_eq!(roll_drop(&drops, 0, 6000, 0), Some((3070, 1)));
+        assert_eq!(roll_drop(&drops, 0, 9999, 0), Some((3070, 1)));
+    }
+
+    #[test]
+    fn the_count_rolls_within_the_entry_s_span_and_never_below_one() {
+        let drops = vec![entry(2002, 9999, 4, 2)];
+        assert_eq!(roll_drop(&drops, 0, 0, 0), Some((2002, 2)));
+        assert_eq!(roll_drop(&drops, 0, 0, 1), Some((2002, 3)));
+        assert_eq!(roll_drop(&drops, 0, 0, 2), Some((2002, 4)));
+        // 3 % 3 == 0 would give the minimum again.
+        assert_eq!(roll_drop(&drops, 0, 0, 3), Some((2002, 2)));
+
+        // A malformed span of 0 would divide by zero in the legacy; here it
+        // cannot panic the caller.
+        let malformed = vec![entry(2002, 9999, 1, 5)];
+        assert_eq!(roll_drop(&malformed, 0, 0, 0), Some((2002, 5)));
+    }
+
+    #[test]
+    fn add_rate_lifts_every_weight_by_the_same_percent() {
+        let drops = vec![entry(2002, 2000, 1, 1)];
+        // 2000 + 2000*50/100 = 3000.
+        assert_eq!(roll_drop(&drops, 50, 2999, 0), Some((2002, 1)));
+        assert_eq!(roll_drop(&drops, 50, 3000, 0), None);
+        // With no bonus the same roll already missed.
+        assert_eq!(roll_drop(&drops, 0, 2999, 0), None);
+    }
+
+    #[test]
+    fn an_empty_table_and_a_zero_unique_never_drop() {
+        assert_eq!(roll_drop(&[], 0, 0, 0), None);
+        let no_unique = vec![entry(0, 9999, 1, 1), entry(-5, 9999, 1, 1)];
+        assert_eq!(roll_drop(&no_unique, 0, 0, 0), None);
+    }
+
+    #[test]
+    fn a_real_kind_s_five_entry_table_rolls_across_the_right_slices() {
+        // KIND_RACCOON's KR table: 2002(2500-1:3), 3070(2500-1:3),
+        // 2020(1000-1:2), 6010(700-1:2), 5000(700-1:2). Total 7400, so the roll
+        // spans 10000 and the last 2600 draws drop nothing.
+        let row = canonical_char_drops()
+            .iter()
+            .find(|r| r.code == "KIND_RACCOON")
+            .expect("RACCOON row");
+        assert_eq!(roll_drop(&row.drops, 0, 0, 0), Some((2002, 1)));
+        assert_eq!(roll_drop(&row.drops, 0, 2500, 0), Some((3070, 1)));
+        assert_eq!(roll_drop(&row.drops, 0, 5000, 0), Some((2020, 1)));
+        assert_eq!(roll_drop(&row.drops, 0, 6000, 0), Some((6010, 1)));
+        assert_eq!(roll_drop(&row.drops, 0, 6700, 0), Some((5000, 1)));
+        assert_eq!(roll_drop(&row.drops, 0, 7400, 0), None);
     }
 }

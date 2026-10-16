@@ -33,12 +33,14 @@
 
 use std::borrow::Cow;
 use std::sync::Arc;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::sync::Mutex;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use gz_cipher::Cipher;
 use gz_db::{
-    FriendRepository, PgAccountRepository, PgCharacterRepository, PgFriendRepository,
-    PgItemRepository, PgQuestRepository, QuestRepository,
+    CharacterRepository, FriendRepository, ItemRepository, PgAccountRepository,
+    PgCharacterRepository, PgFriendRepository, PgItemRepository, PgQuestRepository,
+    QuestRepository,
 };
 use gz_net::session::{Rejection, Session};
 use gz_net::{COMPRESSION_FLAG, Frame, FrameParser, HEADER_SIZE, MAX_FRAME_SIZE, Tick};
@@ -46,9 +48,12 @@ use gz_proto::chat::{
     decode_chat_request, decode_head_chat_request, decode_makesecret_chat_channel_request,
     decode_secret_chat_request,
 };
+use gz_proto::combat::{
+    GetExpResponse, HIT_TARGET_MONSTER, HIT_TARGET_PLAYER, HitResponse, RequestHit,
+};
 use gz_proto::game::{
-    CharUnique, GameLogin, decode_select_char, decode_village_struct_request, encode_person_ip,
-    encode_person_private_info, encode_response_name,
+    CharUnique, GameLogin, decode_select_char, decode_village_struct_request, encode_logout,
+    encode_person_ip, encode_person_private_info, encode_response_name,
 };
 use gz_proto::map_geometry::cell_of;
 use gz_proto::opcodes_game::GameMsg;
@@ -59,8 +64,13 @@ use tokio::sync::Notify;
 
 type AnyError = Box<dyn std::error::Error + Send + Sync>;
 
+/// `CheckLastMsgClock(200)` — the legacy's per-character gate on the whole
+/// `DoMsg_GAMEMSG_REQUEST_HIT` handler (`Server-Person.cpp:2760`).
+const HIT_THROTTLE_MS: u64 = 200;
+
 mod auth;
 mod chat;
+mod combat;
 mod config;
 mod friends;
 mod items;
@@ -72,6 +82,7 @@ mod stats;
 mod world;
 mod world_entry;
 
+use combat::{PlayerAttacks, Rng};
 use config::GameConfig;
 use registry::{MAX_CHAR_NUMBER, Outbound, Registered, Registry, SessionInfo};
 
@@ -254,6 +265,9 @@ async fn serve(cfg: &GameConfig) -> Result<(), AnyError> {
     // The map-0 field monsters. A failed load (a missing or unreadable data
     // tree) leaves the world empty rather than refusing to start, the same
     // posture the quest load takes.
+    // A mutex, because Phase 2 mutates them: HP, position, death and respawn all
+    // change on every tick. Critical sections are synchronous and no guard is
+    // ever held across an await.
     let monsters = match monsters::MonsterWorld::load(&cfg.data_root) {
         Ok(mut world) => {
             world.spawn_all(&registry);
@@ -263,13 +277,66 @@ async fn serve(cfg: &GameConfig) -> Result<(), AnyError> {
                 monsters::FIELD_MAP,
                 cfg.data_root.display()
             );
-            Arc::new(world)
+            Arc::new(Mutex::new(world))
         }
         Err(e) => {
             logln_err!("game: {e}; no field monsters spawned");
-            Arc::new(monsters::MonsterWorld::empty())
+            Arc::new(Mutex::new(monsters::MonsterWorld::empty()))
         }
     };
+    // A player's own attack numbers, joined once at boot (see
+    // [`PlayerAttacks`]). The same degradation: no data tree, no combat, and a
+    // server that still starts.
+    let player_attacks = Arc::new(match PlayerAttacks::load(&cfg.data_root) {
+        Ok(attacks) => attacks,
+        Err(e) => {
+            logln_err!("game: {e}; players attack with the level term only");
+            PlayerAttacks::default()
+        }
+    });
+    // The field-monster AI. One pass every `AI_TICK_MS`, entirely under the
+    // world lock and never across an await.
+    {
+        let registry = registry.clone();
+        let monsters = monsters.clone();
+        tokio::spawn(async move {
+            let mut rng = Rng::new(now_tick());
+            loop {
+                tokio::time::sleep(Duration::from_millis(monsters::AI_TICK_MS)).await;
+                let now = now_tick();
+                let hits = {
+                    let mut world = monsters
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    world.tick(&registry, now, &mut rng)
+                };
+                for hit in hits {
+                    // The 268 answers the *target*, so everyone near the struck
+                    // player sees the same frame (`Server-Attack.cpp:2775`).
+                    registry.broadcast_near_point(
+                        monsters::FIELD_MAP,
+                        hit.x,
+                        hit.y,
+                        GameMsg::ResponseHit as u16,
+                        HitResponse {
+                            char_unique: hit.char_unique,
+                            damage: hit.damage,
+                            double_damage: 0,
+                            life: hit.life as i32,
+                            mode: 0,
+                            special_attack_switch: 0,
+                            b_indure: false,
+                            b_miss_hit: false,
+                            b_dodge_hit: false,
+                            ui_type: HIT_TARGET_PLAYER,
+                        }
+                        .encode()
+                        .to_vec(),
+                    );
+                }
+            }
+        });
+    }
     let listener = TcpListener::bind(&cfg.listen).await?;
     logln!("game: listening on {}", cfg.listen);
     logln!(
@@ -292,12 +359,22 @@ async fn serve(cfg: &GameConfig) -> Result<(), AnyError> {
         let quests = quests.clone();
         let registry = registry.clone();
         let monsters = monsters.clone();
+        let player_attacks = player_attacks.clone();
         let peer = peer.to_string();
         let cfg = cfg.clone();
         tokio::spawn(async move {
             if let Err(e) = handle_client(
-                stream, &peer, &cfg, accounts, characters, items, friends, quests, registry,
+                stream,
+                &peer,
+                &cfg,
+                accounts,
+                characters,
+                items,
+                friends,
+                quests,
+                registry,
                 monsters,
+                player_attacks,
             )
             .await
             {
@@ -361,7 +438,8 @@ async fn handle_client(
     friends: PgFriendRepository,
     quests: PgQuestRepository,
     registry: Arc<Registry>,
-    monsters: Arc<monsters::MonsterWorld>,
+    monsters: Arc<Mutex<monsters::MonsterWorld>>,
+    player_attacks: Arc<PlayerAttacks>,
 ) -> Result<(), AnyError> {
     let mut session_state = Session::new(cfg.timeouts);
     if !session_state.accept(now_tick()) {
@@ -425,6 +503,12 @@ async fn handle_client(
     // (EOF, framing rejection, cipher desync, handshake timeout) cleans up after
     // a character that *did* register, while a drop before `REQUEST_SELECTCHAR`
     // is the no-op it should be. See `Registered`.
+    // The combat throttle and this connection's own roll stream. The legacy's
+    // clock is per-character (`CheckLastMsgClock`, `Server-Person.cpp:2760`);
+    // per-connection is the same thing here, because one connection is one
+    // character.
+    let mut last_attack_ms: u64 = 0;
+    let mut combat_rng = Rng::new(now_tick() ^ u64::from(char_unique as u32));
     let session_key = Registry::next_key();
     let _registered = Registered::new(registry.clone(), session_key);
     // Woken by [`Registry::claim_login`] when a duplicate login for this account
@@ -457,10 +541,16 @@ async fn handle_client(
             match last_seen {
                 Some((map_id, was)) if map_id == info.map_id => {
                     if was != cell {
-                        monsters.announce_new_cells(&registry, session_key, info.map_id, was, cell);
+                        monsters
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .announce_new_cells(&registry, session_key, info.map_id, was, cell);
                     }
                 }
-                _ => monsters.announce_near(&registry, session_key, info.map_id, info.x, info.y),
+                _ => monsters
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .announce_near(&registry, session_key, info.map_id, info.x, info.y),
             }
             last_seen = Some((info.map_id, cell));
         }
@@ -839,7 +929,10 @@ async fn handle_client(
                     // map outside the towns. The loop republishes the rest as
                     // the player walks; this is the entry cell's first announce.
                     if let Some(info) = registry.info(session_key) {
-                        monsters.announce_near(&registry, session_key, info.map_id, info.x, info.y);
+                        monsters
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .announce_near(&registry, session_key, info.map_id, info.x, info.y);
                         last_seen = Some((info.map_id, cell_of(info.x, info.y, info.map_id)));
                     }
                     // The whole of world entry, generated from PostgreSQL: the
@@ -1093,6 +1186,175 @@ async fn handle_client(
                                 mv.deadline = None;
                             }
                             movement = None;
+                        }
+                    }
+                }
+                c if c == GameMsg::RequestHit as u16 => {
+                    // 267: the swing. The legacy throttles the whole handler on
+                    // the attacker's own 200 ms clock
+                    // (`CheckLastMsgClock(200)`, `Server-Person.cpp:2760`) —
+                    // the anti-macro half of the combat path, and worth keeping:
+                    // without it a fast client out-damages its own interval.
+                    if now_tick().saturating_sub(last_attack_ms) < HIT_THROTTLE_MS {
+                        continue;
+                    }
+                    last_attack_ms = now_tick();
+
+                    let Some(character) = live.character.as_ref() else {
+                        continue; // no character in a world: nothing can swing
+                    };
+                    let request = RequestHit::decode(payload.as_ref())?;
+                    // The target is named by its `CR` id, which for a field
+                    // monster *is* its char unique (`NPC.cpp:972`). Anything
+                    // outside that block is a player, and PVP is out of scope.
+                    let Ok(target_unique) = u16::try_from(request.cl_attack_target.si_attack_id)
+                    else {
+                        continue;
+                    };
+                    // Re-seat on the authoritative cell if a step is running, so
+                    // the range check uses where the attacker *is*, not where it
+                    // started (the same re-seat the 240 arm does).
+                    let (ax, ay) = match movement.as_ref() {
+                        Some(mv) => mv.pos,
+                        None => (character.pos_x, character.pos_y),
+                    };
+                    let claimed = &request.cl_attack_target.cl_pos;
+                    // `IsInRange` compares the attacker to the tile the client
+                    // claims, not to the server's copy — the client is the one
+                    // with the target under its cursor.
+                    let range =
+                        player_attacks.range(u16::try_from(character.class_kind).unwrap_or(1));
+                    if (i32::from(claimed.si_x) - ax).abs() > range
+                        || (i32::from(claimed.si_y) - ay).abs() > range
+                    {
+                        continue;
+                    }
+                    // A dead character cannot swing (the legacy's `IsAlive`
+                    // guard, `Server-Person.cpp:2758`).
+                    if registry.info(session_key).is_none_or(|s| s.life == 0) {
+                        continue;
+                    }
+                    let class_kind = u16::try_from(character.class_kind).unwrap_or(1);
+                    let (min, max) = player_attacks.raw_power(
+                        class_kind,
+                        character.str,
+                        i32::from(character.level),
+                    );
+                    let raw = combat::roll_power(min, max, combat_rng.up_to((max - min).max(0)));
+                    let crit = combat::apply_critical(
+                        raw,
+                        player_attacks.critical_rate(class_kind),
+                        combat_rng.up_to(99),
+                    );
+
+                    let hit = {
+                        let mut world = monsters
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        world.hit_by_player(target_unique, crit, now_tick(), &mut combat_rng)
+                    };
+                    // A target the world does not hold — a player, a static NPC,
+                    // or a monster that just died. The legacy's null `CR[id]`
+                    // guard drops the hit the same way (`:586`).
+                    let Some(hit) = hit else { continue };
+
+                    // The 268 answers the *target*, so everyone near the monster
+                    // sees the same frame (`Server-Attack.cpp:2775`).
+                    registry.broadcast_near_point(
+                        monsters::FIELD_MAP,
+                        hit.x,
+                        hit.y,
+                        GameMsg::ResponseHit as u16,
+                        HitResponse {
+                            char_unique: hit.unique as i16,
+                            damage: hit.damage,
+                            double_damage: 0,
+                            life: hit.life as i32,
+                            mode: 0,
+                            special_attack_switch: 0,
+                            b_indure: false,
+                            b_miss_hit: false,
+                            b_dodge_hit: false,
+                            ui_type: HIT_TARGET_MONSTER,
+                        }
+                        .encode()
+                        .to_vec(),
+                    );
+
+                    if !hit.died {
+                        continue;
+                    }
+                    // Death: no dedicated opcode. `Life = 0` in the 268 is the
+                    // first half, `ORDER_DIE` in a 241 is the animation, and the
+                    // 11 removes the avatar — the legacy's `DeleteChar` sequence
+                    // (`CharManager.cpp:257-277`, `char.cpp:9444`).
+                    registry.broadcast_near_point(
+                        monsters::FIELD_MAP,
+                        hit.x,
+                        hit.y,
+                        GameMsg::ResponseUserorder as u16,
+                        OrderData::die_order(i32::from(hit.unique))
+                            .encode()
+                            .to_vec(),
+                    );
+                    registry.broadcast_near_point(
+                        monsters::FIELD_MAP,
+                        hit.x,
+                        hit.y,
+                        GameMsg::ResponseLogout as u16,
+                        encode_logout(i32::from(hit.unique)),
+                    );
+
+                    let Some(character_id) = login.as_ref().and_then(|s| s.character_id) else {
+                        continue;
+                    };
+                    // `GetExp`'s share, per hit and not per kill
+                    // (`Server-Attack.cpp:4138`).
+                    let gained = combat::exp_for_hit(
+                        hit.exp,
+                        hit.level,
+                        crit,
+                        i32::try_from(hit.max_life).unwrap_or(i32::MAX),
+                    );
+                    if gained > 0 {
+                        characters.add_exp(character_id, gained).await?;
+                        registry.send_to(
+                            session_key,
+                            GameMsg::ResponseGetexp as u16,
+                            GetExpResponse {
+                                si_char_unique: char_unique as i16,
+                                si_reason: 0,
+                                si_exp: gained.min(i32::MAX as i64) as i32,
+                                si_fame_exp: 0,
+                            }
+                            .encode()
+                            .to_vec(),
+                        );
+                    }
+                    // `GetRandDropItem` rolled at most one entry at death
+                    // (`kindinfo-Manager.cpp:68-107`); grant it into the bag.
+                    for (item_unique, count) in hit.drops {
+                        let Ok(item_unique) = u16::try_from(item_unique) else {
+                            continue;
+                        };
+                        match items.grant(character_id, item_unique, count).await {
+                            // shortcut: granted to the database only. The legacy
+                            // answers a grant with a `PERSONITEMINFO` slot
+                            // update (`Server-Item.cpp:1287`); until this port
+                            // can rebuild an `Item` from the stored record the
+                            // client picks the drop up on its next inventory
+                            // refresh instead.
+                            Ok(Some(item)) => logln!(
+                                "game: character {character_id} received item \
+                                 {item_unique} x{} (slot {})",
+                                item.count,
+                                item.slot
+                            ),
+                            Ok(None) => logln_err!(
+                                "game: drop {item_unique} found no free slot for \
+                                 character {character_id}"
+                            ),
+                            Err(e) => logln_err!("game: drop grant failed: {e}"),
                         }
                     }
                 }

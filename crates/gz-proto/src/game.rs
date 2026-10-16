@@ -59,6 +59,17 @@ pub const MAX_VILLAGE_NUMBER: i16 = 100;
 /// player character.
 pub const MAKECHARTYPE_PC: u32 = 1;
 
+/// `clInnerStatus.clEnemyType.siEnemyType` for every player character:
+/// `ENEMYTYPE_ALLNPC | ENEMYTYPE_VILLAGE | ENEMYTYPE_GUILDWAR`
+/// (`CommonHeader.h:1707-1710`), the value the legacy stamps on a person when the
+/// character row loads (`ServerDB-Person.cpp:1802`).
+///
+/// `IsEnemy` needs *both* halves of the pair (`char-attack.cpp:536-550`): the
+/// target's type must carry `ENEMYTYPE_ALLPC` and mine must carry
+/// `ENEMYTYPE_ALLNPC`. Monsters already send the first; sending `0` here left the
+/// second unset, so a monster hovered as a talkable NPC.
+pub const ENEMYTYPE_PC: u16 = 0x0002 | 0x0004 | 0x0010;
+
 /// `MAX_CLTMSG_DATA_SIZE` (`CommonLogic/MsgType.h:2943`) — the `cltMsg` payload
 /// ceiling, and so the largest body one LOGINMANY may carry.
 ///
@@ -1031,6 +1042,7 @@ impl ServerInfo {
 ///
 /// Unset fields are zero. All-zero `clShapeEquip` means "nothing equipped"; the
 /// avatar appearance comes from `uiMakeCharKind` (the character's class kind).
+/// The one always-set body field is `clEnemyType` at `0x38` ([`ENEMYTYPE_PC`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MakeCharInfo {
     /// `uiMakeCharUnique` — must equal the session `char_unique` the client got
@@ -1177,7 +1189,10 @@ impl MakeCharInfo {
         // Legacy sends `clOrder.Make(ORDER_STOP=2, BY_PLAYER=0, ...)`.
         w.u8(2); // 0x14: siOrder = ORDER_STOP
         w.u8(0); // 0x15: siHostMode = BY_PLAYER
-        w.pad(0x50 - 0x16); // 0x16..0x50: clOrder.params/dwPushedTime + tail
+        // 0x16..0x38: clOrder params/dwPushedTime, clIdentity, siStatus.
+        w.pad(0x38 - 0x16);
+        w.u16(ENEMYTYPE_PC); // 0x38: clEnemyType.siEnemyType
+        w.pad(0x50 - 0x3A); // 0x3A..0x50: siPara1, clEventInfo, siTopSkillUnique
 
         w.u8(0); // 0x50: siCurrentShowHorse
         w.u8(self.game_master_level); // 0x51
@@ -1602,6 +1617,20 @@ mod tests {
         assert_eq!(y_map_speed & 0x3FF, 13);
         assert_eq!((y_map_speed >> 10) & 0x3FF, 1);
         assert_eq!((y_map_speed >> 20) & 0x3F, 8);
+
+        // 0x34 clInnerStatus.siStatus stays 0; 0x38 clEnemyType must carry
+        // ENEMYTYPE_ALLNPC or the client never raises the attack cursor on a
+        // monster (`char-attack.cpp:536-541`), and 0x3A siPara1 stays 0.
+        assert_eq!(
+            u32::from_le_bytes(payload[0x34..0x38].try_into().unwrap()),
+            0,
+            "siStatus must be clear"
+        );
+        assert_eq!(
+            u16::from_le_bytes([payload[0x38], payload[0x39]]),
+            ENEMYTYPE_PC
+        );
+        assert_eq!(u16::from_le_bytes([payload[0x3A], payload[0x3B]]), 0);
     }
 
     #[test]

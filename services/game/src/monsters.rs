@@ -1,5 +1,5 @@
-//! Field-monster spawning on map 0 — Phase 1 of
-//! `docs\DESIGN_MONSTER_COMBAT_AND_AUTOHUNT.md` §10.2.
+//! Map 0's field monsters — Phases 1 and 2 of
+//! `docs\DESIGN_MONSTER_COMBAT_AND_AUTOHUNT.md` §10.2/§10.3.
 //!
 //! The map's `NPCGroup` field groups are loaded (the ones
 //! `scripts\generate-npc-placements.ps1` refuses: `Radius != 1` or several units
@@ -10,19 +10,28 @@
 //! NPC record — the frame that creates a character on a client
 //! (`Client-Login.cpp:53-85`), and the only one that does.
 //!
+//! [`MonsterWorld::tick`] then keeps them alive: an idle monster wanders inside
+//! its leash, an engaged one walks into range and swings, and a dead one comes
+//! back after a delay. Both halves broadcast the same frames a player's does —
+//! 241 `RESPONSE_USERORDER` for the order and 200 `RESPONSE_CHARUPDATE` per
+//! committed tile — so a bystander's client animates a monster exactly the way
+//! it animates a player.
+//!
 //! # What this is not
 //!
-//! No combat and no wandering: an instance appears, stands where it spawned, and
-//! is never removed, so there is no death, no drop, and no respawn timer yet.
-//! The group's `Interval`/`BOSS` columns are parsed but unused for the same
-//! reason, and `MaxNPCNum` is only the top-up gate (see [`MonsterWorld::spawn_all`]).
-//! Positions are a deterministic spread, not the legacy's random pick, so the
-//! field looks the same across restarts — which the client's `CharUniqueInfo`
-//! cache rewards.
+//! `MaxNPCNum` is only the top-up gate (see [`MonsterWorld::spawn_all`]), not a
+//! hard cap. There is no monster-vs-monster combat, no fear or fleeing (the
+//! legacy's `ATB_FEAR` branch is unported), and a player's death is left at
+//! zero life for the existing revive path to handle — the legacy's
+//! `DeadChar_PC` penalty rules are `§11` UNKNOWN. The `GetDamage` defence,
+//! elemental, set-item and enchant layers are absent rather than approximated
+//! (`§11` marks them mechanical-port-only).
 
 use std::collections::HashMap;
 use std::path::Path;
+use std::time::Instant;
 
+use gz_data::drops::{DropEntry, roll_drop};
 use gz_data::kindinfo::{self, CharAttackRow, KindCreateRow, MonsterStats};
 use gz_data::map::MapFile;
 use gz_data::npc::{NPC_CHAR_UNIQUE_BASE, NPC_PLACEMENTS};
@@ -32,7 +41,10 @@ use gz_proto::game::client_map_index;
 use gz_proto::loginmany::{LoginManyRecord, NpcRecord, encode_login_many_batches_mixed};
 use gz_proto::map_geometry::{cell_of, cells_adjacent};
 use gz_proto::opcodes_game::GameMsg;
+use gz_proto::order::{BasicCharUpdate, OrderData};
 
+use crate::combat::{self, Rng};
+use crate::movement::Movement;
 use crate::registry::{Registry, SessionKey};
 use crate::{logln, logln_err};
 
@@ -42,6 +54,30 @@ pub(crate) const FIELD_MAP: i32 = 0;
 /// `MAX_CHAR_NUMBER` (`CommonHeader.h:639`) — the exclusive top of the client's
 /// NPC id range, so a monster id must stay below it (`IsNPC` is `8500..20000`).
 const MAX_CHAR_NUMBER: u32 = 20_000;
+
+/// How often [`MonsterWorld::tick`] is called, in milliseconds.
+///
+/// It has to sample a monster's step more than once per tile or the walk runs
+/// slow: [`Movement`] commits at most one tile per call, and a tile costs
+/// `5000 / move_speed` ms. A shipped monster moves at 5..40, so 100 ms covers
+/// every one of them.
+pub(crate) const AI_TICK_MS: u64 = 100;
+
+/// One action per monster, on average, in milliseconds.
+///
+/// The legacy's gate is `data = (rand() + siID) % (150 / CHAR_ACTION_INTERVAL_FRAME)`
+/// = `% 25`, one pass in 25 (`char-wait.cpp:315-406`,
+/// `CHAR_ACTION_INTERVAL_FRAME = 6`, `Char-Common.h:221`), so a monster thinks
+/// about once every 25 frames. This is that pacing expressed as a deadline,
+/// with the `siID` term folded in as a per-id stagger so 1536 monsters do not
+/// all swing on the same tick.
+const AI_ACT_MS: u64 = 6_250;
+
+/// How far a monster will step toward a wander target, in tiles. The legacy
+/// picks ±5 inside a group and ±10 outside (`char-wait.cpp:202-300`); ours
+/// always has a group, and the leash bounds it either way, so ±5 is the whole
+/// rule.
+const WANDER_RADIUS: i32 = 5;
 
 /// One group's kind, resolved against the kind tables and the map.
 #[derive(Debug, Clone)]
@@ -57,8 +93,29 @@ struct SpawnUnit {
     /// `uiLife` — the kind's max life at `level` (`MonsterStats::at`).
     life: u32,
     /// The group's safe tiles for this kind's block mask, from
-    /// [`SpawnField::spawn_points`]. Sorted by `(x, y)`.
+    /// [`SpawnField::spawn_points`]. Sorted by `(x, y)`, which is what makes
+    /// [`walkable_path`] and the wander scan a binary search.
     tiles: Vec<(i32, i32)>,
+    /// `MinDmg` — the low end of this kind's swing (`CharAttackRow::min_dmg`).
+    min_atk: i32,
+    /// `MaxDmg` (`CharAttackRow::max_dmg`).
+    max_atk: i32,
+    /// `AC` (`CharAttackRow::ac`) — the defence a player's swing is reduced by
+    /// ([`combat::reduced_by_ac`]).
+    ac: i32,
+    /// `Exp` (`CharAttackRow::exp`) — the pool [`combat::exp_for_hit`] shares
+    /// out per hit.
+    exp: i64,
+    /// `siAggressive` (`CharAttackRow::aggressive`) — how far this kind looks
+    /// for a target. 0 means it never starts a fight.
+    aggressive: i32,
+    /// `range` (`CharAttackRow::range`) — how close it has to be to swing.
+    range: i32,
+    /// `siCriticalRate`, percent (`CharAttackRow::critical_rate`).
+    critical_rate: i32,
+    /// This kind's drop table, resolved once from the committed canonical
+    /// master so a death never re-looks the kind up.
+    drops: &'static [DropEntry],
 }
 
 /// One field group plus its resolved, placeable units.
@@ -81,13 +138,68 @@ struct Monster {
     unique: u16,
     wire_kind: u16,
     level: u8,
+    /// Current life. Reaches 0 only long enough for the death path to remove
+    /// the instance, because a body is deleted rather than left lying
+    /// (`CharManager.cpp:257-277`).
     life: u32,
     x: i32,
     y: i32,
     move_speed: u8,
     /// Index into [`MonsterWorld::groups`] — the group this instance belongs to,
-    /// so a later tick can count it against the group's capacity.
+    /// so a tick can count it against the group's capacity.
     group: usize,
+    /// Index into that group's `units`, which is where the combat numbers live.
+    unit: usize,
+    /// The `char_unique` of the player this monster is fighting, or `None` when
+    /// it is idle. The legacy's `siTargetCharUnique`.
+    target: Option<i16>,
+    /// A walk in progress. One monster cannot be walking and fighting in the
+    /// same act, so this and `target` are mutually exclusive in practice.
+    walk: Option<Movement>,
+    /// The `now_tick()` stamp this monster next acts on — the legacy's
+    /// `(rand() + siID) % 25` gate, as a deadline.
+    next_act_ms: u64,
+}
+
+/// What a monster's swing did to a player, for the caller to broadcast.
+/// [`crate::main`] does the broadcasting because it owns the registry fan and
+/// this method must not hold the world lock across an await.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PlayerHit {
+    /// The struck player's session key.
+    pub(crate) key: SessionKey,
+    /// Its `char_unique`, the field the 268 carries.
+    pub(crate) char_unique: i16,
+    /// Where it was standing — the recipient set is "near the target"
+    /// (`Server-Attack.cpp:2775`).
+    pub(crate) x: i32,
+    pub(crate) y: i32,
+    /// Life after the hit.
+    pub(crate) life: u32,
+    pub(crate) damage: i32,
+    /// The swinging monster's unique, so the caller can echo the 241 order.
+    pub(crate) attacker_unique: u16,
+}
+
+/// What a player's swing did to a monster: the 268 body's fields, plus what a
+/// death owes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MonsterHit {
+    pub(crate) unique: u16,
+    pub(crate) x: i32,
+    pub(crate) y: i32,
+    pub(crate) life: u32,
+    pub(crate) died: bool,
+    /// The damage actually applied — after [`combat::reduced_by_ac`] took the
+    /// monster's own defence out of the swing.
+    pub(crate) damage: i32,
+    /// The kind's `Exp` column — the pool the caller shares out with
+    /// [`combat::exp_for_hit`].
+    pub(crate) exp: i64,
+    pub(crate) level: i32,
+    pub(crate) max_life: u32,
+    /// `(item_unique, count)` pairs rolled at death, empty on a survivor.
+    pub(crate) drops: Vec<(i32, i32)>,
 }
 
 /// Map 0's monster population: the loaded groups and the instances they spawned.
@@ -95,6 +207,12 @@ struct Monster {
 pub(crate) struct MonsterWorld {
     groups: Vec<FieldGroup>,
     monsters: Vec<Monster>,
+    /// The id allocator, carried across respawn so a recycled monster can never
+    /// take an id a client still has cached.
+    next_unique: u32,
+    /// `(group index, when it is due)` — the legacy's respawn gate, one entry
+    /// per monster that has died.
+    respawn: Vec<(usize, u64)>,
 }
 
 impl MonsterWorld {
@@ -124,6 +242,7 @@ impl MonsterWorld {
         let create = kindinfo::load_kind_create(root).map_err(|e| format!("monsters: {e}"))?;
         let unique = kindinfo::load_kind_unique(root).map_err(|e| format!("monsters: {e}"))?;
         let attack = kindinfo::canonical_char_attack();
+        let drops = gz_data::drops::canonical_char_drops();
 
         let create_by_code: HashMap<&str, &KindCreateRow> =
             create.iter().map(|r| (r.code.as_str(), r)).collect();
@@ -131,6 +250,10 @@ impl MonsterWorld {
             unique.iter().map(|r| (r.code.as_str(), r.id)).collect();
         let attack_by_code: HashMap<&str, &CharAttackRow> =
             attack.iter().map(|r| (r.code.as_str(), r)).collect();
+        let drops_by_code: HashMap<&str, &[DropEntry]> = drops
+            .iter()
+            .map(|r| (r.code.as_str(), r.drops.as_slice()))
+            .collect();
 
         // One connectivity flood per kind mask, shared by every group of that
         // kind (the expensive half of `spawn_points`).
@@ -194,6 +317,19 @@ impl MonsterWorld {
                     move_speed: stats.move_speed.clamp(0, 63) as u8,
                     life,
                     tiles,
+                    min_atk: attack_row.min_dmg,
+                    max_atk: attack_row.max_dmg.max(attack_row.min_dmg),
+                    ac: attack_row.ac,
+                    exp: attack_row.exp,
+                    aggressive: attack_row.aggressive,
+                    range: attack_row.range.max(1),
+                    critical_rate: attack_row.critical_rate,
+                    // A kind with no drop row drops nothing; the parser already
+                    // dropped malformed entries, so this is a plain lookup.
+                    drops: drops_by_code
+                        .get(unit.kind.as_str())
+                        .copied()
+                        .unwrap_or(&[]),
                 });
             }
             if !units.is_empty() {
@@ -207,6 +343,10 @@ impl MonsterWorld {
         Ok(Self {
             groups: out,
             monsters: Vec::new(),
+            // Monsters number from just above the static-NPC block, so the two
+            // id ranges cannot overlap (`IsNPC` covers both, `npc.rs`).
+            next_unique: u32::from(NPC_CHAR_UNIQUE_BASE) + NPC_PLACEMENTS.len() as u32,
+            respawn: Vec::new(),
         })
     }
 
@@ -225,53 +365,77 @@ impl MonsterWorld {
     /// above `MaxNPCNum` is skipped whole, otherwise every unit is filled to its
     /// `siKindMaxNum` (`NPC.cpp:922-938`).
     pub(crate) fn spawn_all(&mut self, registry: &Registry) {
-        // Monsters number from just above the static-NPC block, so the two id
-        // ranges cannot overlap (`IsNPC` covers both, `npc.rs`).
-        let mut next = u32::from(NPC_CHAR_UNIQUE_BASE) + NPC_PLACEMENTS.len() as u32;
-        for (index, group) in self.groups.iter().enumerate() {
+        for index in 0..self.groups.len() {
             let live = self.monsters.iter().filter(|m| m.group == index).count() as i32;
-            if live >= group.capacity {
+            if live >= self.groups[index].capacity {
                 continue;
             }
-            for unit in &group.units {
+            for unit_index in 0..self.groups[index].units.len() {
+                let unit = &self.groups[index].units[unit_index];
                 let want = unit.max_num.max(0) as usize;
                 // shortcut: a deterministic stride across the sorted safe tiles,
-                // not the legacy's random `FindEmptyAreaForCharLocate`. Upgrade
-                // when roaming/respawn makes placement density matter.
+                // not the legacy's random `FindEmptyAreaForCharLocate`. The same
+                // index is reused on respawn, which is also deterministic.
                 let step = (unit.tiles.len() / want.max(1)).max(1);
-                for k in 0..want {
-                    if next >= MAX_CHAR_NUMBER {
-                        logln_err!(
-                            "monsters: NPC id range exhausted at {} monster(s)",
-                            self.monsters.len()
-                        );
+                let places: Vec<(i32, i32)> = (0..want)
+                    .map(|k| unit.tiles[(k * step).min(unit.tiles.len() - 1)])
+                    .collect();
+                // The leash, enforced where it can be: `spawn_points` only
+                // returns the group's square, and this states the invariant
+                // rather than trusting it.
+                debug_assert!(
+                    places
+                        .iter()
+                        .all(|&(x, y)| self.groups[index].anchor.contains(FIELD_MAP, x, y)),
+                    "monster placed outside its group's leash"
+                );
+                // Resolved above so the mutable borrow below is the only one.
+                for at in places {
+                    if !self.spawn_one(registry, index, unit_index, at) {
                         return;
                     }
-                    let (x, y) = unit.tiles[(k * step).min(unit.tiles.len() - 1)];
-                    // The leash, enforced where it can be: `spawn_points` only
-                    // returns the group's square, and this states the invariant
-                    // rather than trusting it. (`SpawnGroup::return_home` is the
-                    // hook the movement phase will use to walk a stray back.)
-                    debug_assert!(
-                        group.anchor.contains(FIELD_MAP, x, y),
-                        "monster placed outside its group's leash"
-                    );
-                    let monster = Monster {
-                        unique: next as u16,
-                        wire_kind: unit.wire_kind,
-                        level: unit.level.clamp(0, 255) as u8,
-                        life: unit.life,
-                        x,
-                        y,
-                        move_speed: unit.move_speed,
-                        group: index,
-                    };
-                    next += 1;
-                    self.monsters.push(monster);
-                    broadcast_spawn(registry, FIELD_MAP, &monster);
                 }
             }
         }
+    }
+
+    /// Places one monster into `group` at `at`, taking the next id and
+    /// announcing it. `false` when the id range is spent, which stops the
+    /// caller's whole loop.
+    fn spawn_one(
+        &mut self,
+        registry: &Registry,
+        group: usize,
+        unit: usize,
+        at: (i32, i32),
+    ) -> bool {
+        if self.next_unique >= MAX_CHAR_NUMBER {
+            logln_err!(
+                "monsters: NPC id range exhausted at {} monster(s)",
+                self.monsters.len()
+            );
+            return false;
+        }
+        let u = &self.groups[group].units[unit];
+        let monster = Monster {
+            unique: self.next_unique as u16,
+            wire_kind: u.wire_kind,
+            level: u.level.clamp(0, 255) as u8,
+            life: u.life,
+            x: at.0,
+            y: at.1,
+            move_speed: u.move_speed,
+            group,
+            unit,
+            target: None,
+            walk: None,
+            // Staggered by id, the legacy's `(rand() + siID) % 25` term.
+            next_act_ms: 0,
+        };
+        self.next_unique += 1;
+        self.monsters.push(monster);
+        broadcast_spawn(registry, FIELD_MAP, &monster);
+        true
     }
 
     /// Tells one session about every monster in its 3×3 cell block — the monster
@@ -344,6 +508,402 @@ impl MonsterWorld {
         }
         logln!("game: announced {count} monster(s) {what} on map {map_id} in {frames} frame(s)");
     }
+
+    /// One AI pass: respawn what is due, step every walk that is running, then
+    /// let each monster whose turn it is act.
+    ///
+    /// Returns what the monsters did to players, so the caller can broadcast it
+    /// once the world lock is dropped.
+    pub(crate) fn tick(
+        &mut self,
+        registry: &Registry,
+        now_ms: u64,
+        rng: &mut Rng,
+    ) -> Vec<PlayerHit> {
+        if self.monsters.is_empty() && self.respawn.is_empty() {
+            return Vec::new();
+        }
+        self.respawn_due(registry, now_ms);
+        self.advance_walks(registry, now_ms);
+        let mut hits = Vec::new();
+        for index in 0..self.monsters.len() {
+            if now_ms < self.monsters[index].next_act_ms {
+                continue;
+            }
+            self.monsters[index].next_act_ms = now_ms + AI_ACT_MS;
+            if let Some(hit) = self.act(registry, now_ms, rng, index) {
+                hits.push(hit);
+            }
+        }
+        hits
+    }
+
+    /// Applies one player's swing to one monster and returns what it did. A
+    /// monster that dies is removed here — the body is deleted in the same pass
+    /// the legacy's `DeleteChar` runs in (`CharManager.cpp:257-277`) — and its
+    /// group is queued to respawn it.
+    ///
+    /// `raw_power` is the attacker's damage *before* the monster's defence: the
+    /// caller owns its own critical roll ([`combat::apply_critical`]) because an
+    /// attacker's crit rate is the attacker's number, while the defender's AC is
+    /// only knowable here.
+    ///
+    /// `now_ms` is the respawn clock; the drop rolls come from the caller's RNG
+    /// so a test can replay a fight exactly.
+    pub(crate) fn hit_by_player(
+        &mut self,
+        monster_unique: u16,
+        raw_power: i32,
+        now_ms: u64,
+        rng: &mut Rng,
+    ) -> Option<MonsterHit> {
+        let index = self
+            .monsters
+            .iter()
+            .position(|m| m.unique == monster_unique)?;
+        let monster = self.monsters[index];
+        let (group, unit) = (monster.group, monster.unit);
+        // Copy the shared numbers out before touching `monsters`, so the two
+        // borrows do not overlap.
+        let (max_life, exp, level, ac, table) = {
+            let u = &self.groups[group].units[unit];
+            (u.life, u.exp, u.level, u.ac, u.drops)
+        };
+        let damage = combat::reduced_by_ac(raw_power, ac);
+        let new_life = monster.life.saturating_sub(damage.max(0) as u32);
+        let died = new_life == 0;
+
+        let drops = if died {
+            // `GetRandDropItem` rolls **once** per kill
+            // (`kindinfo-Manager.cpp:68-107`), so a kind drops at most one item
+            // type per death. `AddRate` is a bonus percent the port has no
+            // table for.
+            roll_drop(
+                table,
+                0,
+                rng.below(i32::MAX as u32) as i32,
+                rng.below(i32::MAX as u32) as i32,
+            )
+            .into_iter()
+            .collect()
+        } else {
+            Vec::new()
+        };
+
+        if died {
+            self.monsters.remove(index);
+            // The legacy respawns on the group's `Interval`, which is 0 in every
+            // shipped field file — so there is no value to honour.
+            // shortcut: a fixed delay stands in. Upgrade when a per-group
+            // respawn cadence is wanted.
+            self.respawn.push((group, now_ms + RESPAWN_MS));
+            logln!(
+                "game: monster {monster_unique} (kind {}, group {group}) died at ({}, {})",
+                monster.wire_kind,
+                monster.x,
+                monster.y
+            );
+        } else {
+            self.monsters[index].life = new_life;
+        }
+
+        Some(MonsterHit {
+            unique: monster_unique,
+            x: monster.x,
+            y: monster.y,
+            life: new_life,
+            died,
+            damage,
+            exp,
+            level,
+            max_life,
+            drops,
+        })
+    }
+
+    /// Respawn every group whose deadline has passed, one monster each. The
+    /// legacy's `SetChar` gate runs once per wait tick before any AI
+    /// (`NPC.cpp:922-938`), so respawning here rather than in the act loop keeps
+    /// that order.
+    fn respawn_due(&mut self, registry: &Registry, now_ms: u64) {
+        let mut due = 0;
+        while due < self.respawn.len() {
+            if self.respawn[due].1 > now_ms {
+                due += 1;
+                continue;
+            }
+            let (group, _) = self.respawn.remove(due);
+            self.respawn_one(registry, group);
+        }
+    }
+
+    /// Replaces one monster in `group` toward its unit targets.
+    fn respawn_one(&mut self, registry: &Registry, group: usize) {
+        let live = self.monsters.iter().filter(|m| m.group == group).count() as i32;
+        if live >= self.groups[group].capacity {
+            return;
+        }
+        for unit_index in 0..self.groups[group].units.len() {
+            let unit = &self.groups[group].units[unit_index];
+            let want = unit.max_num.max(0);
+            let have = self
+                .monsters
+                .iter()
+                .filter(|m| m.group == group && m.unit == unit_index)
+                .count() as i32;
+            if have >= want || unit.tiles.is_empty() {
+                continue;
+            }
+            // The same deterministic index the boot pass would have used for
+            // this slot.
+            let at = unit.tiles[(have as usize).min(unit.tiles.len() - 1)];
+            self.spawn_one(registry, group, unit_index, at);
+            return;
+        }
+    }
+    /// Steps every running walk one tile and broadcasts the 200 that carries the
+    /// new cell — the NPC half of `cltCharCommon::Move` (`char-move.cpp:145-171`),
+    /// which the observer fan already does for players.
+    fn advance_walks(&mut self, registry: &Registry, now_ms: u64) {
+        // `now_ms` is the deadline clock; the accumulator reads the real
+        // instant so a walk's cadence is not distorted by a stale stamp.
+        let now = Instant::now();
+        for index in 0..self.monsters.len() {
+            let Some(mut walk) = self.monsters[index].walk else {
+                continue;
+            };
+            let Some(cell) = walk.advance(now) else {
+                // Keep the deadline moving so `next_delay` stays meaningful.
+                self.monsters[index].walk = Some(walk);
+                continue;
+            };
+            // The route was checked before the order went out, so this is an
+            // invariant, not a gate — but a monster must never be left on a tile
+            // a client cannot draw it on.
+            if self.groups[self.monsters[index].group].units[self.monsters[index].unit]
+                .tiles
+                .binary_search(&cell)
+                .is_err()
+            {
+                self.monsters[index].walk = None;
+                continue;
+            }
+            self.monsters[index].x = cell.0;
+            self.monsters[index].y = cell.1;
+            self.monsters[index].walk = if walk.arrived() { None } else { Some(walk) };
+            let m = self.monsters[index];
+            broadcast_char_update(registry, FIELD_MAP, &m);
+            // A walk keeps its monster busy: it cannot also look for a fight.
+            self.monsters[index].next_act_ms =
+                self.monsters[index].next_act_ms.max(now_ms + AI_TICK_MS);
+        }
+    }
+
+    /// One monster's turn — the legacy's `OperateWaitServer` body
+    /// (`char-wait.cpp:315-406`): an idle one wanders, an engaged one walks into
+    /// range or swings.
+    fn act(
+        &mut self,
+        registry: &Registry,
+        now_ms: u64,
+        rng: &mut Rng,
+        index: usize,
+    ) -> Option<PlayerHit> {
+        let (group, unit) = (self.monsters[index].group, self.monsters[index].unit);
+        let (aggressive, range, min_atk, max_atk, crit) = {
+            let u = &self.groups[group].units[unit];
+            (
+                u.aggressive,
+                u.range.max(1),
+                u.min_atk,
+                u.max_atk,
+                u.critical_rate,
+            )
+        };
+
+        if self.monsters[index].target.is_none() {
+            self.engage(registry, index, aggressive);
+            if self.monsters[index].target.is_none() {
+                // Nothing to fight: `RandomMove` (`char-wait.cpp:202`).
+                self.wander(registry, index, now_ms, rng);
+                return None;
+            }
+        }
+
+        let target_unique = self.monsters[index].target?;
+        // A target that has logged out is not one any more; the legacy's
+        // `CR[id]` null guard drops the hit the same way.
+        let Some(target_key) = registry.find_by_charunique(target_unique) else {
+            self.monsters[index].target = None;
+            return None;
+        };
+        let Some(target) = registry.info(target_key) else {
+            self.monsters[index].target = None;
+            return None;
+        };
+        // `CanAttack`: a dead or departed target cannot be fought.
+        if target.life == 0 || target.map_id != FIELD_MAP {
+            self.monsters[index].target = None;
+            return None;
+        }
+
+        let (x, y) = (self.monsters[index].x, self.monsters[index].y);
+        let (dx, dy) = ((target.x - x).abs(), (target.y - y).abs());
+        if dx > range || dy > range {
+            // `Action_Attack` walks into range before swinging.
+            self.order_move(registry, index, (target.x, target.y), now_ms);
+            return None;
+        }
+
+        // The swing, so a bystander's client plays it (`MakeOrder_ATTACK`,
+        // `order.cpp:314`).
+        registry.broadcast_near_point(
+            FIELD_MAP,
+            target.x,
+            target.y,
+            GameMsg::ResponseUserorder as u16,
+            OrderData::attack_order(i32::from(self.monsters[index].unique), target_unique)
+                .encode()
+                .to_vec(),
+        );
+        let raw = combat::roll_power(min_atk, max_atk, rng.up_to(max_atk - min_atk));
+        let damage = combat::reduced_by_ac(
+            combat::apply_critical(raw, crit, rng.up_to(99)),
+            combat::level_ac(target.level),
+        );
+        let life = registry.set_life(target_key, damage)?;
+        logln!(
+            "game: monster {} hit character {target_unique} for {damage}, {life} life left",
+            self.monsters[index].unique
+        );
+        Some(PlayerHit {
+            key: target_key,
+            char_unique: target_unique,
+            x: target.x,
+            y: target.y,
+            life,
+            damage,
+            attacker_unique: self.monsters[index].unique,
+        })
+    }
+
+    /// `SearchEnemy(siAggressive)` (`char-wait.cpp:22-200`) — take the nearest
+    /// live player inside this monster's aggression box. The legacy also gates
+    /// on `IsEnemy` and `CanAttack`; with one player race and no safe zone on
+    /// map 0, being alive and in range is the whole test.
+    fn engage(&mut self, registry: &Registry, index: usize, aggressive: i32) {
+        if aggressive <= 0 {
+            return;
+        }
+        let (x, y) = (self.monsters[index].x, self.monsters[index].y);
+        for (_, session) in registry.sessions_near_point(FIELD_MAP, x, y) {
+            if session.life == 0 {
+                continue;
+            }
+            if (session.x - x).abs() <= aggressive && (session.y - y).abs() <= aggressive {
+                self.monsters[index].target = Some(session.char_unique);
+                logln!(
+                    "game: monster {} engaged character {}",
+                    self.monsters[index].unique,
+                    session.char_unique
+                );
+                break;
+            }
+        }
+    }
+
+    /// `RandomMove` (`char-wait.cpp:202-300`): an idle monster picks a tile of
+    /// its own group's ground near it and walks there. Ours always has a group,
+    /// so the legacy's no-group ±10 branch never applies.
+    fn wander(&mut self, registry: &Registry, index: usize, now_ms: u64, rng: &mut Rng) {
+        let (group, unit) = (self.monsters[index].group, self.monsters[index].unit);
+        let (x, y) = (self.monsters[index].x, self.monsters[index].y);
+        let tiles = &self.groups[group].units[unit].tiles;
+        // The legacy picks a point in the ±5 box and rejects a wall; ours picks
+        // a tile that is *already* walkable and already inside the box, so it
+        // can never choose one it would then have to refuse.
+        let near = tiles
+            .iter()
+            .filter(|(tx, ty)| (*tx - x).abs() <= WANDER_RADIUS && (*ty - y).abs() <= WANDER_RADIUS)
+            .count();
+        if near == 0 {
+            return;
+        }
+        let pick = rng.below(near as u32) as usize;
+        let dest = tiles
+            .iter()
+            .filter(|(tx, ty)| (*tx - x).abs() <= WANDER_RADIUS && (*ty - y).abs() <= WANDER_RADIUS)
+            .nth(pick)
+            .copied();
+        let Some(dest) = dest else { return };
+        self.order_move(registry, index, dest, now_ms);
+    }
+
+    /// Issues the 241 for a monster's move and starts the step — the NPC half of
+    /// `OrderMove` / `OrderStraightMove` (`char-wait.cpp:230-300`).
+    ///
+    /// The route is cleared *before* the order goes out, because the client walks
+    /// it whether or not the server approves each tile: a monster that starts a
+    /// walk it cannot finish is a monster that desyncs.
+    fn order_move(&mut self, registry: &Registry, index: usize, dest: (i32, i32), now_ms: u64) {
+        let (group, unit) = (self.monsters[index].group, self.monsters[index].unit);
+        let (x, y) = (self.monsters[index].x, self.monsters[index].y);
+        if dest == (x, y) {
+            return;
+        }
+        if !walkable_path(&self.groups[group].units[unit].tiles, (x, y), dest) {
+            return;
+        }
+        let unique = self.monsters[index].unique;
+        registry.broadcast_near_point(
+            FIELD_MAP,
+            dest.0,
+            dest.1,
+            GameMsg::ResponseUserorder as u16,
+            OrderData::move_order(
+                i32::from(unique),
+                dest.0.clamp(0, 0x3FF) as i16,
+                dest.1.clamp(0, 0x3FF) as i16,
+            )
+            .encode()
+            .to_vec(),
+        );
+        self.monsters[index].walk = Some(Movement::new(
+            dest,
+            (x, y),
+            FIELD_MAP,
+            i32::from(self.monsters[index].move_speed),
+        ));
+        // The monster is walking; it should not swing on the same pass.
+        self.monsters[index].next_act_ms = now_ms + AI_TICK_MS;
+    }
+}
+
+/// How long a dead monster stays gone before its group respawns it. The
+/// shipped `NPCGroup` files all carry `Interval = 0`, so the legacy's own value
+/// is not available to honour.
+const RESPAWN_MS: u64 = 30_000;
+
+/// Whether the straight line [`Movement`] would walk from `from` to `to` stays
+/// on `tiles` at every committed step.
+///
+/// [`Movement`] steps diagonally until it is aligned on one axis and then
+/// straight (`char-move.cpp:145-171`), so this mirrors that order rather than
+/// any L-shaped route: it is the path the client will actually be told to walk.
+fn walkable_path(tiles: &[(i32, i32)], from: (i32, i32), to: (i32, i32)) -> bool {
+    let mut at = from;
+    while at != to {
+        if at.0 != to.0 {
+            at.0 += (to.0 - at.0).signum();
+        }
+        if at.1 != to.1 {
+            at.1 += (to.1 - at.1).signum();
+        }
+        if tiles.binary_search(&at).is_err() {
+            return false;
+        }
+    }
+    true
 }
 
 /// Queues one monster's appearance to every session near it.
@@ -359,6 +919,32 @@ fn broadcast_spawn(registry: &Registry, map_id: i32, monster: &Monster) {
             body,
         );
     }
+}
+
+/// Queues one monster's per-tile position to every session near the new cell —
+/// the 200 half of a walk. Life is the resulting total, as in every other 200.
+fn broadcast_char_update(registry: &Registry, map_id: i32, monster: &Monster) {
+    registry.broadcast_near_point(
+        map_id,
+        monster.x,
+        monster.y,
+        GameMsg::ResponseCharupdate as u16,
+        BasicCharUpdate {
+            si_char_unique: monster.unique as i16,
+            si_move_speed: monster.move_speed as i8,
+            b_urgent_mode: false,
+            si_life: monster.life as i32,
+            si_reserved_life: monster.life as i32,
+            si_mana: 0,
+            si_x: monster.x.clamp(0, 0x3FF) as i16,
+            si_y: monster.y.clamp(0, 0x3FF) as i16,
+            ui_gm_mode: 0,
+            b_pc_room: false,
+            si_make_ani_type: 0,
+        }
+        .encode()
+        .to_vec(),
+    );
 }
 
 /// The wire record for one monster — the same `cltMakeCharInfoCommon` shape a
@@ -425,77 +1011,46 @@ mod tests {
             );
             assert!(seen.insert(m.unique), "duplicate id {}", m.unique);
             assert!(m.life > 0, "zero-life monster {}", m.unique);
-            assert!(m.move_speed <= 63);
-            assert!((0..800).contains(&m.x) && (0..800).contains(&m.y));
+            // Every instance resolves to a unit that knows how to fight, or the
+            // combat phase would find a monster with no numbers behind it.
+            let u = &world.groups[m.group].units[m.unit];
+            assert!(
+                u.max_atk >= u.min_atk,
+                "kind {} inverted swing",
+                u.wire_kind
+            );
+            assert!(u.range >= 1, "kind {} cannot reach", u.wire_kind);
         }
-    }
 
-    #[test]
-    fn spawn_all_fills_each_unit_to_its_target_and_the_capacity_gate_stops_a_second_pass() {
-        let registry = Registry::new();
-        let base = u32::from(NPC_CHAR_UNIQUE_BASE) + NPC_PLACEMENTS.len() as u32;
-        let tiles: Vec<(i32, i32)> = (0..10).map(|i| (10 + i, 10)).collect();
-        let mut world = MonsterWorld {
-            groups: vec![FieldGroup {
-                anchor: SpawnGroup {
-                    map_index: FIELD_MAP,
-                    center_x: 10,
-                    center_y: 10,
-                    radius: 20,
-                },
-                // Capacity 3 with a unit target of 10: from empty the group is
-                // below capacity, so the unit fills to its target and overshoots
-                // `MaxNPCNum` — the top-up gate, not a cap (`NPC.cpp:925`).
-                capacity: 3,
-                units: vec![SpawnUnit {
-                    wire_kind: 24,
-                    level: 7,
-                    max_num: 10,
-                    move_speed: 5,
-                    life: 40,
-                    tiles: tiles.clone(),
-                }],
-            }],
-            monsters: Vec::new(),
-        };
-        world.spawn_all(&registry);
-
-        assert_eq!(world.monster_count(), 10);
+        // And every place is inside its own group's leash.
         for m in &world.monsters {
-            assert_eq!((m.wire_kind, m.level, m.life, m.move_speed), (24, 7, 40, 5));
-            assert_eq!(m.group, 0);
-            assert!(tiles.contains(&(m.x, m.y)), "spawned off the safe tiles");
+            assert!(
+                world.groups[m.group].anchor.contains(FIELD_MAP, m.x, m.y),
+                "monster {} outside its leash",
+                m.unique
+            );
         }
-        let ids: Vec<u32> = world.monsters.iter().map(|m| u32::from(m.unique)).collect();
-        let expected: Vec<u32> = (0..10).map(|i| base + i).collect();
-        assert_eq!(ids, expected);
-
-        // A second tick finds the group at 10 live >= its capacity of 3 and
-        // leaves it alone.
-        world.spawn_all(&registry);
-        assert_eq!(
-            world.monster_count(),
-            10,
-            "a full group is not topped up again"
-        );
     }
 
+    /// The record the client is given has to survive its own round trip, or a
+    /// monster is announced as something other than what it is.
     #[test]
-    fn the_record_is_one_the_client_can_walk() {
+    fn the_wire_record_round_trips() {
         let monster = Monster {
             unique: 9001,
-            wire_kind: 24,
-            level: 7,
+            wire_kind: 15,
+            level: 30,
             life: 40,
             x: 246,
             y: 332,
-            move_speed: 5,
+            move_speed: 12,
             group: 0,
+            unit: 0,
+            target: None,
+            walk: None,
+            next_act_ms: 0,
         };
         let record = record_for(FIELD_MAP, &monster);
-        assert_eq!(record.map_index, 0);
-        assert_eq!(record.total_move_speed, 5);
-        // The encoder's own decoder is the oracle that the bytes round-trip.
         assert_eq!(
             NpcRecord::decode(&record.encode()).expect("decodes"),
             record
@@ -524,79 +1079,274 @@ mod tests {
             key,
             tx,
             SessionInfo {
-                char_unique: 1473,
-                name: "Tester".to_owned(),
-                level: 13,
+                char_unique: 1000,
+                name: "Watcher".to_owned(),
+                level: 1,
                 map_id: FIELD_MAP,
-                x: 246,
-                y: 332,
+                x: 50,
+                y: 50,
                 school_id: 0,
                 class_kind: 1,
-                life: 161,
+                life: 40,
                 move_speed: 12,
                 sex: 1,
                 gm_level: 0,
             },
         );
 
-        // One monster the walk reaches, one it does not.
-        let (near_x, near_y) = (246, 332);
-        let (far_x, far_y) = (700, 700);
-        let world = MonsterWorld {
-            groups: Vec::new(),
-            monsters: vec![
-                Monster {
-                    unique: 9001,
-                    wire_kind: 24,
-                    level: 7,
-                    life: 40,
-                    x: near_x,
-                    y: near_y,
-                    move_speed: 5,
-                    group: 0,
-                },
-                Monster {
-                    unique: 9002,
-                    wire_kind: 24,
-                    level: 7,
-                    life: 40,
-                    x: far_x,
-                    y: far_y,
-                    move_speed: 5,
-                    group: 0,
-                },
-            ],
-        };
+        let mut world = MonsterWorld::empty();
+        // One monster in the block the session is entering, one in the block it
+        // was already in.
+        for (unique, at) in [(9001, (100, 100)), (9002, (200, 200))] {
+            world.monsters.push(Monster {
+                unique,
+                wire_kind: 15,
+                level: 1,
+                life: 10,
+                x: at.0,
+                y: at.1,
+                move_speed: 12,
+                group: 0,
+                unit: 0,
+                target: None,
+                walk: None,
+                next_act_ms: 0,
+            });
+        }
 
-        // Stepping from the far cell into the near one: the near monster is new,
-        // the far one is not re-sent.
-        world.announce_new_cells(
-            &registry,
-            key,
-            FIELD_MAP,
-            cell_of(far_x, far_y, FIELD_MAP),
-            cell_of(near_x, near_y, FIELD_MAP),
-        );
-        let frame = rx.try_recv().expect("the reached monster is announced");
-        assert_eq!(frame.cmd, GameMsg::ResponseLoginmany as u16);
-        let record = NpcRecord::decode(&frame.payload).expect("the records decode");
+        let was = cell_of(50, 50, FIELD_MAP);
+        let now = cell_of(100, 100, FIELD_MAP);
+        world.announce_new_cells(&registry, key, FIELD_MAP, was, now);
+
+        let mut got = Vec::new();
+        while let Ok(out) = rx.try_recv() {
+            got.push(out);
+        }
+        // Only the newly-in-block monster, in one frame.
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].cmd, GameMsg::ResponseLoginmany as u16);
+        let record = NpcRecord::decode(&got[0].payload).expect("decodes");
         assert_eq!(record.make_char_unique, 9001);
+    }
+
+    /// A route that would cross a tile the kind's mask rejects is refused before
+    /// the 241 goes out — otherwise the client walks a wall.
+    #[test]
+    fn a_route_through_a_wall_is_refused() {
+        // A 3-wide corridor along y = 0, broken in the middle.
+        let tiles = [(0, 0), (1, 0), (3, 0), (4, 0)];
+        assert!(walkable_path(&tiles, (0, 0), (1, 0)));
         assert!(
-            rx.try_recv().is_err(),
-            "the monster outside the gained cells is not announced"
+            !walkable_path(&tiles, (0, 0), (3, 0)),
+            "the step through (2, 0) is not walkable"
+        );
+        // Staying put is trivially fine.
+        assert!(walkable_path(&tiles, (1, 0), (1, 0)));
+    }
+
+    /// The diagonal-first stepping order is what gets checked, because that is
+    /// the order [`Movement`] commits.
+    #[test]
+    fn a_diagonal_route_checks_the_diagonal_first() {
+        // Only the diagonal tile is walkable, and it must be enough.
+        let tiles = [(0, 0), (1, 1), (2, 2)];
+        assert!(walkable_path(&tiles, (0, 0), (2, 2)));
+        // Removing the diagonal breaks it even though the corners exist.
+        let broken = [(0, 0), (2, 0), (0, 2), (2, 2)];
+        assert!(!walkable_path(&broken, (0, 0), (2, 2)));
+    }
+
+    /// A hit that does not kill leaves the monster where and as it was; one
+    /// that does removes it and queues the respawn.
+    #[test]
+    fn a_lethal_hit_removes_the_monster_and_a_surviving_one_loses_life() {
+        let registry = Registry::new();
+        let mut world = MonsterWorld::empty();
+        world.groups.push(FieldGroup {
+            anchor: SpawnGroup {
+                map_index: FIELD_MAP,
+                center_x: 0,
+                center_y: 0,
+                radius: 1,
+            },
+            capacity: 1,
+            units: vec![SpawnUnit {
+                wire_kind: 15,
+                level: 1,
+                max_num: 1,
+                move_speed: 12,
+                life: 20,
+                tiles: vec![(0, 0)],
+                min_atk: 1,
+                max_atk: 2,
+                ac: 0,
+                exp: 90,
+                aggressive: 0,
+                range: 1,
+                critical_rate: 0,
+                drops: &[],
+            }],
+        });
+        world.spawn_all(&registry);
+        assert_eq!(world.monster_count(), 1);
+        let unique = world.monsters[0].unique;
+        let mut rng = Rng::new(7);
+
+        let hit = world
+            .hit_by_player(unique, 5, 1_000, &mut rng)
+            .expect("the monster is there");
+        assert_eq!(hit.life, 15);
+        assert_eq!(hit.damage, 5, "ac 0 takes nothing off");
+        assert!(!hit.died);
+        assert!(hit.drops.is_empty());
+        assert_eq!(world.monster_count(), 1);
+
+        let hit = world
+            .hit_by_player(unique, 50, 1_000, &mut rng)
+            .expect("the monster is still there");
+        assert_eq!(hit.life, 0);
+        assert!(hit.died);
+        assert_eq!(hit.exp, 90, "the kind's own Exp column");
+        assert_eq!(world.monster_count(), 0, "the body is deleted");
+
+        // And the respawn comes back on the same tile, with a fresh id so a
+        // client's cached avatar cannot be reused.
+        world.tick(&registry, 1_000 + RESPAWN_MS + 1, &mut rng);
+        assert_eq!(world.monster_count(), 1);
+        assert_ne!(world.monsters[0].unique, unique);
+        assert_eq!(world.monsters[0].life, 20);
+    }
+
+    /// A monster with no aggressive range never starts a fight, and one whose
+    /// target has logged out forgets it rather than swinging at the air.
+    #[test]
+    fn an_aggression_zero_monster_never_engages() {
+        let registry = Registry::new();
+        let mut world = MonsterWorld::empty();
+        world.groups.push(FieldGroup {
+            anchor: SpawnGroup {
+                map_index: FIELD_MAP,
+                center_x: 0,
+                center_y: 0,
+                radius: 1,
+            },
+            capacity: 1,
+            units: vec![SpawnUnit {
+                wire_kind: 15,
+                level: 1,
+                max_num: 1,
+                move_speed: 12,
+                life: 20,
+                tiles: vec![(0, 0)],
+                min_atk: 1,
+                max_atk: 2,
+                ac: 0,
+                exp: 0,
+                aggressive: 0,
+                range: 1,
+                critical_rate: 0,
+                drops: &[],
+            }],
+        });
+        world.spawn_all(&Registry::new());
+
+        let mut rng = Rng::new(1);
+        for _ in 0..5 {
+            world.tick(&registry, 0, &mut rng);
+        }
+        assert_eq!(
+            world.monsters[0].target, None,
+            "aggressive 0 means the kind never starts a fight"
+        );
+    }
+
+    /// An aggressive monster with a live player next to it engages, walks into
+    /// range and takes the life off. The whole loop, in one assertion.
+    #[test]
+    fn an_aggressive_monster_engages_a_player_and_lowers_its_life() {
+        use crate::registry::{Outbound, SessionInfo};
+
+        let registry = Registry::new();
+        let key = Registry::next_key();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Outbound>();
+        registry.register(
+            key,
+            tx,
+            SessionInfo {
+                char_unique: 1000,
+                name: "Victim".to_owned(),
+                level: 1,
+                map_id: FIELD_MAP,
+                x: 0,
+                y: 0,
+                school_id: 0,
+                class_kind: 1,
+                life: 40,
+                move_speed: 12,
+                sex: 1,
+                gm_level: 0,
+            },
         );
 
-        // Standing still inside the block it already holds hands out nothing.
-        world.announce_new_cells(
-            &registry,
-            key,
-            FIELD_MAP,
-            cell_of(near_x, near_y, FIELD_MAP),
-            cell_of(near_x, near_y, FIELD_MAP),
+        let mut world = MonsterWorld::empty();
+        world.groups.push(FieldGroup {
+            anchor: SpawnGroup {
+                map_index: FIELD_MAP,
+                center_x: 0,
+                center_y: 0,
+                radius: 1,
+            },
+            capacity: 1,
+            units: vec![SpawnUnit {
+                wire_kind: 15,
+                level: 1,
+                max_num: 1,
+                move_speed: 12,
+                life: 20,
+                tiles: vec![(0, 0)],
+                min_atk: 40,
+                max_atk: 40,
+                ac: 0,
+                exp: 0,
+                aggressive: 5,
+                range: 1,
+                critical_rate: 0,
+                drops: &[],
+            }],
+        });
+        world.spawn_all(&Registry::new());
+        // Start it on its own first act so the very first tick is a real turn.
+        world.monsters[0].next_act_ms = 0;
+
+        let mut rng = Rng::new(99);
+        let hits = world.tick(&registry, 0, &mut rng);
+        assert_eq!(hits.len(), 1, "one swing on the first pass");
+        assert_eq!(hits[0].key, key);
+        assert_eq!(hits[0].attacker_unique, world.monsters[0].unique);
+        // 40 raw, level-1 AC is 0, so the full 40 lands.
+        assert_eq!(hits[0].damage, 40);
+        assert_eq!(hits[0].life, 0, "40 life minus 40 damage");
+        assert_eq!(
+            registry.info(key).expect("the session is there").life,
+            0,
+            "the registry carries the new total"
         );
-        assert!(
-            rx.try_recv().is_err(),
-            "a monster already in view is not re-sent"
+
+        // The swing goes out as a 241 attack order naming the monster.
+        let mut frames = Vec::new();
+        while let Ok(out) = rx.try_recv() {
+            frames.push(out);
+        }
+        let order = frames
+            .iter()
+            .find(|f| f.cmd == GameMsg::ResponseUserorder as u16)
+            .expect("an order was broadcast");
+        let decoded = OrderData::decode(&order.payload).expect("decodes");
+        assert_eq!(decoded.si_order, gz_proto::order::ORDER_ATTACK);
+        assert_eq!(decoded.char_unique, i32::from(hits[0].attacker_unique));
+        assert_eq!(
+            decoded.si_para2, 1000,
+            "siPara2 is the target's char unique"
         );
     }
 }

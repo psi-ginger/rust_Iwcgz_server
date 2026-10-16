@@ -50,6 +50,19 @@ use crate::wire::{Reader, WireError};
 /// `ORDER_MOVE` (`CommonHeader.h:174`).
 pub const ORDER_MOVE: i8 = 4;
 
+/// `ORDER_ATTACK` (`CommonHeader.h:521`) — a plain swing at the target whose
+/// char unique rides in `siPara2` (`MakeOrder_ATTACK`, `order.cpp:314-321`).
+///
+/// A monster's attack goes out this way *and* as the 268 hit response: the 241
+/// is what makes a bystander's client play the swing, the 268 is what moves the
+/// HP bar. There is no separate "attack animation" opcode.
+pub const ORDER_ATTACK: i8 = 5;
+
+/// `ORDER_DIE` (`CommonHeader.h:523`) — the death order, broadcast after a
+/// character's life reaches 0 (`char.cpp:9444-9445`,
+/// `char-order.cpp:533`).
+pub const ORDER_DIE: i8 = 7;
+
 /// `ORDER_SITDOWN` (`CommonHeader.h:533`) — the sit leg of the 7231 toggle.
 pub const ORDER_SITDOWN: i8 = 17;
 
@@ -190,6 +203,42 @@ impl OrderData {
     pub fn force_stop_order(char_unique: i32) -> Self {
         Self {
             si_order: ORDER_FORCESTOP,
+            si_host_mode: BY_PLAYER,
+            si_para1: 0,
+            si_para2: 0,
+            si_para3: 0,
+            si_para4: 0,
+            dw_pushed_time: 0,
+            char_unique,
+        }
+    }
+
+    /// The server's canonical `ORDER_ATTACK` (`MakeOrder_ATTACK`,
+    /// `order.cpp:314-321`): `siPara1` and `siPara3` are 0, `siPara2` is the
+    /// *target's* character unique, and `siPara4` is the reserve-order slot the
+    /// legacy passes through (`char-order.cpp:247`) — 0 when nothing is
+    /// reserved.
+    #[must_use]
+    pub fn attack_order(char_unique: i32, target_unique: i16) -> Self {
+        Self {
+            si_order: ORDER_ATTACK,
+            si_host_mode: BY_PLAYER,
+            si_para1: 0,
+            si_para2: target_unique,
+            si_para3: 0,
+            si_para4: 0,
+            dw_pushed_time: 0,
+            char_unique,
+        }
+    }
+
+    /// The server's canonical `ORDER_DIE` (`char.cpp:9445`, `clOrder.Make(
+    /// ORDER_DIE, BY_PLAYER, 0, 0, 0, 0)`): the order and the dying subject,
+    /// everything else zero.
+    #[must_use]
+    pub fn die_order(char_unique: i32) -> Self {
+        Self {
+            si_order: ORDER_DIE,
             si_host_mode: BY_PLAYER,
             si_para1: 0,
             si_para2: 0,
@@ -373,6 +422,31 @@ mod tests {
         assert_eq!(
             OrderData::move_target(0x3FF | (0x2FF << 16)),
             (0x3FF, 0x2FF)
+        );
+    }
+
+    /// The two combat orders, so a broadcast body cannot drift from
+    /// `MakeOrder_ATTACK` / `char.cpp:9445`.
+    #[test]
+    fn the_attack_and_die_orders_carry_their_subject_in_the_legacy_fields() {
+        let attack = OrderData::attack_order(9001, 1471);
+        assert_eq!(attack.si_order, ORDER_ATTACK);
+        assert_eq!(attack.si_host_mode, BY_PLAYER);
+        assert_eq!(attack.si_para2, 1471, "siPara2 is the target's char unique");
+        assert_eq!((attack.si_para1, attack.si_para3), (0, 0));
+        assert_eq!(attack.char_unique, 9001);
+        assert_eq!(
+            OrderData::decode(&attack.encode()).expect("decodes"),
+            attack,
+            "round-trips"
+        );
+
+        let die = OrderData::die_order(9001);
+        assert_eq!(die.si_order, ORDER_DIE);
+        assert_eq!(die.char_unique, 9001);
+        assert_eq!(
+            (die.si_para1, die.si_para2, die.si_para3, die.si_para4),
+            (0, 0, 0, 0)
         );
     }
 

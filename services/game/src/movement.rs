@@ -4518,6 +4518,7 @@ pub(crate) fn next_move_deadline(movement: &Movement, now: Instant) -> Instant {
 /// dropped mid-walk has to land on the tile the character is actually on, and
 /// the captured reference session shows the server broadcasting the start cell
 /// and then each stepped cell (the captured run was 241, 200, 200).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Movement {
     /// Destination from the 240's `siPara1` (`x | (y << 16)`).
     pub(crate) dest: (i32, i32),
@@ -5883,6 +5884,12 @@ mod tests {
             _stats: &gz_db::StatsUpdate,
         ) -> Result<(), RepositoryError> {
             Ok(())
+        }
+
+        /// Like the others, does not track anything; it only reports the delta
+        /// back as the new total so a caller's arithmetic is still exercised.
+        async fn add_exp(&self, _character_id: i32, delta: i64) -> Result<i64, RepositoryError> {
+            Ok(delta)
         }
     }
 

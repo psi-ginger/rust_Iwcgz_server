@@ -838,6 +838,51 @@ impl Registry {
         sent
     }
 
+    /// Rewrites one session's life total after a hit
+    /// (`cltCharServer::DecreaseLife`, `char-common.cpp:1705-1726`).
+    ///
+    /// Returns the new total, or `None` when the key names no session — the
+    /// caller treats that the way the legacy's null `CR[id]` guard does
+    /// (`Server-Attack.cpp:586`) and drops the hit.
+    ///
+    /// Clamped at 0: the legacy's `DecreaseLife` floors there and lets the
+    /// death path decide what happens next, so no underflow reaches a client.
+    pub fn set_life(&self, key: SessionKey, damage: i32) -> Option<u32> {
+        let mut sessions = self.lock();
+        let session = sessions.get_mut(&key)?;
+        let damage = damage.max(0) as u32;
+        session.info.life = session.info.life.saturating_sub(damage);
+        Some(session.info.life)
+    }
+
+    /// Every session standing in the 3×3 cell block around `(x, y)` on `map_id`,
+    /// with its key, ordered by key — the combat-target query, and the same
+    /// predicate [`Self::broadcast_near_point`] uses.
+    ///
+    /// The legacy's `SearchEnemy` (`char-wait.cpp:22-200`) walks its own near
+    /// cell set for targets, so a monster and the frames it sends see the same
+    /// neighbourhood.
+    #[must_use]
+    pub fn sessions_near_point(
+        &self,
+        map_id: i32,
+        x: i32,
+        y: i32,
+    ) -> Vec<(SessionKey, SessionInfo)> {
+        let origin = cell_of(x, y, map_id);
+        let sessions = self.lock();
+        let mut out: Vec<(SessionKey, SessionInfo)> = sessions
+            .iter()
+            .filter(|(_, session)| {
+                session.info.map_id == map_id
+                    && cells_adjacent(origin, cell_of(session.info.x, session.info.y, map_id))
+            })
+            .map(|(key, session)| (*key, session.info.clone()))
+            .collect();
+        out.sort_by_key(|(key, _)| *key);
+        out
+    }
+
     /// Queues one frame for every character of the given home village —
     /// `SendAllPersonHomeMsg` (`CharManager.cpp:751`), which matches
     /// `siHomeVillage == villageunique` and does not exclude the speaker.
