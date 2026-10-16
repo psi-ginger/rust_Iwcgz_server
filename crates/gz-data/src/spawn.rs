@@ -67,7 +67,7 @@
 //! `None` means the position is inside the leash and the caller's own
 //! wander/step logic proceeds (its step gate is [`is_walkable`]).
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::VecDeque;
 
 use crate::map::MapFile;
 
@@ -127,19 +127,136 @@ pub fn is_walkable(map: &MapFile, x: i32, y: i32, block: u16) -> bool {
 /// Every safe spawn tile of `group` for a kind with block mask `block`,
 /// sorted by `(x, y)` for a stable order across restarts. See the module docs
 /// for the two filters (walkable + connected to the centre) and their cites.
+///
+/// Builds a throwaway [`SpawnField`] for the whole map. A caller placing many
+/// groups of one kind on one map should keep one field and call
+/// [`SpawnField::spawn_points`] per group — the connectivity pass is the
+/// expensive half and it does not depend on the group.
 #[must_use]
 pub fn spawn_points(map: &MapFile, group: &SpawnGroup, block: u16) -> Vec<(i32, i32)> {
-    spawn_points_in(
-        map.xsize() as i32,
-        map.ysize() as i32,
-        |x, y| map.coll(x, y),
-        group,
-        block,
-    )
+    SpawnField::new(map, block).spawn_points(group)
+}
+
+/// A map's walkable components for one block mask — the connectivity filter
+/// ([`spawn_points`]) precomputed, so a scheduler placing hundreds of groups
+/// pays for the flood fill once per kind, not once per group.
+#[derive(Debug, Clone)]
+pub struct SpawnField {
+    width: i32,
+    height: i32,
+    /// Component id per tile (`x + y * width`); `-1` is blocked for this mask.
+    label: Vec<i32>,
+}
+
+impl SpawnField {
+    /// Labels every tile of `map` that a kind with mask `block` can stand on
+    /// with its 8-neighbour connected component (the movement rule, module
+    /// docs). One pass; blocking is `cltMapCommon::IsColl`.
+    #[must_use]
+    pub fn new(map: &MapFile, block: u16) -> Self {
+        Self::from_grid(
+            map.xsize() as i32,
+            map.ysize() as i32,
+            |x, y| map.coll(x, y),
+            block,
+        )
+    }
+
+    /// [`Self::new`] over a raw collision grid, so the logic is testable without
+    /// a `.map` file: `coll` answers the `CollMap` cell of any tile.
+    fn from_grid(width: i32, height: i32, coll: impl Fn(i32, i32) -> u16, block: u16) -> Self {
+        let (w, h) = (width.max(0), height.max(0));
+        let walk = |x: i32, y: i32| x >= 0 && y >= 0 && x < w && y < h && (coll(x, y) & block) == 0;
+        let mut label = vec![-1i32; (w as usize) * (h as usize)];
+        let at = |x: i32, y: i32| (x + y * w) as usize;
+        let mut next = 0i32;
+        for sy in 0..h {
+            for sx in 0..w {
+                if label[at(sx, sy)] != -1 || !walk(sx, sy) {
+                    continue;
+                }
+                label[at(sx, sy)] = next;
+                let mut queue = VecDeque::from([(sx, sy)]);
+                while let Some((x, y)) = queue.pop_front() {
+                    for dy in -1..=1 {
+                        for dx in -1..=1 {
+                            if dx == 0 && dy == 0 {
+                                continue;
+                            }
+                            let (nx, ny) = (x + dx, y + dy);
+                            if walk(nx, ny) && label[at(nx, ny)] == -1 {
+                                label[at(nx, ny)] = next;
+                                queue.push_back((nx, ny));
+                            }
+                        }
+                    }
+                }
+                next += 1;
+            }
+        }
+        Self {
+            width: w,
+            height: h,
+            label,
+        }
+    }
+
+    /// The component id of a walkable tile, or `None` when it is out of map or
+    /// blocked.
+    fn label_at(&self, x: i32, y: i32) -> Option<i32> {
+        if x < 0 || y < 0 || x >= self.width || y >= self.height {
+            return None;
+        }
+        let l = self.label[(x + y * self.width) as usize];
+        (l >= 0).then_some(l)
+    }
+
+    /// Every tile of `group`'s leash square that shares the anchor's component —
+    /// the same answer [`spawn_points`] computes, from the precomputed labels.
+    /// Sorted by `(x, y)` for a stable order across restarts.
+    #[must_use]
+    pub fn spawn_points(&self, group: &SpawnGroup) -> Vec<(i32, i32)> {
+        // Anchor: the centre if it is walkable, else the nearest walkable tile of
+        // the leash square in the legacy's expanding-ring order
+        // (`MapCommon.cpp:885-890`).
+        let radius = group.radius.max(0);
+        let mut anchor = None;
+        'ring: for ring in 0..=radius {
+            for dy in -ring..=ring {
+                for dx in -ring..=ring {
+                    if dx.abs() != ring && dy.abs() != ring {
+                        continue;
+                    }
+                    let (x, y) = (group.center_x + dx, group.center_y + dy);
+                    if self.label_at(x, y).is_some() {
+                        anchor = Some((x, y));
+                        break 'ring;
+                    }
+                }
+            }
+        }
+        let Some((ax, ay)) = anchor else {
+            return Vec::new();
+        };
+        let Some(component) = self.label_at(ax, ay) else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        for y in (group.center_y - radius)..=(group.center_y + radius) {
+            for x in (group.center_x - radius)..=(group.center_x + radius) {
+                if self.label_at(x, y) == Some(component) {
+                    out.push((x, y));
+                }
+            }
+        }
+        out.sort_unstable();
+        out
+    }
 }
 
 /// [`spawn_points`] over a raw collision grid, so the logic is testable
-/// without a `.map` file: `coll` answers the `CollMap` cell of any tile.
+/// without a `.map` file.
+#[cfg(test)]
 fn spawn_points_in(
     width: i32,
     height: i32,
@@ -147,55 +264,7 @@ fn spawn_points_in(
     group: &SpawnGroup,
     block: u16,
 ) -> Vec<(i32, i32)> {
-    let walk =
-        |x: i32, y: i32| x >= 0 && y >= 0 && x < width && y < height && (coll(x, y) & block) == 0;
-
-    // Anchor: the centre if it is walkable, else the nearest walkable tile of
-    // the leash square in the legacy's expanding-ring order
-    // (`MapCommon.cpp:885-890`).
-    let radius = group.radius.max(0);
-    let mut anchor = None;
-    'ring: for ring in 0..=radius {
-        for dy in -ring..=ring {
-            for dx in -ring..=ring {
-                if dx.abs() != ring && dy.abs() != ring {
-                    continue;
-                }
-                let (x, y) = (group.center_x + dx, group.center_y + dy);
-                if walk(x, y) {
-                    anchor = Some((x, y));
-                    break 'ring;
-                }
-            }
-        }
-    }
-    let Some((ax, ay)) = anchor else {
-        return Vec::new();
-    };
-
-    // Connectivity: 8-neighbour flood fill from the anchor (diagonals are
-    // movement steps too), then intersect with the leash square.
-    let mut seen = HashSet::from([(ax, ay)]);
-    let mut queue = VecDeque::from([(ax, ay)]);
-    let mut out = Vec::new();
-    while let Some((x, y)) = queue.pop_front() {
-        if group.contains(group.map_index, x, y) {
-            out.push((x, y));
-        }
-        for dy in -1..=1 {
-            for dx in -1..=1 {
-                if dx == 0 && dy == 0 {
-                    continue;
-                }
-                let next = (x + dx, y + dy);
-                if walk(next.0, next.1) && seen.insert(next) {
-                    queue.push_back(next);
-                }
-            }
-        }
-    }
-    out.sort_unstable();
-    out
+    SpawnField::from_grid(width, height, coll, block).spawn_points(group)
 }
 
 #[cfg(test)]

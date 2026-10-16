@@ -24,6 +24,7 @@
 //! | `GAME_CLIENT_COMPAT_VERSION` | no | `siVersion` in `ClientCharUnique` |
 //! | `GAME_SERVICE_AREA` | no | `siServiceArea`; hex, `0x08` = English |
 //! | `GAME_SERVER_UNIQUE` | no | `siServerUnique` |
+//! | `GAME_DATA_ROOT` | no | client data tree the field-monster load reads (default `../New Era Live`) |
 //! | `GAME_HANDSHAKE_TIMEOUT_MS` | no | override for the 10 s handshake window |
 //! | `GAME_CONNECT_TIMEOUT_MS` | no | override for the 7 s outbound connect window |
 //! | `GAME_CLOSE_THROTTLE_MS` | no | override for the 600 ms close throttle |
@@ -34,6 +35,7 @@
 //! variables are now ignored rather than rejected, so a stale one left in a shell
 //! cannot break a launch.
 
+use std::path::PathBuf;
 use std::time::Duration;
 
 use gz_net::SessionTimeouts;
@@ -64,6 +66,12 @@ const DEFAULT_SERVICE_AREA: i16 = 0x08;
 
 const DEFAULT_SERVER_UNIQUE: i16 = 1;
 
+/// The client data tree the field-monster load reads, relative to a `cargo run`
+/// from `goonzu-rs` (`New Era Live\Map\MainMap\MainMap.map`, `NPCGroup\*.txt`,
+/// `Data\KindInfo_Create.txt`, `Data\KindInfo_Unique.txt`). `GAME_DATA_ROOT`
+/// overrides it; a missing tree degrades to an empty field, not a failed start.
+const DEFAULT_DATA_ROOT: &str = "../New Era Live";
+
 /// Everything the game service reads from outside its source.
 #[derive(Debug, Clone)]
 pub struct GameConfig {
@@ -76,6 +84,9 @@ pub struct GameConfig {
     pub service_area: i16,
     pub server_unique: i16,
     pub timeouts: SessionTimeouts,
+    /// The client data tree the field-monster load reads. See
+    /// [`DEFAULT_DATA_ROOT`].
+    pub data_root: PathBuf,
 }
 
 impl GameConfig {
@@ -103,6 +114,10 @@ impl GameConfig {
         let service_area = optional_i16("GAME_SERVICE_AREA", DEFAULT_SERVICE_AREA)?;
         let server_unique = optional_i16("GAME_SERVER_UNIQUE", DEFAULT_SERVER_UNIQUE)?;
 
+        let data_root = std::env::var_os("GAME_DATA_ROOT")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(DEFAULT_DATA_ROOT));
+
         let defaults = SessionTimeouts::default();
         let timeouts = SessionTimeouts {
             handshake: optional_millis("GAME_HANDSHAKE_TIMEOUT_MS", defaults.handshake)?,
@@ -118,6 +133,7 @@ impl GameConfig {
             service_area,
             server_unique,
             timeouts,
+            data_root,
         })
     }
 

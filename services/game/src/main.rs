@@ -50,6 +50,7 @@ use gz_proto::game::{
     CharUnique, GameLogin, decode_select_char, decode_village_struct_request, encode_person_ip,
     encode_person_private_info, encode_response_name,
 };
+use gz_proto::map_geometry::cell_of;
 use gz_proto::opcodes_game::GameMsg;
 use gz_proto::order::OrderData;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -63,6 +64,7 @@ mod chat;
 mod config;
 mod friends;
 mod items;
+mod monsters;
 mod movement;
 mod quest;
 mod registry;
@@ -249,6 +251,25 @@ async fn serve(cfg: &GameConfig) -> Result<(), AnyError> {
     // One table for every connection: the chat family is the first code here
     // that addresses players other than the one asking.
     let registry = Arc::new(Registry::new());
+    // The map-0 field monsters. A failed load (a missing or unreadable data
+    // tree) leaves the world empty rather than refusing to start, the same
+    // posture the quest load takes.
+    let monsters = match monsters::MonsterWorld::load(&cfg.data_root) {
+        Ok(mut world) => {
+            world.spawn_all(&registry);
+            logln!(
+                "game: spawned {} field monster(s) on map {} from {}",
+                world.monster_count(),
+                monsters::FIELD_MAP,
+                cfg.data_root.display()
+            );
+            Arc::new(world)
+        }
+        Err(e) => {
+            logln_err!("game: {e}; no field monsters spawned");
+            Arc::new(monsters::MonsterWorld::empty())
+        }
+    };
     let listener = TcpListener::bind(&cfg.listen).await?;
     logln!("game: listening on {}", cfg.listen);
     logln!(
@@ -270,11 +291,13 @@ async fn serve(cfg: &GameConfig) -> Result<(), AnyError> {
         let friends = friends.clone();
         let quests = quests.clone();
         let registry = registry.clone();
+        let monsters = monsters.clone();
         let peer = peer.to_string();
         let cfg = cfg.clone();
         tokio::spawn(async move {
             if let Err(e) = handle_client(
                 stream, &peer, &cfg, accounts, characters, items, friends, quests, registry,
+                monsters,
             )
             .await
             {
@@ -338,6 +361,7 @@ async fn handle_client(
     friends: PgFriendRepository,
     quests: PgQuestRepository,
     registry: Arc<Registry>,
+    monsters: Arc<monsters::MonsterWorld>,
 ) -> Result<(), AnyError> {
     let mut session_state = Session::new(cfg.timeouts);
     if !session_state.accept(now_tick()) {
@@ -414,7 +438,32 @@ async fn handle_client(
     // to the socket (`Outbound`).
     let (out_tx, mut out_rx) = tokio::sync::mpsc::unbounded_channel::<Outbound>();
 
+    // The `(map, cell)` the session's monsters were last announced for, so the
+    // loop below can tell a walk into a new cell (or a warp) from standing
+    // still. Set at world entry, where the first announce happens.
+    let mut last_seen: Option<(i32, (i32, i32))> = None;
+
     loop {
+        // Monsters the session has newly stepped or warped into view. The design
+        // puts monsters on the same neighbour mechanism as characters (§10.2 of
+        // `DESIGN_MONSTER_COMBAT_AND_AUTOHUNT.md`); with a separate store that is
+        // this one check, and it covers a walk cell crossing, a gate and a map
+        // change alike. A map change is a fresh entry — the old map's cells mean
+        // nothing on the new one — so the whole block is announced.
+        if session_state.state().is_active()
+            && let Some(info) = registry.info(session_key)
+        {
+            let cell = cell_of(info.x, info.y, info.map_id);
+            match last_seen {
+                Some((map_id, was)) if map_id == info.map_id => {
+                    if was != cell {
+                        monsters.announce_new_cells(&registry, session_key, info.map_id, was, cell);
+                    }
+                }
+                _ => monsters.announce_near(&registry, session_key, info.map_id, info.x, info.y),
+            }
+            last_seen = Some((info.map_id, cell));
+        }
         // The handshake window runs from accept to the first inbound frame. Past
         // it, a peer that has said nothing is a silent half-open connection and
         // gets reclaimed rather than parked forever -- the fix the legacy's
@@ -786,6 +835,13 @@ async fn handle_client(
                     // exist at all: the client creates a character only from this
                     // frame (`Client-Login.cpp:53-85`).
                     announce_map_npcs(&registry, session_key, character_id.map_id);
+                    // ...and the field monsters, which are what populate the
+                    // map outside the towns. The loop republishes the rest as
+                    // the player walks; this is the entry cell's first announce.
+                    if let Some(info) = registry.info(session_key) {
+                        monsters.announce_near(&registry, session_key, info.map_id, info.x, info.y);
+                        last_seen = Some((info.map_id, cell_of(info.x, info.y, info.map_id)));
+                    }
                     // The whole of world entry, generated from PostgreSQL: the
                     // context frames, then the character's own state block.
                     //

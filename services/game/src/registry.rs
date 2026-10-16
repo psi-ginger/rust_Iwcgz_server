@@ -802,6 +802,42 @@ impl Registry {
         sent
     }
 
+    /// Queues one frame for every session standing in the 3×3 cell block around
+    /// `(x, y)` on `map_id` — [`Self::broadcast_near`] for a thing that is not a
+    /// session ([`crate::monsters`] announcing a monster that appeared).
+    ///
+    /// Returns how many connections took the frame.
+    pub fn broadcast_near_point(
+        &self,
+        map_id: i32,
+        x: i32,
+        y: i32,
+        cmd: u16,
+        payload: Vec<u8>,
+    ) -> usize {
+        let origin = cell_of(x, y, map_id);
+        let sessions = self.lock();
+        let mut sent = 0;
+        for session in sessions.values() {
+            if session.info.map_id != map_id
+                || !cells_adjacent(origin, cell_of(session.info.x, session.info.y, map_id))
+            {
+                continue;
+            }
+            if session
+                .tx
+                .send(Outbound {
+                    cmd,
+                    payload: payload.clone(),
+                })
+                .is_ok()
+            {
+                sent += 1;
+            }
+        }
+        sent
+    }
+
     /// Queues one frame for every character of the given home village —
     /// `SendAllPersonHomeMsg` (`CharManager.cpp:751`), which matches
     /// `siHomeVillage == villageunique` and does not exclude the speaker.

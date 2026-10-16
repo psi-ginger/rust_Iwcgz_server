@@ -504,6 +504,20 @@ impl MapFile {
     pub fn coll(&self, x: i32, y: i32) -> u16 {
         self.index(x, y).map(|i| self.coll_map[i]).unwrap_or(0)
     }
+
+    /// Read a `.map` file from disk and parse it — the one place a caller gets a
+    /// [`MapFile`] from a path, so the spawn load's file read lives here with the
+    /// rest of the map knowledge.
+    ///
+    /// # Errors
+    ///
+    /// The `io::Error` from the read, or [`io::ErrorKind::InvalidData`] carrying
+    /// [`MapReadError`]'s message when the bytes are not a map.
+    pub fn load(path: &std::path::Path) -> std::io::Result<Self> {
+        let bytes = std::fs::read(path)?;
+        Self::read(&bytes)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))
+    }
 }
 
 #[cfg(test)]
