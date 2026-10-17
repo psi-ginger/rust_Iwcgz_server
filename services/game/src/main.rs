@@ -53,8 +53,8 @@ use gz_proto::combat::{
     HitResponse, RequestHit, ReviveResponse,
 };
 use gz_proto::game::{
-    CharUnique, GameLogin, decode_select_char, decode_village_struct_request, encode_logout,
-    encode_person_ip, encode_person_private_info, encode_response_name,
+    CharUnique, GameLogin, decode_select_char, decode_village_struct_request, encode_person_ip,
+    encode_person_private_info, encode_response_name,
 };
 use gz_proto::map_geometry::cell_of;
 use gz_proto::opcodes_game::GameMsg;
@@ -1896,10 +1896,14 @@ async fn player_swing(
     if !hit.died {
         return Ok(Swing::Landed);
     }
-    // Death: no dedicated opcode. `Life = 0` in the 268 is the first half,
-    // `ORDER_DIE` in a 241 is the animation, and the 11 removes the avatar —
-    // the legacy's `DeleteChar` sequence (`CharManager.cpp:257-277`,
-    // `char.cpp:9444`).
+    // Death: no dedicated opcode. `Life = 0` in the 268 is the first half and
+    // `ORDER_DIE` in a 241 is the animation, which is what this frame is. The
+    // 11 that removes the avatar is deliberately *not* sent here — a client
+    // that receives both in one pass deletes the avatar before the animation
+    // can draw, so the world holds the corpse and `despawn_corpses` sends the
+    // removal once [`monsters::CORPSE_MS`] has run. The legacy reaches the same
+    // place by holding the dead char until its action loop finds it invalid
+    // (`CharManager.cpp:257-277`).
     registry.broadcast_near_point(
         monsters::FIELD_MAP,
         hit.x,
@@ -1908,13 +1912,6 @@ async fn player_swing(
         OrderData::die_order(i32::from(hit.unique))
             .encode()
             .to_vec(),
-    );
-    registry.broadcast_near_point(
-        monsters::FIELD_MAP,
-        hit.x,
-        hit.y,
-        GameMsg::ResponseLogout as u16,
-        encode_logout(i32::from(hit.unique)),
     );
 
     let Some(character_id) = login.as_ref().and_then(|s| s.character_id) else {

@@ -37,7 +37,7 @@ use gz_data::map::MapFile;
 use gz_data::npc::{NPC_CHAR_UNIQUE_BASE, NPC_PLACEMENTS};
 use gz_data::npcgroup;
 use gz_data::spawn::{SpawnField, SpawnGroup, is_walkable};
-use gz_proto::game::client_map_index;
+use gz_proto::game::{client_map_index, encode_logout};
 use gz_proto::loginmany::{LoginManyRecord, NpcRecord, encode_login_many_batches_mixed};
 use gz_proto::map_geometry::{cell_of, cells_adjacent};
 use gz_proto::opcodes_game::GameMsg;
@@ -226,6 +226,11 @@ pub(crate) struct MonsterWorld {
     /// `(group index, when it is due)` — the legacy's respawn gate, one entry
     /// per monster that has died.
     respawn: Vec<(usize, u64)>,
+    /// `(the monster, when its corpse's 11 is due)` — the dead still on the map
+    /// while their death animation plays. Held out of [`Self::monsters`] so a
+    /// corpse cannot be walked into, targeted, or announced to someone who
+    /// walks in late.
+    corpses: Vec<(Monster, u64)>,
     /// Map 0 itself, so the ground can be judged for a *player* and not only for
     /// a spawning monster. `None` in [`MonsterWorld::empty`], which has no ground
     /// either — nothing can be approached from an unloaded world.
@@ -377,6 +382,7 @@ impl MonsterWorld {
             // id ranges cannot overlap (`IsNPC` covers both, `npc.rs`).
             next_unique: u32::from(NPC_CHAR_UNIQUE_BASE) + NPC_PLACEMENTS.len() as u32,
             respawn: Vec::new(),
+            corpses: Vec::new(),
             map: Some(map),
             block_by_kind,
         })
@@ -553,9 +559,10 @@ impl MonsterWorld {
         now_ms: u64,
         rng: &mut Rng,
     ) -> Vec<PlayerHit> {
-        if self.monsters.is_empty() && self.respawn.is_empty() {
+        if self.monsters.is_empty() && self.respawn.is_empty() && self.corpses.is_empty() {
             return Vec::new();
         }
+        self.despawn_corpses(registry, now_ms);
         self.respawn_due(registry, now_ms);
         self.advance_walks(registry, now_ms);
         let mut hits = Vec::new();
@@ -692,6 +699,10 @@ impl MonsterWorld {
 
         if died {
             self.monsters.remove(index);
+            // The corpse stays on the map for its death animation; the 11 that
+            // removes the avatar goes out when [`Self::despawn_corpses`] runs
+            // the deadline down.
+            self.corpses.push((monster, now_ms + CORPSE_MS));
             // The legacy respawns on the group's `Interval`, which is 0 in every
             // shipped field file — so there is no value to honour.
             // shortcut: a fixed delay stands in. Upgrade when a per-group
@@ -730,6 +741,39 @@ impl MonsterWorld {
             max_life,
             drops,
         })
+    }
+
+    /// Removes every corpse whose linger has run out, broadcasting the 11 that
+    /// deletes its avatar (`encode_logout`) to everyone still near the tile it
+    /// died on.
+    ///
+    /// This is the second half of a kill, and it has to be a *second* half: the
+    /// legacy holds a dead char in the manager until its own action loop finds
+    /// it invalid (`CharManager.cpp:257-277`), which gives the client the
+    /// `ORDER_DIE` frame it was sent at death to play out in.
+    fn despawn_corpses(&mut self, registry: &Registry, now_ms: u64) {
+        let mut due = 0;
+        while due < self.corpses.len() {
+            if self.corpses[due].1 > now_ms {
+                due += 1;
+                continue;
+            }
+            let (monster, _) = self.corpses.remove(due);
+            registry.broadcast_near_point(
+                FIELD_MAP,
+                monster.x,
+                monster.y,
+                GameMsg::ResponseLogout as u16,
+                encode_logout(i32::from(monster.unique)),
+            );
+            logln!(
+                "game: monster {} (kind {}) corpse removed at ({}, {})",
+                monster.unique,
+                monster.wire_kind,
+                monster.x,
+                monster.y
+            );
+        }
     }
 
     /// Respawn every group whose deadline has passed, one monster each. The
@@ -1023,6 +1067,19 @@ impl MonsterWorld {
 /// shipped `NPCGroup` files all carry `Interval = 0`, so the legacy's own value
 /// is not available to honour.
 const RESPAWN_MS: u64 = 30_000;
+
+/// How long a corpse stays on the map before the 11 that removes its avatar
+/// goes out.
+///
+/// Death is `ORDER_DIE` first and the removal after it, not both at once — the
+/// legacy holds the char in the manager until its action loop sees it invalid
+/// (`CharManager.cpp:257-277`). Sent together the client deletes the avatar in
+/// the same frame the order arrives, so the death animation is never drawn.
+///
+/// The legacy's own linger is the time its `ORDER_DIE` action takes to run;
+/// 7 s sits inside the 5-10 s the live game showed and clears every shipped
+/// death animation with room to spare.
+const CORPSE_MS: u64 = 7_000;
 
 /// Whether the straight line [`Movement`] would walk from `from` to `to` stays
 /// on `tiles` at every committed step.
@@ -1536,6 +1593,107 @@ mod tests {
         assert_eq!(world.monster_count(), 1);
         assert_ne!(world.monsters[0].unique, unique);
         assert_eq!(world.monsters[0].life, 20);
+    }
+
+    /// A kill leaves a corpse behind, and the 11 that deletes the avatar waits
+    /// out [`CORPSE_MS`] so the `ORDER_DIE` the kill already sent has a client
+    /// left to draw it on. Sent in the same pass the avatar is deleted before
+    /// the animation can run — which is what the live report of a monster
+    /// vanishing with no death animation was.
+    #[test]
+    fn a_killed_monster_keeps_its_corpse_until_the_linger_runs_out() {
+        use crate::registry::{Outbound, SessionInfo};
+
+        let registry = Registry::new();
+        let key = Registry::next_key();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Outbound>();
+        registry.register(
+            key,
+            tx,
+            SessionInfo {
+                char_unique: 1000,
+                name: "Killer".to_owned(),
+                level: 1,
+                map_id: FIELD_MAP,
+                x: 0,
+                y: 0,
+                school_id: 0,
+                class_kind: 1,
+                life: 40,
+                move_speed: 12,
+                sex: 1,
+                gm_level: 0,
+            },
+        );
+
+        let mut world = MonsterWorld::empty();
+        world.groups.push(FieldGroup {
+            anchor: SpawnGroup {
+                map_index: FIELD_MAP,
+                center_x: 0,
+                center_y: 0,
+                radius: 1,
+            },
+            capacity: 1,
+            units: vec![SpawnUnit {
+                wire_kind: 15,
+                level: 1,
+                max_num: 1,
+                move_speed: 12,
+                life: 20,
+                tiles: vec![(0, 0)],
+                min_atk: 1,
+                max_atk: 2,
+                ac: 0,
+                exp: 90,
+                aggressive: 0,
+                range: 1,
+                attack_interval: 2_000,
+                critical_rate: 0,
+                drops: &[],
+            }],
+        });
+        world.spawn_all(&registry);
+        let unique = world.monsters[0].unique;
+        let mut rng = Rng::new(7);
+
+        let hit = world
+            .hit_by_player(unique, 1000, 50, 1_000, &mut rng)
+            .expect("the monster is there");
+        assert!(hit.died);
+        assert_eq!(
+            world.monster_count(),
+            0,
+            "the body leaves the world at once, so nothing can walk into or target it"
+        );
+
+        let logouts = |rx: &mut tokio::sync::mpsc::UnboundedReceiver<Outbound>| {
+            let mut found = Vec::new();
+            while let Ok(out) = rx.try_recv() {
+                if out.cmd == GameMsg::ResponseLogout as u16 {
+                    found.push(out);
+                }
+            }
+            found
+        };
+
+        // One tick short of the deadline the corpse is still there.
+        world.tick(&registry, 1_000 + CORPSE_MS - 1, &mut rng);
+        assert!(
+            logouts(&mut rx).is_empty(),
+            "the avatar is deleted before its death animation could play"
+        );
+
+        // On the deadline it goes, naming the monster that died.
+        world.tick(&registry, 1_000 + CORPSE_MS, &mut rng);
+        let logouts = logouts(&mut rx);
+        assert_eq!(logouts.len(), 1, "exactly one removal, once");
+        let payload = &logouts[0].payload;
+        assert_eq!(payload.len(), 4, "the 11 is one char unique");
+        assert_eq!(
+            i32::from_le_bytes(payload.as_slice().try_into().expect("four bytes")),
+            i32::from(unique)
+        );
     }
 
     /// A monster with no aggressive range never starts a fight, and one whose
