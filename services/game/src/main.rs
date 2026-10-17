@@ -38,7 +38,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use gz_cipher::Cipher;
 use gz_db::{
-    CharacterRepository, FriendRepository, ItemRepository, PgAccountRepository,
+    CharacterFull, CharacterRepository, FriendRepository, ItemRepository, PgAccountRepository,
     PgCharacterRepository, PgFriendRepository, PgItemRepository, PgQuestRepository,
     QuestRepository,
 };
@@ -57,7 +57,7 @@ use gz_proto::game::{
 };
 use gz_proto::map_geometry::cell_of;
 use gz_proto::opcodes_game::GameMsg;
-use gz_proto::order::OrderData;
+use gz_proto::order::{ORDER_ATTACK, ORDER_MOVE, OrderData};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Notify;
@@ -84,7 +84,7 @@ mod world_entry;
 
 use combat::{PlayerAttacks, Rng};
 use config::GameConfig;
-use registry::{MAX_CHAR_NUMBER, Outbound, Registered, Registry, SessionInfo};
+use registry::{MAX_CHAR_NUMBER, Outbound, Registered, Registry, SessionInfo, SessionKey};
 
 // The auth/character-lifecycle family lives in `auth.rs`. The dispatcher calls
 // the login/selectchar/make-new-char/delete handlers; `send_char_list`,
@@ -487,6 +487,16 @@ async fn handle_client(
     // The move being stepped, if any. Driven by the read loop's timer arm; see
     // [`Movement`].
     let mut movement: Option<Movement> = None;
+    // The auto-attack running on this connection, if any: the monster being
+    // swung at and when the next swing falls due.
+    //
+    // This has to live on the server because the client never repeats it —
+    // `cltOrder::MakeOrder` pushes one buffer entry per click and the mouse
+    // handler then clears `siSelectedOrder` (`order.cpp:182`,
+    // `MouseOperation.cpp:771`), so one `ORDER_ATTACK` has to buy the whole
+    // fight. That is also why the legacy sets a persistent order rather than
+    // answering a hit per request (`char-order.cpp:234-238`).
+    let mut attack: Option<(u16, Instant)> = None;
     // Which frames get built from PostgreSQL on the way out.
     let mut live = LiveFrames {
         items: &items,
@@ -558,13 +568,21 @@ async fn handle_client(
         // it, a peer that has said nothing is a silent half-open connection and
         // gets reclaimed rather than parked forever -- the fix the legacy's
         // 10 s check does not deliver. See gz_net::session.
+        //
+        // On a live session the wait instead runs until the next thing this
+        // connection owes the world: a step landing, or a swing falling due,
+        // whichever comes first.
         let read_window = if !session_state.state().is_active() {
             Some(cfg.timeouts.handshake)
-        } else if let Some(mv) = movement.as_ref() {
-            mv.deadline
-                .map(|dl| dl.saturating_duration_since(Instant::now()))
         } else {
-            None
+            let now = Instant::now();
+            movement
+                .as_ref()
+                .and_then(|mv| mv.deadline)
+                .into_iter()
+                .chain(attack.as_ref().map(|&(_, due)| due))
+                .min()
+                .map(|due| due.saturating_duration_since(now))
         };
         let tick = tokio::select! {
             read = stream.read(&mut buf) => LoopTick::Read(read),
@@ -615,6 +633,56 @@ async fn handle_client(
                         if let Some(mv) = movement.as_mut() {
                             mv.deadline = Some(next_move_deadline(mv, Instant::now()));
                         }
+                    }
+                    // An auto-attack swing that has fallen due. The client
+                    // queued `ORDER_ATTACK` once and never repeats it — one
+                    // buffer entry per click, then `siSelectedOrder` is cleared
+                    // (`order.cpp:182`, `MouseOperation.cpp:771`) — so keeping
+                    // the cadence is this loop's job.
+                    if let Some((target, due)) = attack
+                        && due <= Instant::now()
+                    {
+                        attack = match live.character.as_ref() {
+                            Some(character) => {
+                                let (ax, ay) = match movement.as_ref() {
+                                    Some(mv) => mv.pos,
+                                    None => (character.pos_x, character.pos_y),
+                                };
+                                let class_kind = u16::try_from(character.class_kind).unwrap_or(1);
+                                let outcome = player_swing(
+                                    &registry,
+                                    monsters.as_ref(),
+                                    player_attacks.as_ref(),
+                                    &mut combat_rng,
+                                    &characters,
+                                    &items,
+                                    session_key,
+                                    &login,
+                                    character,
+                                    (ax, ay),
+                                    target,
+                                )
+                                .await?;
+                                // `OutOfRange` waits instead of ending the fight:
+                                // the legacy closes the distance itself
+                                // (`CHARWORKSTEP_DECIDELENGTH`,
+                                // `char-order.cpp:236`) and this port does not
+                                // yet, so a target that merely stepped aside is
+                                // still a target. shortcut: no auto-approach —
+                                // a player who walks off issues `ORDER_MOVE`,
+                                // which ends the attack.
+                                (outcome != Swing::NoTarget).then(|| {
+                                    (
+                                        target,
+                                        Instant::now()
+                                            + Duration::from_millis(
+                                                player_attacks.interval(class_kind),
+                                            ),
+                                    )
+                                })
+                            }
+                            None => None,
+                        };
                     }
                     continue;
                 }
@@ -1162,6 +1230,62 @@ async fn handle_client(
                         character.pos_y = mv.pos.1;
                     }
                     let order = OrderData::decode(payload.as_ref())?;
+                    if order.si_order == ORDER_ATTACK {
+                        // This is the attack the client actually sends: one
+                        // order per click, never repeated (`MouseOperation.cpp:5631`,
+                        // `Client.cpp:3299`). The legacy answers it by setting a
+                        // persistent order rather than by resolving the hit
+                        // here (`char-order.cpp:226-263`), so this arm starts
+                        // the fight and the read loop's timer arm lands the
+                        // swings on the weapon's interval.
+                        //
+                        // The same 200 ms gate as 267 — `CheckLastMsgClock(200)`
+                        // covers the whole request side (`Server-Person.cpp:2760`).
+                        if now_tick().saturating_sub(last_attack_ms) < HIT_THROTTLE_MS {
+                            continue;
+                        }
+                        last_attack_ms = now_tick();
+                        // `siPara2` is the target's char unique
+                        // (`cltOrder::MakeOrder`, `order.cpp:155`). Anything
+                        // outside the monster block is a player and PVP is out
+                        // of scope, so a target that does not parse is skipped
+                        // here and the world's own lookup rejects it again
+                        // on the swing.
+                        let Ok(target_unique) = u16::try_from(order.si_para2) else {
+                            continue;
+                        };
+                        let Some(me) = registry.info(session_key) else {
+                            continue;
+                        };
+                        if me.life == 0 {
+                            continue;
+                        }
+                        // A PC's swing goes to its neighbours and not to itself
+                        // (`SendNeighbourExceptMeMsg`, `char-order.cpp:254`):
+                        // the attacker's own client already started the
+                        // animation when the click landed (`OrderOperation` →
+                        // `LetOrder`, `Client.cpp:3297`).
+                        registry.broadcast_near_others(
+                            &me,
+                            session_key,
+                            GameMsg::ResponseUserorder as u16,
+                            OrderData::attack_order(i32::from(me.char_unique), order.si_para2)
+                                .encode()
+                                .to_vec(),
+                        );
+                        // Armed for "now": the next pass of the read loop lands
+                        // the first swing, then re-arms on the interval.
+                        attack = Some((target_unique, Instant::now()));
+                        continue;
+                    }
+                    // Every other order takes over from the fight. In this port
+                    // `handle_userorder` accepts `ORDER_MOVE` alone, so a walk
+                    // is also the only thing that cancels it — which mirrors the
+                    // legacy's `clCurOrder.Set(&ReserveOrder)` replacing the
+                    // attack order outright.
+                    if order.si_order == ORDER_MOVE {
+                        attack = None;
+                    }
                     match handle_userorder(
                         &mut stream,
                         &mut outbound,
@@ -1218,145 +1342,20 @@ async fn handle_client(
                         Some(mv) => mv.pos,
                         None => (character.pos_x, character.pos_y),
                     };
-                    let claimed = &request.cl_attack_target.cl_pos;
-                    // `IsInRange` compares the attacker to the tile the client
-                    // claims, not to the server's copy — the client is the one
-                    // with the target under its cursor.
-                    let range =
-                        player_attacks.range(u16::try_from(character.class_kind).unwrap_or(1));
-                    if (i32::from(claimed.si_x) - ax).abs() > range
-                        || (i32::from(claimed.si_y) - ay).abs() > range
-                    {
-                        continue;
-                    }
-                    // A dead character cannot swing (the legacy's `IsAlive`
-                    // guard, `Server-Person.cpp:2758`).
-                    if registry.info(session_key).is_none_or(|s| s.life == 0) {
-                        continue;
-                    }
-                    let class_kind = u16::try_from(character.class_kind).unwrap_or(1);
-                    let (min, max) = player_attacks.raw_power(
-                        class_kind,
-                        character.str,
-                        i32::from(character.level),
-                    );
-                    let raw = combat::roll_power(min, max, combat_rng.up_to((max - min).max(0)));
-                    let crit = combat::apply_critical(
-                        raw,
-                        player_attacks.critical_rate(class_kind),
-                        combat_rng.up_to(99),
-                    );
-
-                    let hit = {
-                        let mut world = monsters
-                            .lock()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner);
-                        world.hit_by_player(target_unique, crit, now_tick(), &mut combat_rng)
-                    };
-                    // A target the world does not hold — a player, a static NPC,
-                    // or a monster that just died. The legacy's null `CR[id]`
-                    // guard drops the hit the same way (`:586`).
-                    let Some(hit) = hit else { continue };
-
-                    // The 268 answers the *target*, so everyone near the monster
-                    // sees the same frame (`Server-Attack.cpp:2775`).
-                    registry.broadcast_near_point(
-                        monsters::FIELD_MAP,
-                        hit.x,
-                        hit.y,
-                        GameMsg::ResponseHit as u16,
-                        HitResponse {
-                            char_unique: hit.unique as i16,
-                            damage: hit.damage,
-                            double_damage: 0,
-                            life: hit.life as i32,
-                            mode: 0,
-                            special_attack_switch: 0,
-                            b_indure: false,
-                            b_miss_hit: false,
-                            b_dodge_hit: false,
-                            ui_type: HIT_TARGET_MONSTER,
-                        }
-                        .encode()
-                        .to_vec(),
-                    );
-
-                    if !hit.died {
-                        continue;
-                    }
-                    // Death: no dedicated opcode. `Life = 0` in the 268 is the
-                    // first half, `ORDER_DIE` in a 241 is the animation, and the
-                    // 11 removes the avatar — the legacy's `DeleteChar` sequence
-                    // (`CharManager.cpp:257-277`, `char.cpp:9444`).
-                    registry.broadcast_near_point(
-                        monsters::FIELD_MAP,
-                        hit.x,
-                        hit.y,
-                        GameMsg::ResponseUserorder as u16,
-                        OrderData::die_order(i32::from(hit.unique))
-                            .encode()
-                            .to_vec(),
-                    );
-                    registry.broadcast_near_point(
-                        monsters::FIELD_MAP,
-                        hit.x,
-                        hit.y,
-                        GameMsg::ResponseLogout as u16,
-                        encode_logout(i32::from(hit.unique)),
-                    );
-
-                    let Some(character_id) = login.as_ref().and_then(|s| s.character_id) else {
-                        continue;
-                    };
-                    // `GetExp`'s share, per hit and not per kill
-                    // (`Server-Attack.cpp:4138`).
-                    let gained = combat::exp_for_hit(
-                        hit.exp,
-                        hit.level,
-                        crit,
-                        i32::try_from(hit.max_life).unwrap_or(i32::MAX),
-                    );
-                    if gained > 0 {
-                        characters.add_exp(character_id, gained).await?;
-                        registry.send_to(
-                            session_key,
-                            GameMsg::ResponseGetexp as u16,
-                            GetExpResponse {
-                                si_char_unique: char_unique as i16,
-                                si_reason: 0,
-                                si_exp: gained.min(i32::MAX as i64) as i32,
-                                si_fame_exp: 0,
-                            }
-                            .encode()
-                            .to_vec(),
-                        );
-                    }
-                    // `GetRandDropItem` rolled at most one entry at death
-                    // (`kindinfo-Manager.cpp:68-107`); grant it into the bag.
-                    for (item_unique, count) in hit.drops {
-                        let Ok(item_unique) = u16::try_from(item_unique) else {
-                            continue;
-                        };
-                        match items.grant(character_id, item_unique, count).await {
-                            // shortcut: granted to the database only. The legacy
-                            // answers a grant with a `PERSONITEMINFO` slot
-                            // update (`Server-Item.cpp:1287`); until this port
-                            // can rebuild an `Item` from the stored record the
-                            // client picks the drop up on its next inventory
-                            // refresh instead.
-                            Ok(Some(item)) => logln!(
-                                "game: character {character_id} received item \
-                                 {item_unique} x{} (slot {})",
-                                item.count,
-                                item.slot
-                            ),
-                            Ok(None) => logln_err!(
-                                "game: drop {item_unique} found no free slot for \
-                                 character {character_id}"
-                            ),
-                            Err(e) => logln_err!("game: drop grant failed: {e}"),
-                        }
-                    }
+                    player_swing(
+                        &registry,
+                        monsters.as_ref(),
+                        player_attacks.as_ref(),
+                        &mut combat_rng,
+                        &characters,
+                        &items,
+                        session_key,
+                        &login,
+                        character,
+                        (ax, ay),
+                        target_unique,
+                    )
+                    .await?;
                 }
                 c if c == GameMsg::RequestSitdown as u16 => {
                     // 7231: the sit/stand toggle (T-018 slice 6 B4, sit/stand
@@ -1608,6 +1607,188 @@ struct GameSession {
     /// The logged-in account's name (`accounts.username`). Char-list/create
     /// messages echo this back to the client inside `cltCharListInfo.clBI.szAccountID`.
     username: String,
+}
+
+/// What one swing did, so a caller holding an engagement can tell "wait for a
+/// better moment" from "there is nobody there".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Swing {
+    /// Damage went out and the target took it.
+    Landed,
+    /// The target is a monster, just not close enough yet.
+    OutOfRange,
+    /// The swing could not be thrown at all: the attacker is dead, or no
+    /// monster stands on that tile. Either way there is nothing to keep
+    /// swinging at.
+    NoTarget,
+}
+
+/// Resolves one player swing against a field monster, end to end: the range
+/// gate, the power and crit rolls, the 268 that carries the new life, and — on
+/// a kill — the death frames, the EXP grant and the drop roll.
+///
+/// One body serves both wire shapes that reach it. `REQUEST_HIT` (267) is what
+/// the design doc assumed, but the shipped client only ever built it inside a
+/// commented-out block (`char-attack.cpp:2100-2109`); the attack it really
+/// sends is `ORDER_ATTACK` (5) inside `REQUEST_USERORDER` (240)
+/// (`MouseOperation.cpp:5631`, `Client.cpp:3299`), and that is what makes this
+/// worth sharing rather than duplicating.
+#[allow(clippy::too_many_arguments)]
+async fn player_swing(
+    registry: &Registry,
+    monsters: &Mutex<monsters::MonsterWorld>,
+    player_attacks: &PlayerAttacks,
+    combat_rng: &mut Rng,
+    characters: &PgCharacterRepository,
+    items: &PgItemRepository,
+    session_key: SessionKey,
+    login: &Option<GameSession>,
+    character: &CharacterFull,
+    (ax, ay): (i32, i32),
+    target_unique: u16,
+) -> Result<Swing, AnyError> {
+    // A dead character cannot swing (the legacy's `IsAlive` guard,
+    // `Server-Person.cpp:2758`). `me` also carries this session's own unique,
+    // which is the only attacker id the world needs.
+    let Some(me) = registry.info(session_key) else {
+        return Ok(Swing::NoTarget);
+    };
+    if me.life == 0 {
+        return Ok(Swing::NoTarget);
+    }
+    let class_kind = u16::try_from(character.class_kind).unwrap_or(1);
+    let range = player_attacks.range(class_kind);
+    let (min, max) =
+        player_attacks.raw_power(class_kind, character.str, i32::from(character.level));
+    let raw = combat::roll_power(min, max, combat_rng.up_to((max - min).max(0)));
+    let crit = combat::apply_critical(
+        raw,
+        player_attacks.critical_rate(class_kind),
+        combat_rng.up_to(99),
+    );
+
+    let hit = {
+        let mut world = monsters
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // The gate reads the monster's own tile rather than one the client
+        // claimed (`IsInRange` reads `pcltarget->clPos`,
+        // `Server-Person.cpp:2765`): the claim adds nothing a server-side
+        // lookup does not already have, and a client does not get to name the
+        // distance.
+        let Some((tx, ty)) = world.position(target_unique) else {
+            return Ok(Swing::NoTarget);
+        };
+        if (tx - ax).abs() > range || (ty - ay).abs() > range {
+            return Ok(Swing::OutOfRange);
+        }
+        world.hit_by_player(target_unique, me.char_unique, crit, now_tick(), combat_rng)
+    };
+    // A target the world does not hold — a player, a static NPC, or a monster
+    // that just died between the lookup and the hit. The legacy's null `CR[id]`
+    // guard drops the hit the same way (`Server-Attack.cpp:586`).
+    let Some(hit) = hit else {
+        return Ok(Swing::NoTarget);
+    };
+
+    // The 268 answers the *target*, so everyone near the monster sees the same
+    // frame (`Server-Attack.cpp:2775`).
+    registry.broadcast_near_point(
+        monsters::FIELD_MAP,
+        hit.x,
+        hit.y,
+        GameMsg::ResponseHit as u16,
+        HitResponse {
+            char_unique: hit.unique as i16,
+            damage: hit.damage,
+            double_damage: 0,
+            life: hit.life as i32,
+            mode: 0,
+            special_attack_switch: 0,
+            b_indure: false,
+            b_miss_hit: false,
+            b_dodge_hit: false,
+            ui_type: HIT_TARGET_MONSTER,
+        }
+        .encode()
+        .to_vec(),
+    );
+
+    if !hit.died {
+        return Ok(Swing::Landed);
+    }
+    // Death: no dedicated opcode. `Life = 0` in the 268 is the first half,
+    // `ORDER_DIE` in a 241 is the animation, and the 11 removes the avatar —
+    // the legacy's `DeleteChar` sequence (`CharManager.cpp:257-277`,
+    // `char.cpp:9444`).
+    registry.broadcast_near_point(
+        monsters::FIELD_MAP,
+        hit.x,
+        hit.y,
+        GameMsg::ResponseUserorder as u16,
+        OrderData::die_order(i32::from(hit.unique))
+            .encode()
+            .to_vec(),
+    );
+    registry.broadcast_near_point(
+        monsters::FIELD_MAP,
+        hit.x,
+        hit.y,
+        GameMsg::ResponseLogout as u16,
+        encode_logout(i32::from(hit.unique)),
+    );
+
+    let Some(character_id) = login.as_ref().and_then(|s| s.character_id) else {
+        // `GetExp`'s share, per hit and not per kill
+        // (`Server-Attack.cpp:4138`) needs an owning row; without one the kill
+        // still stands and only the reward is lost.
+        return Ok(Swing::Landed);
+    };
+    let gained = combat::exp_for_hit(
+        hit.exp,
+        hit.level,
+        crit,
+        i32::try_from(hit.max_life).unwrap_or(i32::MAX),
+    );
+    if gained > 0 {
+        characters.add_exp(character_id, gained).await?;
+        registry.send_to(
+            session_key,
+            GameMsg::ResponseGetexp as u16,
+            GetExpResponse {
+                si_char_unique: me.char_unique,
+                si_reason: 0,
+                si_exp: gained.min(i32::MAX as i64) as i32,
+                si_fame_exp: 0,
+            }
+            .encode()
+            .to_vec(),
+        );
+    }
+    // `GetRandDropItem` rolled at most one entry at death
+    // (`kindinfo-Manager.cpp:68-107`); grant it into the bag.
+    for (item_unique, count) in hit.drops {
+        let Ok(item_unique) = u16::try_from(item_unique) else {
+            continue;
+        };
+        match items.grant(character_id, item_unique, count).await {
+            // shortcut: granted to the database only. The legacy answers a
+            // grant with a `PERSONITEMINFO` slot update
+            // (`Server-Item.cpp:1287`); until this port can rebuild an `Item`
+            // from the stored record the client picks the drop up on its next
+            // inventory refresh instead.
+            Ok(Some(item)) => logln!(
+                "game: character {character_id} received item {item_unique} x{} (slot {})",
+                item.count,
+                item.slot
+            ),
+            Ok(None) => logln_err!(
+                "game: drop {item_unique} found no free slot for character {character_id}"
+            ),
+            Err(e) => logln_err!("game: drop grant failed: {e}"),
+        }
+    }
+    Ok(Swing::Landed)
 }
 
 async fn send_encoded(

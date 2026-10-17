@@ -232,6 +232,28 @@ impl PlayerAttacks {
             .get(&class_kind)
             .map_or(1, |row| row.range.max(1))
     }
+
+    /// The swing cadence for `class_kind`, in milliseconds — the column the
+    /// legacy's attack animation, and therefore its `HitOperation`, runs on
+    /// (`dwAttackInterval`, `:703`).
+    ///
+    /// This is what makes one click start an ongoing fight: the client queues a
+    /// single `ORDER_ATTACK` (`cltOrder::MakeOrder` pushes one entry and the
+    /// mouse handler then clears `siSelectedOrder`, `order.cpp:182`,
+    /// `MouseOperation.cpp:771`) and never re-sends it, so the server has to
+    /// keep swinging on its own.
+    ///
+    /// A kind with no row gets 1000 ms, the most common shipped value. A row
+    /// reading 0 would re-arm the read loop with a zero sleep and spin it, so
+    /// the result is floored at 100 ms.
+    #[must_use]
+    pub(crate) fn interval(&self, class_kind: u16) -> u64 {
+        self.by_kind.get(&class_kind).map_or(1_000, |row| {
+            u64::try_from(row.attack_interval)
+                .unwrap_or(1_000)
+                .clamp(100, 60_000)
+        })
+    }
 }
 
 /// A deterministic PRNG for the combat rolls, so a test can replay a fight
@@ -412,5 +434,28 @@ mod tests {
         );
         // The spread has to contain the minimum.
         assert!(roll_power(min, max, 0) >= min);
+    }
+
+    /// The cadence the read loop arms a next swing with. A kind with no row
+    /// must fall back rather than arm a zero-length sleep, and a shipped class
+    /// must land inside the clamp — both are what keep the auto-attack loop
+    /// from spinning.
+    #[test]
+    fn the_swing_interval_is_always_arming_distance() {
+        let root = std::path::Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../New Era Live"
+        ));
+        let attacks = PlayerAttacks::load(root).expect("the data root is readable");
+        assert_eq!(
+            attacks.interval(u16::MAX),
+            1_000,
+            "an unjoined kind defaults"
+        );
+        assert!(attacks.interval(1) >= 100, "never re-arms immediately");
+        assert!(
+            attacks.interval(1) <= 60_000,
+            "never parks for a quarter hour"
+        );
     }
 }

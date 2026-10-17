@@ -538,6 +538,16 @@ impl MonsterWorld {
         hits
     }
 
+    /// The live tile a monster stands on, for a range gate that must read the
+    /// server's copy of the target rather than one the client claimed. `None`
+    /// for a monster the world does not hold.
+    pub(crate) fn position(&self, monster_unique: u16) -> Option<(i32, i32)> {
+        self.monsters
+            .iter()
+            .find(|m| m.unique == monster_unique)
+            .map(|m| (m.x, m.y))
+    }
+
     /// Applies one player's swing to one monster and returns what it did. A
     /// monster that dies is removed here — the body is deleted in the same pass
     /// the legacy's `DeleteChar` runs in (`CharManager.cpp:257-277`) — and its
@@ -550,9 +560,18 @@ impl MonsterWorld {
     ///
     /// `now_ms` is the respawn clock; the drop rolls come from the caller's RNG
     /// so a test can replay a fight exactly.
+    ///
+    /// `attacker` is the struck character's unique. It becomes this monster's
+    /// target, which is how a passive kind fights back: the legacy records the
+    /// attacker on the *defender* (`SetBeAttackedSwitch`,
+    /// `Server-Attack.cpp:587`) and the defender's own wait tick turns it into
+    /// an order (`BeAttackedAction` → `FindEnemyAction` → `OrderAttack`,
+    /// `CharServer-Attack.cpp:144`, `charorg.cpp:112`). `siAggressive` gates
+    /// only `SearchEnemy`, so it is never consulted for retaliation.
     pub(crate) fn hit_by_player(
         &mut self,
         monster_unique: u16,
+        attacker: i16,
         raw_power: i32,
         now_ms: u64,
         rng: &mut Rng,
@@ -605,6 +624,9 @@ impl MonsterWorld {
             );
         } else {
             self.monsters[index].life = new_life;
+            // Retaliation. Only a survivor holds a grudge — a monster removed
+            // above is not in the vector to hold one.
+            self.monsters[index].target = Some(attacker);
         }
 
         Some(MonsterHit {
@@ -1193,16 +1215,23 @@ mod tests {
         let mut rng = Rng::new(7);
 
         let hit = world
-            .hit_by_player(unique, 5, 1_000, &mut rng)
+            .hit_by_player(unique, 1000, 5, 1_000, &mut rng)
             .expect("the monster is there");
         assert_eq!(hit.life, 15);
         assert_eq!(hit.damage, 5, "ac 0 takes nothing off");
         assert!(!hit.died);
         assert!(hit.drops.is_empty());
         assert_eq!(world.monster_count(), 1);
+        // Retaliation does not wait on `siAggressive`: this unit's is 0, and
+        // the struck monster still turns on who hit it.
+        assert_eq!(
+            world.monsters[0].target,
+            Some(1000),
+            "a survivor targets its attacker"
+        );
 
         let hit = world
-            .hit_by_player(unique, 50, 1_000, &mut rng)
+            .hit_by_player(unique, 1000, 50, 1_000, &mut rng)
             .expect("the monster is still there");
         assert_eq!(hit.life, 0);
         assert!(hit.died);
