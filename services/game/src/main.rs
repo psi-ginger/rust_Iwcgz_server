@@ -56,6 +56,7 @@ use gz_proto::game::{
     CharUnique, GameLogin, decode_select_char, decode_village_struct_request, encode_person_ip,
     encode_person_private_info, encode_response_name,
 };
+use gz_proto::item::{Item, encode_person_item_gained};
 use gz_proto::map_geometry::cell_of;
 use gz_proto::opcodes_game::GameMsg;
 use gz_proto::order::{ORDER_ATTACK, ORDER_MOVE, OrderData};
@@ -1955,16 +1956,29 @@ async fn player_swing(
             continue;
         };
         match items.grant(character_id, item_unique, count).await {
-            // shortcut: granted to the database only. The legacy answers a
-            // grant with a `PERSONITEMINFO` slot update
-            // (`Server-Item.cpp:1287`); until this port can rebuild an `Item`
-            // from the stored record the client picks the drop up on its next
-            // inventory refresh instead.
-            Ok(Some(item)) => logln!(
-                "game: character {character_id} received item {item_unique} x{} (slot {})",
-                item.count,
-                item.slot
-            ),
+            // One 7210 does both halves of "the drop landed": it writes the
+            // slot, so the item is in the bag without a relog, and because it
+            // carries `OPTION_SHOW` with a non-zero `siChangedNum` the client
+            // also *says* so — `ItemGetChatRecv` puts "Obtained <name> x<n>" in
+            // the loot line and `SetItemData` raises the acquisition popup
+            // (`Client-Person-BigInfo.cpp:1054-1093`).
+            Ok(Some(granted)) => {
+                let gained = encode_person_item_gained(
+                    granted.slot,
+                    granted.count,
+                    &Item::from_raw(&granted.raw),
+                );
+                registry.send_to(
+                    session_key,
+                    GameMsg::ResponsePersoniteminfo as u16,
+                    gained.to_vec(),
+                );
+                logln!(
+                    "game: character {character_id} received item {item_unique} x{} (slot {})",
+                    granted.count,
+                    granted.slot
+                );
+            }
             Ok(None) => logln_err!(
                 "game: drop {item_unique} found no free slot for character {character_id}"
             ),

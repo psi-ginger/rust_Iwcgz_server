@@ -181,6 +181,21 @@ impl Item {
         item
     }
 
+    /// Rebuilds a record from a stored slot's bytes.
+    ///
+    /// The repositories keep a slot's whole `cltItem` as `Vec<u8>`
+    /// (`gz_db::item::CharacterItem::raw`); this is the way back to a wire
+    /// [`Item`]. A wrong-length slice is a caller bug rather than a recoverable
+    /// state, so anything short is padded out to an empty record and anything
+    /// long is truncated — never a panic on the path that grants a drop.
+    #[must_use]
+    pub fn from_raw(raw: &[u8]) -> Self {
+        let mut item = Self::empty();
+        let n = raw.len().min(CLT_ITEM_SIZE);
+        item.raw[..n].copy_from_slice(&raw[..n]);
+        item
+    }
+
     /// `cltItem.siUnique` — the item-table row id. `0` means the slot is empty.
     #[must_use]
     pub fn unique(&self) -> u16 {
@@ -374,11 +389,30 @@ pub fn decode_split_item(payload: &[u8]) -> Result<(u16, u16, i32), WireError> {
 }
 
 /// The `GAMEMSG_RESPONSE_PERSONITEMINFO` (7210) `siOption` values this server
-/// emits. The header defines 45 of them (`MsgType.h:3356`); the drop and
-/// move-rejection paths both use plain `NONE`.
+/// emits. The header defines 45 of them (`MsgType.h:3320-3354`); the port uses
+/// two — `NONE` for a bare slot write, `SHOW` for an item *arriving*, which is
+/// the only difference between "keep the bag in step" and "tell the player they
+/// got something".
 pub mod personiteminfo {
     /// `PERSONITEMINFO_OPTION_NONE` — a bare slot update, no extra meaning.
     pub const OPTION_NONE: u16 = 0;
+
+    /// `PERSONITEMINFO_OPTION_SHOW` — "display the item on screen"
+    /// (`MsgType.h:3321`).
+    ///
+    /// The client's `siOption` switch (`Client-Person-BigInfo.cpp:1054-1096`)
+    /// sends this case two places, and **both only fire while `siChangedNum` is
+    /// non-zero** (`:1073`):
+    ///
+    /// - `CNChatBarDlg::ItemGetChatRecv(itemname, itemCnt, price)`
+    ///   (`NChatBarDlg.cpp:950`) renders the loot line from text resource 2394
+    ///   — *"Obtained &lt;name&gt; x&lt;count&gt;"* — in `CHATEDIT_COLOR_GREEN`;
+    /// - `CNShowGetItemDlg::SetItemData` raises the item-acquisition popup
+    ///   (`DLG_NShowGetItem.ddf`).
+    ///
+    /// So one 7210 carries both the slot write and the loot notice. Sending
+    /// `NONE` with a zero count gets neither.
+    pub const OPTION_SHOW: u16 = 1;
 }
 
 /// Size of `cltGameMsgResponse_PersonItemInfo` (`MsgType.h:3356`) on the wire.
@@ -542,10 +576,47 @@ pub fn decode_inv_pickup(payload: &[u8]) -> Result<InvPickupRequest, WireError> 
 /// drop path (`ServerDB-Item.cpp:2833`) and the capture's single frame.
 #[must_use]
 pub fn encode_person_item_info(slot: u16, item: &Item) -> [u8; PERSON_ITEM_INFO_SIZE] {
+    person_item_info(slot, personiteminfo::OPTION_NONE, 0, item)
+}
+
+/// The 7210 for an item *arriving* in the bag — the same 104 bytes as
+/// [`encode_person_item_info`], but carrying [`personiteminfo::OPTION_SHOW`]
+/// and the count in `siChangedNum`.
+///
+/// Those two fields are the whole difference between "keep the client's copy of
+/// the slot in step" and "tell the player they got something". The client's
+/// `siOption` switch renders the loot line and the acquisition popup only for
+/// that case, and only while `siChangedNum` is non-zero
+/// (`Client-Person-BigInfo.cpp:1054-1093`). See [`personiteminfo::OPTION_SHOW`]
+/// for what the player ends up seeing.
+#[must_use]
+pub fn encode_person_item_gained(
+    slot: u16,
+    count: i32,
+    item: &Item,
+) -> [u8; PERSON_ITEM_INFO_SIZE] {
+    // `siChangedNum` is `SI16` (`MsgType.h:3361`). A count past `i16::MAX` means
+    // the caller is broken rather than that the bag holds a fortune, so clamp —
+    // a truncated negative would be read by the client as "say nothing at all".
+    person_item_info(
+        slot,
+        personiteminfo::OPTION_SHOW,
+        i16::try_from(count).unwrap_or(i16::MAX),
+        item,
+    )
+}
+
+fn person_item_info(
+    slot: u16,
+    option: u16,
+    changed_num: i16,
+    item: &Item,
+) -> [u8; PERSON_ITEM_INFO_SIZE] {
     let mut out = [0u8; PERSON_ITEM_INFO_SIZE];
     out[0..2].copy_from_slice(&slot.to_le_bytes());
-    out[2..4].copy_from_slice(&personiteminfo::OPTION_NONE.to_le_bytes());
-    // 4..6 siChangedNum and 8..12 siExp stay zero.
+    out[2..4].copy_from_slice(&option.to_le_bytes());
+    out[4..6].copy_from_slice(&changed_num.to_le_bytes());
+    // 6..8 is the /Zp8 pad and 8..12 is siExp; both stay zero.
     out[12..12 + CLT_ITEM_SIZE].copy_from_slice(&item.raw);
     // 96..104 siPrice stays zero.
     out
@@ -855,6 +926,61 @@ mod tests {
         let bytes = encode_person_item_info(9, &item);
         assert_eq!(&bytes[12..96], &item.encode());
         assert_eq!(Item::decode(&bytes[12..]).unwrap(), item);
+    }
+
+    /// A grant goes out as `OPTION_SHOW` with the count in `siChangedNum`, and
+    /// those four bytes are the *only* difference from a bare slot write.
+    ///
+    /// They are worth pinning because the client gates everything the owner
+    /// asked for on them: `Client-Person-BigInfo.cpp:1054` switches on
+    /// `siOption`, and `:1073` refuses to render anything while
+    /// `siChangedNum` is 0. With `OPTION_NONE` the slot still updates — the
+    /// drop was always reaching the bag — but the player is never told.
+    #[test]
+    fn a_gained_item_differs_from_a_bare_slot_write_only_in_the_notice_fields() {
+        let item = Item::from_unique(1500, 3);
+        let bare = encode_person_item_info(9, &item);
+        let gained = encode_person_item_gained(9, 3, &item);
+
+        assert_eq!(bare[2..4], [0, 0], "a bare write carries OPTION_NONE");
+        assert_eq!(gained[2..4], [1, 0], "a grant carries OPTION_SHOW");
+        assert_eq!(bare[4..6], [0, 0], "a bare write carries no changed count");
+        assert_eq!(
+            gained[4..6],
+            [3, 0],
+            "and a grant carries the granted count"
+        );
+
+        // Position, padding, siExp, the record and siPrice are byte for byte
+        // the same frame.
+        assert_eq!(bare[..2], gained[..2]);
+        assert_eq!(bare[6..], gained[6..]);
+
+        // A count past SI16 clamps rather than truncating into a negative,
+        // which the client would read as "say nothing at all".
+        assert_eq!(
+            encode_person_item_gained(9, i32::MAX, &item)[4..6],
+            [0xff, 0x7f]
+        );
+    }
+
+    /// `from_raw` is the way back from a stored slot's `Vec<u8>` to a wire
+    /// record, and it sits on the path that grants a drop — so it pads and
+    /// truncates rather than panicking on a caller's bad slice.
+    #[test]
+    fn from_raw_rebuilds_a_record_and_survives_a_bad_slice() {
+        let item = Item::from_unique(1500, 3);
+        assert_eq!(Item::from_raw(&item.encode()), item);
+
+        // Short: the prefix given survives, the rest is empty.
+        let short = Item::from_raw(&item.encode()[..4]);
+        assert_eq!(short.unique(), 1500);
+        assert_eq!(short.raw[4..], [0u8; CLT_ITEM_SIZE - 4]);
+
+        // Long: the extra bytes are ignored.
+        let mut over = item.encode().to_vec();
+        over.extend_from_slice(&[0xAA; 8]);
+        assert_eq!(Item::from_raw(&over), item);
     }
 
     /// The 309 body is `cltCharPos` + two `UI16`, in the order the client reads
