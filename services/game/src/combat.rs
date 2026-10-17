@@ -242,18 +242,32 @@ impl PlayerAttacks {
     /// mouse handler then clears `siSelectedOrder`, `order.cpp:182`,
     /// `MouseOperation.cpp:771`) and never re-sends it, so the server has to
     /// keep swinging on its own.
-    ///
-    /// A kind with no row gets 1000 ms, the most common shipped value. A row
-    /// reading 0 would re-arm the read loop with a zero sleep and spin it, so
-    /// the result is floored at 100 ms.
     #[must_use]
     pub(crate) fn interval(&self, class_kind: u16) -> u64 {
-        self.by_kind.get(&class_kind).map_or(1_000, |row| {
-            u64::try_from(row.attack_interval)
-                .unwrap_or(1_000)
-                .clamp(100, 60_000)
-        })
+        self.by_kind
+            .get(&class_kind)
+            .map_or(1_000, |row| attack_interval_ms(row.attack_interval))
     }
+}
+
+/// One kind's swing cadence, in milliseconds: its `CharAttackInfo`
+/// `Attack_Interval` (`CharAttackRow::attack_interval`).
+///
+/// Both halves of a fight run on this clock and nowhere else. The **client**
+/// starts the attacker's swing animation from it — it receives the order once
+/// and then repeats on `dwAttackInterval`
+/// (`MouseOperation.cpp:771`) — so a server that paces its hits on any other
+/// timer lands damage several animations late and the swing reads as a miss.
+///
+/// A kind with no row, or one whose `Attack_Interval` does not read as a
+/// non-negative integer, gets 1000 ms — the most common shipped value. A row
+/// reading 0 would re-arm a timer with a zero sleep and spin it, so a readable
+/// value is floored at 100 ms and capped at 60 s for a corrupt one.
+#[must_use]
+pub(crate) fn attack_interval_ms(attack_interval: i32) -> u64 {
+    u64::try_from(attack_interval)
+        .unwrap_or(1_000)
+        .clamp(100, 60_000)
 }
 
 /// A deterministic PRNG for the combat rolls, so a test can replay a fight
@@ -456,6 +470,31 @@ mod tests {
         assert!(
             attacks.interval(1) <= 60_000,
             "never parks for a quarter hour"
+        );
+    }
+
+    /// The same clamp, for the field monsters: a `SpawnUnit` reads its cadence
+    /// straight from its `CharAttackInfo` row, so this is the rule that decides
+    /// both a raccoon's 2 000 ms and a corrupt row's floor. A row reading 0
+    /// would re-arm a timer with a zero sleep and spin it.
+    #[test]
+    fn attack_interval_ms_never_arms_a_zero_sleep() {
+        assert_eq!(
+            attack_interval_ms(2_000),
+            2_000,
+            "the shipped value passes through untouched"
+        );
+        assert_eq!(attack_interval_ms(0), 100, "a zero row would spin the loop");
+        assert_eq!(
+            attack_interval_ms(-5),
+            1_000,
+            "a negative interval is a malformed row, so it takes the no-row default"
+        );
+        assert_eq!(attack_interval_ms(1), 100, "the floor is 100 ms");
+        assert_eq!(
+            attack_interval_ms(10_000_000),
+            60_000,
+            "and the ceiling is a minute"
         );
     }
 }

@@ -4179,12 +4179,23 @@ pub(crate) async fn handle_revive(
         logln!("game: revive before the character row is loaded — ignored");
         return Ok(());
     };
-    let (from_map, level) = (character.map_id, character.level);
+    let (from_map, level, max_life) = (character.map_id, character.level, character.max_life);
     let (dst_map, x, y) = revive_target(level, from_map);
     logln!(
         "game: revive: char {} (level {level}, mode {die_mode}) on map {from_map} -> map {dst_map} at ({x}, {y})",
         character.character_id
     );
+    // `char.cpp:4949` and `:5113` — both of `Revive()`'s branches set life back
+    // to `GetMaxLife()` before they warp, so a revived character is at full
+    // strength on arrival rather than standing dead at the palace. Life lives
+    // only in the session here, and the opcode-5 record the warp is about to
+    // send already carries `max_life` as its life field
+    // (`make_char_info_for`), so the client and the server agree without a
+    // second frame.
+    let life = u32::try_from(max_life.max(0)).unwrap_or(0);
+    if registry.restore_life(session_key, life).is_none() {
+        logln!("game: revive: session is gone; life not restored");
+    }
     let gate = Gate {
         src_map: from_map,
         src_x: 0,
@@ -4546,12 +4557,17 @@ impl Movement {
             pos,
             map_id,
             move_speed,
-            // Start at -MOVE_PERCENT_STEP so the first step also needs 100 points
-            // (steady-state cadence 5000/speed ms). The legacy starts at 0, giving
-            // a half-interval first step, but its frame-by-frame accumulation hides
-            // the alternation. Our timer fires once per step, so the asymmetry
-            // would produce visible step-and-pause (short/long/short/long intervals).
-            percent: -MOVE_PERCENT_STEP,
+            // `MoveInit()` and `SetMove()` both start a fresh order's
+            // accumulator at 0 (`Char-Common.cpp:4898`, `char.cpp:4235`), and
+            // `char-move.cpp:47` reads `siMovePercent == 0` as "no walk is
+            // running yet". So the **first** tile of an order costs half a tile
+            // of points — 250 ms at speed 10 — and every tile after it costs a
+            // full one, which is the phase the client animates its own avatar
+            // on. Starting a half tile behind instead put the server's
+            // authoritative tile a permanent `5000 / speed / 2` ms behind the
+            // avatar it is supposed to track: every 200 arrived describing a
+            // step the client had already shown, and the walk read as sluggish.
+            percent: 0,
             last: Instant::now(),
             deadline: None,
         }

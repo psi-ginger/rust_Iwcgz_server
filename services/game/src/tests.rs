@@ -1500,11 +1500,23 @@ fn the_read_loop_deadline_and_advance_agree_on_the_legacy_cadence() {
             12,
             "one tile per interval at speed {speed}"
         );
-        // `percent` starts at -50 and is returned to -50 by every commit, so
-        // the cold-start interval and every steady-state one are identical.
+        // A fresh order's accumulator starts at 0 — `MoveInit()` and `SetMove()`
+        // both write `siMovePercent = 0` (`Char-Common.cpp:4898`,
+        // `char.cpp:4235`) — so the **first** tile is half a tile of points and
+        // every commit then returns it to -50 for a full one. That half-tile
+        // start is what the client animates its own avatar from, so the server
+        // has to take it too or its 200s lag the walk they describe by half an
+        // interval, forever.
+        let cold_ms = (2500_i64 + i64::from(speed) - 1) / i64::from(speed);
+        assert_eq!(
+            intervals[0],
+            Duration::from_millis(cold_ms as u64),
+            "the cold-start tile at speed {speed} took {:?}, expected {cold_ms} ms",
+            intervals[0]
+        );
         let expected_ms = (5000_i64 + i64::from(speed) - 1) / i64::from(speed);
         let expected = Duration::from_millis(expected_ms as u64);
-        for (i, interval) in intervals.iter().enumerate() {
+        for (i, interval) in intervals.iter().enumerate().skip(1) {
             assert_eq!(
                 *interval, expected,
                 "tile {i} at speed {speed} took {interval:?}, expected {expected:?} \
@@ -1532,88 +1544,96 @@ fn a_diagonal_move_steps_both_axes() {
 
 /// A stalled tick must not bank more than one tile: `advance` caps its
 /// elapsed time at `(CHAR_ACTION_INTERVAL_FRAME + 1) * 50` ms
-/// (`char-move.cpp:145`). With `percent=-50` (steady-state start), a single
-/// capped tick at speed 14 yields 98 points (< 100 needed), so the step is
-/// deferred to the next tick — still at most one tile per cap window.
+/// (`char-move.cpp:145`) and commits at most one tile however much it credits.
+/// At speed 14 a capped 350 ms is 98 points — enough to cover the cold-start
+/// half-tile, since `MoveInit()` starts a fresh order's accumulator at 0 — so
+/// a four-second stall steps once and stops there.
 #[test]
 fn a_stalled_tick_commits_at_most_one_tile() {
     let mut movement = Movement::new((10, 0), (0, 0), 1, 14);
     let stalled = movement.last + Duration::from_secs(4);
-    // At speed 14, a 350 ms capped tick gives 98 points; percent goes -50 -> 48.
-    // No step yet, but crucially: it does NOT jump multiple tiles.
-    assert!(movement.advance(stalled).is_none());
-    assert_eq!(movement.pos, (0, 0));
-    // A subsequent normal tick would commit the step.
-    let nudge = movement.last + Duration::from_millis(10);
-    assert_eq!(movement.advance(nudge), Some((1, 0)));
+    assert_eq!(movement.advance(stalled), Some((1, 0)));
     assert_eq!(movement.pos, (1, 0));
+    // With no time passing nothing else can be credited: the character does not
+    // drift further while the loop is idle.
+    assert_eq!(movement.advance(movement.last), None);
+    assert_eq!(movement.pos, (1, 0));
+    // A second equally long stall takes exactly one more tile — the cap bounds
+    // each call, so the four seconds behind it never becomes a teleport.
+    assert_eq!(
+        movement.advance(stalled + Duration::from_secs(4)),
+        Some((2, 0))
+    );
+    assert_eq!(movement.pos, (2, 0));
 }
 
 /// `next_delay` never exceeds the legacy cap, so the read loop's timer arm
 /// wakes at the same bound the legacy's `min((CHAR_ACTION_INTERVAL_FRAME+1)*50, ...)`
-/// applies.
+/// applies (`char-move.cpp:145`), and `advance` credits at most that much —
+/// which is what keeps a late wake from banking time the client never spent.
 #[test]
 fn next_delay_is_capped_at_the_legacy_tick_bound() {
-    let mut movement = Movement::new((10, 0), (0, 0), 1, 14);
-    // With percent=-50, the first step needs 100 points.
-    // 350 ms capped tick gives 14*350/50 = 98 points, not enough.
-    let now = movement.last + Duration::from_millis(350);
-    assert!(movement.advance(now).is_none()); // 98 points, percent = 48
-    // next_delay() needs 2 more points: ceil(2*50/14) = 8 ms (under cap).
-    // The cap only applies when needed delay > 350 ms.
-    // So after a partial tick, next_delay() is small.
-    // To hit the cap, we need a speed where steady-state delay > 350 ms.
-    // Speed 13: 5000/13 = 385 ms > 350 ms cap.
-    let mut capped = Movement::new((10, 0), (0, 0), 1, 13);
-    let start = capped.last;
-    // One capped tick (350 ms) gives 13*350/50 = 91 points.
-    assert!(capped.advance(start + Duration::from_millis(350)).is_none());
-    // Still need 9 more points: ceil(9*50/13) = 35 ms. Not capped yet.
-    // Need a case where needed > 350.
-    // Speed 10: 5000/10 = 500 ms > 350 ms.
-    let mut slow = Movement::new((10, 0), (0, 0), 1, 10);
-    let start = slow.last;
-    // Full steady-state delay is 500 ms, but next_delay() caps at 350.
-    assert_eq!(slow.next_delay(), Duration::from_millis(350));
-    // After 350 ms: 10*350/50 = 70 points. Need 30 more = 150 ms.
-    assert!(slow.advance(start + Duration::from_millis(350)).is_none());
-    assert_eq!(slow.next_delay(), Duration::from_millis(150)); // under cap
+    // Speed 10 takes 500 ms per tile at steady state, well over the 350 ms cap.
+    let mut movement = Movement::new((10, 0), (0, 0), 1, 10);
+    let start = movement.last;
+    // A fresh order's accumulator is at 0, so the cold-start tile is half a
+    // tile of points: ceil(2500 / 10) = 250 ms, which fits inside the cap.
+    assert_eq!(movement.next_delay(), Duration::from_millis(250));
+    assert_eq!(
+        movement.advance(start + Duration::from_millis(250)),
+        Some((1, 0)),
+        "the cold-start tile lands at 250 ms, not a full 500"
+    );
+    // Steady state needs the full 100 points: 500 ms, capped down to 350.
+    assert_eq!(movement.next_delay(), Duration::from_millis(350));
+    // The capped wake credits 10 * 350 / 50 = 70 points and still needs 30 —
+    // 150 ms, inside the cap, so nothing is dropped.
+    assert_eq!(movement.advance(start + Duration::from_millis(600)), None);
+    assert_eq!(movement.next_delay(), Duration::from_millis(150));
 }
 
 /// The cadence follows the character, not a fixed reference: `advance` banks
 /// `move_speed * elapsed / 50`, so a slower mover takes proportionally longer
-/// per tile. At speed 7 a tile needs `5000 / 7 ≈ 715` ms against 357 ms at
-/// the captured 14. With `percent=-50`, the first tile already uses the
-/// steady-state delay (no cold-start half-interval).
+/// per tile. At speed 7 a tile needs `5000 / 7 ≈ 715` ms against 313 ms at
+/// speed 16.
 ///
-/// Note: the legacy cap of 350 ms per tick means a single `advance()` call
-/// with a large elapsed time is capped. These tests use speeds where the
-/// steady-state delay fits under the cap, or pass the exact steady-state
-/// delay in one call.
+/// Each walk also opens on a **half** interval, because `MoveInit()` and
+/// `SetMove()` start `siMovePercent` at 0 (`Char-Common.cpp:4898`,
+/// `char.cpp:4235`) and only a commit returns it to -50. The client animates
+/// from the same start, so both halves are asserted here: a server that made
+/// the cold start a full tile would sit a permanent half-interval behind the
+/// avatar it is tracking.
 #[test]
 fn the_step_cadence_scales_with_the_characters_move_speed() {
-    // Speed 16: 5000/16 = 312.5 -> 313 ms < 350 ms cap, fits in one tick.
-    let mut slow = Movement::new((1, 0), (0, 0), 1, 16);
-    let start = slow.last;
-    // Full 313 ms commits exactly one (16*313/50 = 100).
-    assert_eq!(
-        slow.advance(start + Duration::from_millis(313)),
-        Some((1, 0))
-    );
-
-    // Speed 28: 5000/28 = 178.6 -> 179 ms, well under cap.
-    let mut fast = Movement::new((1, 0), (0, 0), 1, 28);
-    let start = fast.last;
-    // 179 ms commits a tile at 28 (28*179/50 = 100).
-    assert_eq!(
-        fast.advance(start + Duration::from_millis(179)),
-        Some((1, 0))
-    );
-    assert_eq!(
-        fast.next_delay(),
-        Duration::from_millis(179),
-        "steady-state delay at speed 28"
-    );
+    // (speed, cold-start interval, steady-state interval), all `ceil(2500/speed)`
+    // and `ceil(5000/speed)` — speed 7 exceeds the 350 ms credit cap, so its
+    // deadline is split across two wakes that still sum to the same figure.
+    for (speed, cold_ms, full_ms) in [(7_i32, 358_i64, 715_i64), (16, 157, 313), (28, 90, 179)] {
+        let mut movement = Movement::new((2, 0), (0, 0), 1, speed);
+        let start = movement.last;
+        let mut now = start;
+        let mut previous = start;
+        let mut intervals = Vec::new();
+        while !movement.arrived() {
+            now += movement.next_delay();
+            if movement.advance(now).is_some() {
+                intervals.push(now - previous);
+                previous = now;
+            }
+            assert!(
+                now - start < Duration::from_secs(5),
+                "move never arrived at speed {speed}"
+            );
+        }
+        assert_eq!(
+            intervals,
+            vec![
+                Duration::from_millis(cold_ms as u64),
+                Duration::from_millis(full_ms as u64),
+            ],
+            "tile intervals at speed {speed}"
+        );
+    }
 }
 
 /// The quit menu's two requests are the legacy pair, and each is answered by

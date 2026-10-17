@@ -63,14 +63,18 @@ const MAX_CHAR_NUMBER: u32 = 20_000;
 /// every one of them.
 pub(crate) const AI_TICK_MS: u64 = 100;
 
-/// One action per monster, on average, in milliseconds.
+/// One **idle** action per monster, on average, in milliseconds.
 ///
 /// The legacy's gate is `data = (rand() + siID) % (150 / CHAR_ACTION_INTERVAL_FRAME)`
 /// = `% 25`, one pass in 25 (`char-wait.cpp:315-406`,
 /// `CHAR_ACTION_INTERVAL_FRAME = 6`, `Char-Common.h:221`), so a monster thinks
 /// about once every 25 frames. This is that pacing expressed as a deadline,
 /// with the `siID` term folded in as a per-id stagger so 1536 monsters do not
-/// all swing on the same tick.
+/// all act on the same tick.
+///
+/// It gates **wandering and the enemy search only**. A monster with a target
+/// runs on [`AI_TICK_MS`] instead, and its swing on its own
+/// [`SpawnUnit::attack_interval`] — see [`MonsterWorld::tick`].
 const AI_ACT_MS: u64 = 6_250;
 
 /// How far a monster will step toward a wander target, in tiles. The legacy
@@ -111,6 +115,9 @@ struct SpawnUnit {
     aggressive: i32,
     /// `range` (`CharAttackRow::range`) — how close it has to be to swing.
     range: i32,
+    /// `Attack_Interval` ([`combat::attack_interval_ms`]) — this kind's swing
+    /// cadence, which is also the clock its client-side animation repeats on.
+    attack_interval: u64,
     /// `siCriticalRate`, percent (`CharAttackRow::critical_rate`).
     critical_rate: i32,
     /// This kind's drop table, resolved once from the committed canonical
@@ -153,12 +160,18 @@ struct Monster {
     /// The `char_unique` of the player this monster is fighting, or `None` when
     /// it is idle. The legacy's `siTargetCharUnique`.
     target: Option<i16>,
-    /// A walk in progress. One monster cannot be walking and fighting in the
-    /// same act, so this and `target` are mutually exclusive in practice.
+    /// A walk in progress — usually the walk into range this monster's target
+    /// stands at. It outlives the `target`, so the two are held at once.
     walk: Option<Movement>,
     /// The `now_tick()` stamp this monster next acts on — the legacy's
     /// `(rand() + siID) % 25` gate, as a deadline.
     next_act_ms: u64,
+    /// The `now_tick()` stamp this monster next *swings* on: its kind's
+    /// `Attack_Interval`, as a deadline (`char-attack.cpp:1869`). A separate
+    /// clock from `next_act_ms` because the legacy separates them too — the
+    /// wander/search decision is every-25-frames, the swing is the kind's own
+    /// interval — and the client animates the swing on this one.
+    next_swing_ms: u64,
 }
 
 /// What a monster's swing did to a player, for the caller to broadcast.
@@ -331,6 +344,7 @@ impl MonsterWorld {
                     exp: attack_row.exp,
                     aggressive: attack_row.aggressive,
                     range: attack_row.range.max(1),
+                    attack_interval: combat::attack_interval_ms(attack_row.attack_interval),
                     critical_rate: attack_row.critical_rate,
                     // A kind with no drop row drops nothing; the parser already
                     // dropped malformed entries, so this is a plain lookup.
@@ -449,6 +463,7 @@ impl MonsterWorld {
             walk: None,
             // Staggered by id, the legacy's `(rand() + siID) % 25` term.
             next_act_ms: 0,
+            next_swing_ms: 0,
         };
         self.next_unique += 1;
         self.monsters.push(monster);
@@ -545,13 +560,33 @@ impl MonsterWorld {
         self.advance_walks(registry, now_ms);
         let mut hits = Vec::new();
         for index in 0..self.monsters.len() {
+            // Two clocks, as the legacy runs them. The legacy gates the wander
+            // and the enemy search together on `data = (rand() + siID) % 25`
+            // (`char-wait.cpp:315-406`), and gates the swing separately on the
+            // kind's own `Attack_Interval` (`char-attack.cpp:1869`). Folding both
+            // into `AI_ACT_MS` put a monster's hit three swing-intervals late
+            // against the animation its client repeats on that interval — the
+            // live report of "the raccoon swings 3-4 times before a number
+            // appears". So an idle monster keeps the long gate and one with a
+            // target runs on the fine tick; the swing has its own deadline
+            // inside [`Self::act`].
             if now_ms < self.monsters[index].next_act_ms {
                 continue;
             }
-            self.monsters[index].next_act_ms = now_ms + AI_ACT_MS;
             if let Some(hit) = self.act(registry, now_ms, rng, index) {
                 hits.push(hit);
             }
+            // Read **after** the act, so a monster that took a target on this
+            // very pass gets the fine clock instead of being queued behind the
+            // long one it was classified under a moment earlier. `.max` keeps
+            // whatever deadline the act itself armed: `order_move`'s deferral
+            // while a walk starts, and the long-gate backoff for a blocked route.
+            let gate = if self.monsters[index].target.is_some() {
+                AI_TICK_MS
+            } else {
+                AI_ACT_MS
+            };
+            self.monsters[index].next_act_ms = self.monsters[index].next_act_ms.max(now_ms + gate);
         }
         hits
     }
@@ -786,11 +821,12 @@ impl MonsterWorld {
         index: usize,
     ) -> Option<PlayerHit> {
         let (group, unit) = (self.monsters[index].group, self.monsters[index].unit);
-        let (aggressive, range, min_atk, max_atk, crit) = {
+        let (aggressive, range, attack_interval, min_atk, max_atk, crit) = {
             let u = &self.groups[group].units[unit];
             (
                 u.aggressive,
                 u.range.max(1),
+                u.attack_interval,
                 u.min_atk,
                 u.max_atk,
                 u.critical_rate,
@@ -826,10 +862,31 @@ impl MonsterWorld {
         let (x, y) = (self.monsters[index].x, self.monsters[index].y);
         let (dx, dy) = ((target.x - x).abs(), (target.y - y).abs());
         if dx > range || dy > range {
-            // `Action_Attack` walks into range before swinging.
-            self.order_move(registry, index, (target.x, target.y), now_ms);
+            // `Action_Attack` walks into range before swinging. A monster already
+            // walking that route does not re-order it: the client walks the order
+            // it was given, and a fresh 241 every fine tick would restart it in
+            // place instead of letting it arrive. One with nowhere to walk — a
+            // wall on the route — backs off to the long gate rather than
+            // rescanning a blocked path every tick.
+            if self.monsters[index].walk.is_none() {
+                self.order_move(registry, index, (target.x, target.y), now_ms);
+                if self.monsters[index].walk.is_none() {
+                    self.monsters[index].next_act_ms =
+                        self.monsters[index].next_act_ms.max(now_ms + AI_ACT_MS);
+                }
+            }
             return None;
         }
+
+        // The kind's own clock, not `next_act_ms`: the client repeats this
+        // monster's swing animation on `Attack_Interval`
+        // (`char-attack.cpp:1869`), so a hit paced by the act gate lands whole
+        // animations after the swing that shows it — the live report of the
+        // raccoon swinging 3-4 times before a damage number appeared.
+        if now_ms < self.monsters[index].next_swing_ms {
+            return None;
+        }
+        self.monsters[index].next_swing_ms = now_ms + attack_interval;
 
         // The swing, so a bystander's client plays it (`MakeOrder_ATTACK`,
         // `order.cpp:314`).
@@ -898,6 +955,13 @@ impl MonsterWorld {
         // The legacy picks a point in the ±5 box and rejects a wall; ours picks
         // a tile that is *already* walkable and already inside the box, so it
         // can never choose one it would then have to refuse.
+        // A monster walks the order it was given. Re-picking while the last one
+        // is still in progress would rebuild `Movement` from zero and throw away
+        // the tiles already banked, so a long wander ends up walked in place —
+        // the same trap the range branch avoids.
+        if self.monsters[index].walk.is_some() {
+            return;
+        }
         let near = tiles
             .iter()
             .filter(|(tx, ty)| (*tx - x).abs() <= WANDER_RADIUS && (*ty - y).abs() <= WANDER_RADIUS)
@@ -1182,6 +1246,7 @@ mod tests {
             target: None,
             walk: None,
             next_act_ms: 0,
+            next_swing_ms: 0,
         };
         let record = record_for(FIELD_MAP, &monster);
         assert_eq!(
@@ -1244,6 +1309,7 @@ mod tests {
                 target: None,
                 walk: None,
                 next_act_ms: 0,
+                next_swing_ms: 0,
             });
         }
 
@@ -1400,6 +1466,7 @@ mod tests {
                 exp: 90,
                 aggressive: 0,
                 range: 1,
+                attack_interval: 2_000,
                 critical_rate: 0,
                 drops: &[],
             }],
@@ -1468,6 +1535,7 @@ mod tests {
                 exp: 0,
                 aggressive: 0,
                 range: 1,
+                attack_interval: 2_000,
                 critical_rate: 0,
                 drops: &[],
             }],
@@ -1534,6 +1602,7 @@ mod tests {
                 exp: 0,
                 aggressive: 5,
                 range: 1,
+                attack_interval: 2_000,
                 critical_rate: 0,
                 drops: &[],
             }],
@@ -1572,5 +1641,166 @@ mod tests {
             decoded.si_para2, 1000,
             "siPara2 is the target's char unique"
         );
+    }
+
+    /// A monster already in a fight swings on its kind's own
+    /// `Attack_Interval`, not on the wander gate. The legacy keeps those two
+    /// clocks apart — `char-wait.cpp:315-406` decides *whether* to look for a
+    /// fight, `char-attack.cpp:1869` decides *when* the weapon fires — and the
+    /// client repeats this monster's attack animation on that same interval
+    /// (`dwAttackInterval`), so a hit paced by `AI_ACT_MS` lands about three
+    /// animations after the swing that shows it. That is the live report: "the
+    /// raccoon plays its attack animation 3-4 times before a single damage
+    /// number registers".
+    ///
+    /// The swing is detected on the 100 ms AI tick, so it can land up to that
+    /// late; `2_100` below is `attack_interval` rounded up to the next tick.
+    #[test]
+    fn an_engaged_monster_swings_on_its_attack_interval_not_the_wander_gate() {
+        use crate::registry::{Outbound, SessionInfo};
+
+        let registry = Registry::new();
+        let key = Registry::next_key();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<Outbound>();
+        registry.register(
+            key,
+            tx,
+            SessionInfo {
+                char_unique: 1000,
+                name: "Victim".to_owned(),
+                level: 1,
+                map_id: FIELD_MAP,
+                x: 0,
+                y: 0,
+                school_id: 0,
+                class_kind: 1,
+                // Comfortably above the three swings this test lands, so the
+                // target never dies and drops out of the fight half way through.
+                life: 400,
+                move_speed: 12,
+                sex: 1,
+                gm_level: 0,
+            },
+        );
+
+        let mut world = MonsterWorld::empty();
+        world.groups.push(FieldGroup {
+            anchor: SpawnGroup {
+                map_index: FIELD_MAP,
+                center_x: 0,
+                center_y: 0,
+                radius: 1,
+            },
+            capacity: 1,
+            units: vec![SpawnUnit {
+                wire_kind: 15,
+                level: 1,
+                max_num: 1,
+                move_speed: 12,
+                life: 20,
+                tiles: vec![(0, 0)],
+                min_atk: 40,
+                max_atk: 40,
+                ac: 0,
+                exp: 0,
+                aggressive: 5,
+                range: 1,
+                attack_interval: 2_000,
+                critical_rate: 0,
+                drops: &[],
+            }],
+        });
+        world.spawn_all(&registry);
+
+        let mut rng = Rng::new(99);
+        // The weapon is ready the moment the fight starts: `next_swing_ms`
+        // opens at 0, so the engaging act falls straight through to the swing.
+        assert_eq!(world.tick(&registry, 0, &mut rng).len(), 1, "first swing");
+        // Half way through the interval the act gate has long since opened —
+        // `next_act_ms` is on `AI_TICK_MS` while a monster has a target — but
+        // the weapon has not recovered.
+        assert_eq!(
+            world.tick(&registry, 1_000, &mut rng).len(),
+            0,
+            "the interval is only half spent"
+        );
+        // One AI tick past the kind's own deadline: another swing. Under the
+        // old single gate this pass fell at `AI_ACT_MS` (6 250 ms) and there
+        // would be none here.
+        assert_eq!(
+            world.tick(&registry, 2_100, &mut rng).len(),
+            1,
+            "Attack_Interval has elapsed"
+        );
+        assert_eq!(world.tick(&registry, 3_000, &mut rng).len(), 0);
+        // The clock restarts from the swing itself, not from the act gate.
+        assert_eq!(
+            world.tick(&registry, 4_200, &mut rng).len(),
+            1,
+            "the second interval runs from the second swing"
+        );
+        assert_eq!(
+            registry.info(key).expect("the session is there").life,
+            400 - 3 * 40,
+            "every swing landed"
+        );
+    }
+
+    /// `wander` must not re-pick while its last walk is still running: it
+    /// would rebuild `Movement` from zero and discard the tiles already banked,
+    /// so a long wander ends up walked in place forever. The out-of-range
+    /// branch of `act` carries the same guard, and between them they make a
+    /// monster's `walk` a walk it is allowed to finish.
+    #[test]
+    fn a_wander_will_not_rebuild_a_walk_it_has_not_finished() {
+        let registry = Registry::new();
+        let mut world = MonsterWorld::empty();
+        world.groups.push(FieldGroup {
+            anchor: SpawnGroup {
+                map_index: FIELD_MAP,
+                center_x: 0,
+                center_y: 0,
+                radius: 1,
+            },
+            capacity: 1,
+            units: vec![SpawnUnit {
+                wire_kind: 15,
+                level: 1,
+                max_num: 1,
+                move_speed: 12,
+                life: 20,
+                tiles: vec![(0, 0), (1, 0), (2, 0)],
+                min_atk: 1,
+                max_atk: 2,
+                ac: 0,
+                exp: 0,
+                aggressive: 0,
+                range: 1,
+                attack_interval: 2_000,
+                critical_rate: 0,
+                drops: &[],
+            }],
+        });
+        world.spawn_all(&registry);
+
+        // Stand the spawn where `wander` has all three tiles to choose from,
+        // whatever the spawn picker landed on.
+        world.monsters[0].x = 0;
+        world.monsters[0].y = 0;
+
+        let mut rng = Rng::new(1);
+        world.order_move(&registry, 0, (2, 0), 0);
+        let running = world.monsters[0].walk.expect("the walk started");
+
+        // Sixteen picks would include tiles other than (2, 0), so the assertion
+        // catches a re-issue rather than passing on the draw it happened to get.
+        for roll in 0..16 {
+            world.wander(&registry, 0, 100, &mut rng);
+            assert_eq!(
+                world.monsters[0].walk,
+                Some(running),
+                "wander rebuilt the running walk on roll {roll}"
+            );
+        }
     }
 }

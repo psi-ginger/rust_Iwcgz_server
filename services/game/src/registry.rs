@@ -855,6 +855,23 @@ impl Registry {
         Some(session.info.life)
     }
 
+    /// Rewrites one session's life to a fixed total — the other half of
+    /// [`Self::set_life`], and the one a revive needs: `cltCharServer::Revive()`
+    /// sets life back to `GetMaxLife()` in both of its branches
+    /// (`char.cpp:4949`, `:5113`).
+    ///
+    /// Life is a session value in this port (`CharacterFull` carries only
+    /// `max_life`, so a relogin is already a full heal), which makes this the
+    /// whole of the restore — no database write is involved.
+    ///
+    /// Returns the new total, or `None` when the key names no session.
+    pub fn restore_life(&self, key: SessionKey, life: u32) -> Option<u32> {
+        let mut sessions = self.lock();
+        let session = sessions.get_mut(&key)?;
+        session.info.life = life;
+        Some(life)
+    }
+
     /// Every session standing in the 3×3 cell block around `(x, y)` on `map_id`,
     /// with its key, ordered by key — the combat-target query, and the same
     /// predicate [`Self::broadcast_near_point`] uses.
@@ -1041,6 +1058,26 @@ mod tests {
         let second = Registry::next_key();
         assert!(first > 0, "0 never names a session");
         assert_eq!(second, first + 1, "one key per connection, in order");
+    }
+
+    /// A revive writes a life **total**, not a heal: `Revive()` sets
+    /// `GetMaxLife()` outright (`char.cpp:4949`, `:5113`), and life lives only
+    /// in the session here, so this is the whole of the restore. The restored
+    /// total has to be a real one the next hit can come off.
+    #[test]
+    fn restore_life_writes_a_total_that_the_next_hit_comes_off() {
+        let registry = Registry::new();
+        let (key, _rx) = join(&registry, info(1000, "Test12", 0, 0));
+        assert_eq!(registry.set_life(key, 161), Some(0), "the hit that killed");
+        assert_eq!(registry.restore_life(key, 480), Some(480));
+        assert_eq!(
+            registry.info(key).expect("the session is there").life,
+            480,
+            "the registry agrees with the max life the warp will report"
+        );
+        assert_eq!(registry.set_life(key, 100), Some(380));
+        // A key that names no session is not an error, just a no-op.
+        assert_eq!(registry.restore_life(Registry::next_key(), 480), None);
     }
 
     /// The guard is armed before a character is ever registered, so it has to

@@ -49,7 +49,8 @@ use gz_proto::chat::{
     decode_secret_chat_request,
 };
 use gz_proto::combat::{
-    GetExpResponse, HIT_TARGET_MONSTER, HIT_TARGET_PLAYER, HitResponse, RequestHit,
+    DIE_MODE_NORMAL, DeathPenaltyResponse, GetExpResponse, HIT_TARGET_MONSTER, HIT_TARGET_PLAYER,
+    HitResponse, RequestHit, ReviveResponse,
 };
 use gz_proto::game::{
     CharUnique, GameLogin, decode_select_char, decode_village_struct_request, encode_logout,
@@ -333,6 +334,44 @@ async fn serve(cfg: &GameConfig) -> Result<(), AnyError> {
                         .encode()
                         .to_vec(),
                     );
+                    // A player's death keeps its body, and it gets a prompt:
+                    // the legacy's kill branch runs `DeathPenalty()` and then
+                    // `RequestRevive(id, NORMAL)` back to back
+                    // (`CharManager.cpp:362-363`), and those two frames are the
+                    // only things that open the client's death dialog and arm the
+                    // revive button inside it. A server that sends neither leaves
+                    // the body on the ground with no way back — the live report
+                    // from Test12.
+                    if hit.life == 0 {
+                        let dead = hit.char_unique;
+                        registry.send_to(
+                            hit.key,
+                            GameMsg::ResponseDealthpenaltyinfo as u16,
+                            DeathPenaltyResponse {
+                                si_money: 0,
+                                si_exp: 0,
+                                si_killed_mode: 0,
+                                sz_kill_me_char_name: String::new(),
+                            }
+                            .encode()
+                            .to_vec(),
+                        );
+                        registry.send_to(
+                            hit.key,
+                            GameMsg::ResponseRevive as u16,
+                            ReviveResponse {
+                                si_char_unique: hit.char_unique,
+                                si_param: 1,
+                                si_die_mode: DIE_MODE_NORMAL,
+                            }
+                            .encode()
+                            .to_vec(),
+                        );
+                        logln!(
+                            "game: character {dead} died; sent the death dialog \
+                             and armed the revive prompt"
+                        );
+                    }
                 }
             }
         });

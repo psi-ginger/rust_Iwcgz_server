@@ -46,6 +46,7 @@
 //! target — attacker included — receives one frame (`:2775`, `:2782`). That is
 //! the whole HP-sync mechanism: there is no separate "set HP" packet.
 
+use crate::chat::MAX_PLAYER_NAME;
 use crate::wire::{Reader, WireError};
 
 /// `sizeof(cltGameMsgRequest_Hit)` — the 267 body length.
@@ -56,6 +57,19 @@ pub const HIT_RESPONSE_LEN: usize = 28;
 
 /// `sizeof(cltGameMsgResponse_GetExp)` — the 270 body length.
 pub const GETEXP_RESPONSE_LEN: usize = 12;
+
+/// `sizeof(cltGameMsgResponse_DeathPenalty)` — the 242 body length: 34 bytes
+/// of fields, padded to 40 because the leading `GMONEY` aligns the class to 8
+/// under MSVC's default `/Zp8`.
+pub const DEATH_PENALTY_RESPONSE_LEN: usize = DEATH_PENALTY_FIELDS_LEN + 6;
+
+/// `sizeof(cltGameMsgResponse_Revive)` — the 7226 body length: three `SI16`.
+pub const REVIVE_RESPONSE_LEN: usize = 6;
+
+/// `NORMAL` — the `siDieMode` of an ordinary death, and the `siKilledMode` of
+/// one that no special war or event map caused (`MsgType-Person.h:1443`,
+/// `CharManager.cpp:363`).
+pub const DIE_MODE_NORMAL: i16 = 1;
 
 /// `uiType` when the thing that was hit is a monster
 /// (`Server-Attack.cpp:2761`, `ATB_MONSTER`).
@@ -271,6 +285,98 @@ impl GetExpResponse {
     }
 }
 
+/// Bytes of [`DeathPenaltyResponse`] that are actually **fields**: `GMONEY`
+/// `8` + `SI32` `4` + `SI16` `2` + `szKillMeCharName` `20` = 34.
+const DEATH_PENALTY_FIELDS_LEN: usize = 34;
+
+/// `cltGameMsgResponse_DeathPenalty` (`MsgType-System.h:1063-1080`) — the 242
+/// (`GAMEMSG_RESPONSE_DEALTHPENALTYINFO`) body, and the frame that **opens the
+/// client's death dialog**: its handler sets the death dialog's contents from
+/// it (`DoMsg_GAMEMSG_RESPONSE_DEALTHPENALTYINFO` → `NDEATH_DLG`,
+/// `Client-SystemNPC.cpp:2182-2190`).
+///
+/// The legacy sends it from `cltCharServer::DeathPenalty()` immediately after a
+/// player is killed, paired with `RequestRevive(id, NORMAL)` in the same
+/// branch (`CharManager.cpp:362-363`). Together they are the whole reason a
+/// dead player has a revive prompt at all — a server that sends neither leaves
+/// the body lying on the ground forever, which is exactly what a live run of
+/// Test12 against the raccoon reported.
+///
+/// The penalty **amounts** are not modelled: a monster kill deducts nothing in
+/// this port, so `si_money` and `si_exp` go out as 0 and the dialog shows an
+/// empty loss.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeathPenaltyResponse {
+    /// `GMONEY siMoney` — the money the death took.
+    pub si_money: i64,
+    /// `SI32 siExp` — the experience the death took.
+    pub si_exp: i32,
+    /// `SI16 siKilledMode` — a `KILLEDMODE_*` reason code, 0 for an ordinary
+    /// field death (the codes run 1..11, `Char-Server.h:25-35`, and
+    /// `siKilledMode` is reset to 0 on revive at `char.cpp:5099`).
+    pub si_killed_mode: i16,
+    /// `TCHAR szKillMeCharName[MAX_PLAYER_NAME]` — who landed the killing blow.
+    pub sz_kill_me_char_name: String,
+}
+
+impl DeathPenaltyResponse {
+    /// Encodes a `cltGameMsgResponse_DeathPenalty` body.
+    ///
+    /// The struct is 34 bytes of fields followed by 6 bytes of tail padding:
+    /// its `GMONEY` member aligns the class to 8, so `sizeof(clInfo)` — the
+    /// length the legacy puts on the frame at `char.cpp:4866` — is 40 under
+    /// MSVC's default `/Zp8`. The tail goes out zeroed; no reader touches it,
+    /// and matching it keeps the frame the length the shipped client expects.
+    #[must_use]
+    pub fn encode(&self) -> [u8; DEATH_PENALTY_RESPONSE_LEN] {
+        let mut out = [0u8; DEATH_PENALTY_RESPONSE_LEN];
+        out[0..8].copy_from_slice(&self.si_money.to_le_bytes());
+        out[8..12].copy_from_slice(&self.si_exp.to_le_bytes());
+        out[12..14].copy_from_slice(&self.si_killed_mode.to_le_bytes());
+        // `MStrCpy(..., MAX_PLAYER_NAME)` followed by an explicit NUL in the
+        // last byte (`MsgType-System.h:1075-1076`) — 19 characters at most,
+        // and the rest is already zero from the array above.
+        let name = self.sz_kill_me_char_name.as_bytes();
+        let n = name.len().min(MAX_PLAYER_NAME - 1);
+        out[14..14 + n].copy_from_slice(&name[..n]);
+        out
+    }
+}
+
+/// `cltGameMsgResponse_Revive` (`MsgType-Person.h:1461-1473`) — the 7226
+/// (`GAMEMSG_RESPONSE_REVIVE`) body.
+///
+/// It answers `GAMEMSG_REQUEST_REVIVE` (7225) but is **also** sent unprompted
+/// at the moment of death, in the same `RequestRevive(id, NORMAL)` call
+/// (`CharManager.cpp:363`, `char.cpp:4872-4885`). Its handler only flips
+/// `bReviveRequestSwitch = true` (`Client-SystemNPC.cpp:2196`), and that flag
+/// is what every revive control tests before it will do anything
+/// (`NCommonMsgDlg.cpp:172`, `NMenuDlg.cpp:843`, `NStatusBarDlg.cpp:854`,
+/// `ToolBarDlg.cpp:467`). So without this frame the death dialog may be on
+/// screen while its revive button stays inert — the second half of "the player
+/// stays dead indefinitely".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReviveResponse {
+    /// `siCharUnique` — the character that died.
+    pub si_char_unique: i16,
+    /// `siParam` — the legacy always sends `1`.
+    pub si_param: i16,
+    /// `siDieMode` — [`DIE_MODE_NORMAL`].
+    pub si_die_mode: i16,
+}
+
+impl ReviveResponse {
+    /// Encodes a `cltGameMsgResponse_Revive` body.
+    #[must_use]
+    pub fn encode(&self) -> [u8; REVIVE_RESPONSE_LEN] {
+        let mut out = [0u8; REVIVE_RESPONSE_LEN];
+        out[0..2].copy_from_slice(&self.si_char_unique.to_le_bytes());
+        out[2..4].copy_from_slice(&self.si_param.to_le_bytes());
+        out[4..6].copy_from_slice(&self.si_die_mode.to_le_bytes());
+        out
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -413,5 +519,72 @@ mod tests {
         assert_eq!(i16::from_le_bytes([body[2], body[3]]), 0);
         assert_eq!(i32::from_le_bytes(body[4..8].try_into().unwrap()), 120);
         assert_eq!(i32::from_le_bytes(body[8..12].try_into().unwrap()), 0);
+    }
+
+    /// `GMONEY` leads the struct, so the class aligns to 8 and `sizeof` is 40:
+    /// the fields end at 34 and the last 6 bytes are the `/Zp8` tail the legacy
+    /// puts on the frame (`char.cpp:4866`).
+    #[test]
+    fn death_penalty_is_thirty_four_bytes_of_fields_padded_to_forty() {
+        let body = DeathPenaltyResponse {
+            si_money: 12_345_678_901_234,
+            si_exp: -700,
+            si_killed_mode: 0,
+            sz_kill_me_char_name: "Raccoon".to_owned(),
+        }
+        .encode();
+        assert_eq!(body.len(), DEATH_PENALTY_RESPONSE_LEN);
+        assert_eq!(
+            i64::from_le_bytes(body[0..8].try_into().unwrap()),
+            12_345_678_901_234,
+            "GMONEY is a full 64-bit field, not a padded 32-bit one"
+        );
+        assert_eq!(i32::from_le_bytes(body[8..12].try_into().unwrap()), -700);
+        assert_eq!(i16::from_le_bytes([body[12], body[13]]), 0);
+        assert_eq!(
+            &body[14..21],
+            b"Raccoon",
+            "szKillMeCharName follows the SI16 at 12"
+        );
+        assert_eq!(body[21], 0, "NUL-terminated inside its 20-byte slot");
+        assert!(
+            body[DEATH_PENALTY_FIELDS_LEN..].iter().all(|b| *b == 0),
+            "the tail is padding and stays zero"
+        );
+    }
+
+    /// `MStrCpy(..., MAX_PLAYER_NAME)` copies 19 characters and the next line
+    /// forces a NUL into the last byte (`MsgType-System.h:1075-1076`), so an
+    /// over-long killer name can never run out of its slot into the padding.
+    #[test]
+    fn a_long_killer_name_stays_inside_its_slot() {
+        let body = DeathPenaltyResponse {
+            si_money: 0,
+            si_exp: 0,
+            si_killed_mode: 0,
+            sz_kill_me_char_name: "A".repeat(40),
+        }
+        .encode();
+        assert_eq!(&body[14..33], &[b'A'; 19], "19 characters at most");
+        assert_eq!(body[33], 0, "the last byte of the name slot is a NUL");
+    }
+
+    #[test]
+    fn revive_is_three_si16_in_declared_order() {
+        let body = ReviveResponse {
+            si_char_unique: 1471,
+            si_param: 1,
+            si_die_mode: DIE_MODE_NORMAL,
+        }
+        .encode();
+        assert_eq!(body.len(), REVIVE_RESPONSE_LEN);
+        assert_eq!(i16::from_le_bytes([body[0], body[1]]), 1471);
+        assert_eq!(i16::from_le_bytes([body[2], body[3]]), 1);
+        assert_eq!(
+            i16::from_le_bytes([body[4], body[5]]),
+            DIE_MODE_NORMAL,
+            "PVP_DIE is 2, so 1 can only be the ordinary-death mode"
+        );
+        assert_eq!(DIE_MODE_NORMAL, 1, "`NORMAL` at MsgType-Person.h:1443");
     }
 }
