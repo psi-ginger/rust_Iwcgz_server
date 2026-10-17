@@ -36,7 +36,7 @@ use gz_data::kindinfo::{self, CharAttackRow, KindCreateRow, MonsterStats};
 use gz_data::map::MapFile;
 use gz_data::npc::{NPC_CHAR_UNIQUE_BASE, NPC_PLACEMENTS};
 use gz_data::npcgroup;
-use gz_data::spawn::{SpawnField, SpawnGroup};
+use gz_data::spawn::{SpawnField, SpawnGroup, is_walkable};
 use gz_proto::game::client_map_index;
 use gz_proto::loginmany::{LoginManyRecord, NpcRecord, encode_login_many_batches_mixed};
 use gz_proto::map_geometry::{cell_of, cells_adjacent};
@@ -213,6 +213,14 @@ pub(crate) struct MonsterWorld {
     /// `(group index, when it is due)` — the legacy's respawn gate, one entry
     /// per monster that has died.
     respawn: Vec<(usize, u64)>,
+    /// Map 0 itself, so the ground can be judged for a *player* and not only for
+    /// a spawning monster. `None` in [`MonsterWorld::empty`], which has no ground
+    /// either — nothing can be approached from an unloaded world.
+    map: Option<MapFile>,
+    /// `KindInfo_Unique` id -> that kind's `KindInfo_Create` block mask. The
+    /// attacker's own class decides what it may step onto, and only the world
+    /// load sees both tables at once.
+    block_by_kind: HashMap<u16, u16>,
 }
 
 impl MonsterWorld {
@@ -340,6 +348,14 @@ impl MonsterWorld {
                 });
             }
         }
+        // The block mask is the one kind column this world has to resolve for a
+        // *player*: `KindInfo_Create` is what says which tiles a class may stand
+        // on, and only here are the id table and the rows already together.
+        let block_by_kind: HashMap<u16, u16> = unique
+            .iter()
+            .filter_map(|u| Some((u.id, create_by_code.get(u.code.as_str())?.block)))
+            .collect();
+
         Ok(Self {
             groups: out,
             monsters: Vec::new(),
@@ -347,6 +363,8 @@ impl MonsterWorld {
             // id ranges cannot overlap (`IsNPC` covers both, `npc.rs`).
             next_unique: u32::from(NPC_CHAR_UNIQUE_BASE) + NPC_PLACEMENTS.len() as u32,
             respawn: Vec::new(),
+            map: Some(map),
+            block_by_kind,
         })
     }
 
@@ -546,6 +564,34 @@ impl MonsterWorld {
             .iter()
             .find(|m| m.unique == monster_unique)
             .map(|m| (m.x, m.y))
+    }
+
+    /// The tile an attacking player should walk to when `range` does not reach
+    /// `monster_unique`: the closest tile the weapon range covers that this
+    /// player may stand on and that a walk can actually arrive on.
+    ///
+    /// This is the port's half of `CHARWORKSTEP_DECIDELENGTH`. The legacy never
+    /// rejects an attack for distance — `ORDER_ATTACK` sets that sub-order and
+    /// keeps the fight (`char-order.cpp:232-238`) — and the client walks its own
+    /// copy of the approach (`Client.cpp:3297` applies the order locally before
+    /// sending it), which is exactly why the avatar closed the gap while the
+    /// server's own tile stayed put and every swing came back `OutOfRange`.
+    ///
+    /// `None` when the target is gone, the class has no `KindInfo_Create` row so
+    /// there is no mask to judge the ground with, the world holds no map, or
+    /// nothing in range is reachable from `from` — the caller then keeps waiting,
+    /// which is all [`crate::main::Swing::OutOfRange`] ever did.
+    pub(crate) fn approach_tile(
+        &self,
+        monster_unique: u16,
+        from: (i32, i32),
+        range: i32,
+        class_kind: u16,
+    ) -> Option<(i32, i32)> {
+        let target = self.position(monster_unique)?;
+        let block = *self.block_by_kind.get(&class_kind)?;
+        let map = self.map.as_ref()?;
+        approach_tile_in(target, from, range, |x, y| is_walkable(map, x, y, block))
     }
 
     /// Applies one player's swing to one monster and returns what it did. A
@@ -936,6 +982,63 @@ fn walkable_path(tiles: &[(i32, i32)], from: (i32, i32), to: (i32, i32)) -> bool
     true
 }
 
+/// The tile an attacking player walks to so `range` can reach `target`: the
+/// first tile within range along the straight line [`Movement`] would walk —
+/// `None` when the line never gets there.
+///
+/// This is the legacy's own approach rather than a search of its own devising.
+/// Out of range it does `SetMove(targetX, targetY)` and steps there under
+/// `CHARWORKSTEP_MOVE`, re-checking `IsInRange` as it goes
+/// (`char-attack.cpp:1878-1887`), so the fight starts the moment the weapon
+/// reaches and not on the target's tile. Walking that same line is also what
+/// keeps this server on the client's tiles: the client applies the attack order
+/// locally before sending it (`Client.cpp:3297` `LetOrder`) and runs the same
+/// approach, so a cleverer route here would surface as the avatar snapping back
+/// to the server's.
+///
+/// The distance is provably the least any in-range tile can cost — every
+/// in-range tile is at least `chebyshev(from, target) - range` away, and this
+/// tile is exactly that — so there is nothing to optimise over.
+///
+/// A wall on the line stops it, as the legacy's own `Move()` stops on a
+/// collision, and the swing then keeps waiting. That is also why this does not
+/// pathfind around: neither the legacy nor the client does, so a route only this
+/// server knew would desync the two.
+fn approach_tile_in(
+    target: (i32, i32),
+    from: (i32, i32),
+    range: i32,
+    standable: impl Fn(i32, i32) -> bool,
+) -> Option<(i32, i32)> {
+    let reach = range.max(1);
+    // In range already: there is nothing to walk to, and the target's own tile
+    // is never an answer. The swing arm only asks from out of range, so this is
+    // the contract stated rather than a path it takes.
+    if (from.0 - target.0).abs().max((from.1 - target.1).abs()) <= reach {
+        return None;
+    }
+    let mut at = from;
+    while at != target {
+        if at.0 != target.0 {
+            at.0 += (target.0 - at.0).signum();
+        }
+        if at.1 != target.1 {
+            at.1 += (target.1 - at.1).signum();
+        }
+        if !standable(at.0, at.1) {
+            return None;
+        }
+        // Chebyshev is `IsInRange`'s operand (`Char-Common.cpp:1939`), which is
+        // also the gate the swing was rejected on.
+        if (at.0 - target.0).abs().max((at.1 - target.1).abs()) <= reach {
+            return Some(at);
+        }
+    }
+    // Arrived on the target's own tile without ever coming in range: there is
+    // no standable tile to walk to from here.
+    None
+}
+
 /// Queues one monster's appearance to every session near it.
 fn broadcast_spawn(registry: &Registry, map_id: i32, monster: &Monster) {
     for body in
@@ -1184,6 +1287,90 @@ mod tests {
         // Removing the diagonal breaks it even though the corners exist.
         let broken = [(0, 0), (2, 0), (0, 2), (2, 2)];
         assert!(!walkable_path(&broken, (0, 0), (2, 2)));
+    }
+
+    /// The approach stands where the weapon reaches — the first tile in range
+    /// along the line [`Movement`] actually walks — and stops at a wall instead
+    /// of carrying the player through it.
+    #[test]
+    fn an_approach_stops_where_the_weapon_reaches() {
+        let open = |_, _| true;
+        // Three tiles south of a reach-1 target: the last tile short of it is
+        // the first one in range, so that is where the walk ends.
+        assert_eq!(
+            approach_tile_in((10, 10), (10, 14), 1, open),
+            Some((10, 11))
+        );
+        // A longer reach stops earlier — only the distance the swing needs.
+        assert_eq!(
+            approach_tile_in((10, 10), (10, 14), 2, open),
+            Some((10, 12))
+        );
+        // Diagonals step diagonally first, which is the order [`Movement`]
+        // commits (`char-move.cpp:107-126`).
+        assert_eq!(approach_tile_in((5, 5), (0, 0), 1, open), Some((4, 4)));
+        // Ground the attacker may not stand on ends the approach: the swing
+        // keeps waiting rather than the player walking a wall.
+        let wall = |x, y| (x, y) != (10, 12);
+        assert_eq!(approach_tile_in((10, 10), (10, 14), 1, wall), None);
+        // Already in reach there is nothing to walk to, and the answer is never
+        // the target's own tile.
+        assert_eq!(approach_tile_in((10, 10), (10, 11), 1, open), None);
+    }
+
+    /// The two halves of [`MonsterWorld::approach_tile`] that only the shipped
+    /// tables can prove: map 0 has to be kept, and a character's `class_kind` —
+    /// a `KindInfo_Unique` id, where `KIND_HERO1` is 1 — has to join to its
+    /// `KindInfo_Create` block mask. A join keyed on any other column leaves
+    /// that missing and every approach quietly resolves to `None`, which is this
+    /// whole feature silently doing nothing.
+    #[test]
+    fn a_real_world_approaches_on_ground_a_player_class_may_stand_on() {
+        if !Path::new(DATA_ROOT).exists() {
+            return; // the game data is not part of this repository
+        }
+        let mut world = MonsterWorld::load(Path::new(DATA_ROOT)).expect("the field data loads");
+        world.spawn_all(&Registry::new());
+
+        const HERO1: u16 = 1; // `KindInfo_Unique.txt`: 1 KIND_HERO1
+        assert!(
+            world.block_by_kind.contains_key(&HERO1),
+            "KIND_HERO1's block mask did not join"
+        );
+        let map = world
+            .map
+            .as_ref()
+            .expect("map 0 was not kept for the approach");
+        let block = world.block_by_kind[&HERO1];
+
+        // Real ground, real mask: from any safe group tile out of reach, the
+        // walk ends on a tile the weapon reaches and never on the target. A
+        // wall on the line is a wait rather than a failure — the legacy's own
+        // `Move()` gets stuck there too — so what has to hold is that *some*
+        // shipped pairing closes the gap.
+        let mut closed = 0usize;
+        for m in &world.monsters {
+            let target = (m.x, m.y);
+            for &(x, y) in &world.groups[m.group].units[m.unit].tiles {
+                if (x - target.0).abs().max((y - target.1).abs()) <= 1 {
+                    continue; // already in reach; the swing arm never asks
+                }
+                let standable = |ax, ay| is_walkable(map, ax, ay, block);
+                let Some(to) = approach_tile_in(target, (x, y), 1, standable) else {
+                    continue;
+                };
+                assert_ne!(to, target, "the approach stood on its target");
+                assert!(
+                    (to.0 - target.0).abs().max((to.1 - target.1).abs()) <= 1,
+                    "{to:?} is not within reach of {target:?}"
+                );
+                closed += 1;
+                if closed >= 4 {
+                    return;
+                }
+            }
+        }
+        assert!(closed > 0, "no shipped monster could be approached at all");
     }
 
     /// A hit that does not kill leaves the monster where and as it was; one

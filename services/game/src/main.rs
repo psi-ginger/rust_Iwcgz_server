@@ -672,14 +672,57 @@ async fn handle_client(
                                          {outcome:?}"
                                     );
                                 }
-                                // `OutOfRange` waits instead of ending the fight:
-                                // the legacy closes the distance itself
-                                // (`CHARWORKSTEP_DECIDELENGTH`,
-                                // `char-order.cpp:236`) and this port does not
-                                // yet, so a target that merely stepped aside is
-                                // still a target. shortcut: no auto-approach —
-                                // a player who walks off issues `ORDER_MOVE`,
-                                // which ends the attack.
+                                // The gap gets closed instead of refused:
+                                // `ORDER_ATTACK` sets `CHARWORKSTEP_DECIDELENGTH`
+                                // and keeps the fight in the legacy
+                                // (`char-order.cpp:232-238`), and the client
+                                // walks its own copy of that step *before* it
+                                // sends the order (`Client.cpp:3297` `LetOrder`)
+                                // — which is why the avatar closed the gap while
+                                // this server's own tile stayed put and every
+                                // swing came back `OutOfRange`. A target that
+                                // merely stepped aside stays a target as well; a
+                                // player who walks off issues `ORDER_MOVE`, and
+                                // that is still what ends the attack.
+                                //
+                                // One walk at a time: a movement already running
+                                // is either this approach or the player's own
+                                // ordered walk, and only the player's replaces it.
+                                if outcome == Swing::OutOfRange && movement.is_none() {
+                                    let range = player_attacks.range(class_kind);
+                                    let approach = monsters
+                                        .lock()
+                                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                        .approach_tile(target, (ax, ay), range, class_kind);
+                                    match approach {
+                                        // No 241 goes with this walk: no new order
+                                        // arrived, so the legacy sends only the
+                                        // per-tile 200s `step_movement` already
+                                        // fans — and the client is walking its own
+                                        // copy of the approach already.
+                                        Some(dest) => {
+                                            let mut mv = Movement::new(
+                                                dest,
+                                                (ax, ay),
+                                                character.map_id,
+                                                i32::from(character.move_speed),
+                                            );
+                                            mv.deadline =
+                                                Some(next_move_deadline(&mv, Instant::now()));
+                                            movement = Some(mv);
+                                            logln!(
+                                                "game: {peer}: out of range of {target} (range \
+                                                 {range}): walking ({ax}, {ay}) -> ({}, {})",
+                                                dest.0,
+                                                dest.1
+                                            );
+                                        }
+                                        None => logln!(
+                                            "game: {peer}: out of range of {target} (range \
+                                             {range}) from ({ax}, {ay}) and no approachable tile"
+                                        ),
+                                    }
+                                }
                                 (outcome != Swing::NoTarget).then(|| {
                                     (
                                         target,
