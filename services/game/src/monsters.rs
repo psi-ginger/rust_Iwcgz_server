@@ -1121,10 +1121,16 @@ fn walkable_path(tiles: &[(i32, i32)], from: (i32, i32), to: (i32, i32)) -> bool
 /// in-range tile is at least `chebyshev(from, target) - range` away, and this
 /// tile is exactly that — so there is nothing to optimise over.
 ///
-/// A wall on the line stops it, as the legacy's own `Move()` stops on a
-/// collision, and the swing then keeps waiting. That is also why this does not
-/// pathfind around: neither the legacy nor the client does, so a route only this
-/// server knew would desync the two.
+/// A wall on the line stops the walk where the legacy's own `Move()` stops on a
+/// collision — but it stops *there*, it does not throw the whole approach away.
+/// The caller re-plans from whatever tile was reached on its next tick
+/// (`main.rs`), so the gap keeps closing whenever the line to the target opens,
+/// which is also what happens as the target wanders.
+///
+/// This is deliberately still not a pathfind: neither the legacy nor the client
+/// routes around an obstacle for `CHARWORKSTEP_DECIDELENGTH`, so a route only
+/// this server knew would desync the two. Both sides walk the same straight line
+/// and both stop at the same wall.
 fn approach_tile_in(
     target: (i32, i32),
     from: (i32, i32),
@@ -1139,6 +1145,9 @@ fn approach_tile_in(
         return None;
     }
     let mut at = from;
+    // The closest tile the line has offered that is still out of reach. Every
+    // step moves toward the target, so this only ever gets closer.
+    let mut nearest_open: Option<(i32, i32)> = None;
     while at != target {
         if at.0 != target.0 {
             at.0 += (target.0 - at.0).signum();
@@ -1147,17 +1156,20 @@ fn approach_tile_in(
             at.1 += (target.1 - at.1).signum();
         }
         if !standable(at.0, at.1) {
-            return None;
+            break;
         }
         // Chebyshev is `IsInRange`'s operand (`Char-Common.cpp:1939`), which is
         // also the gate the swing was rejected on.
         if (at.0 - target.0).abs().max((at.1 - target.1).abs()) <= reach {
             return Some(at);
         }
+        nearest_open = Some(at);
     }
-    // Arrived on the target's own tile without ever coming in range: there is
-    // no standable tile to walk to from here.
-    None
+    // The line hit something. Handing back the last open tile closes the gap that
+    // was reachable instead of discarding it; `None` means the very first step was
+    // blocked, so there is nowhere this player may go — never the tile they are
+    // already standing on, which would spin the re-plan forever.
+    nearest_open
 }
 
 /// Queues one monster's appearance to every session near it.
@@ -1439,10 +1451,15 @@ mod tests {
         // Diagonals step diagonally first, which is the order [`Movement`]
         // commits (`char-move.cpp:107-126`).
         assert_eq!(approach_tile_in((5, 5), (0, 0), 1, open), Some((4, 4)));
-        // Ground the attacker may not stand on ends the approach: the swing
-        // keeps waiting rather than the player walking a wall.
+        // Ground the attacker may not stand on ends the approach *at the wall*:
+        // the open tiles before it are still walked and the swing keeps waiting,
+        // rather than the whole approach being abandoned — or, worse, the player
+        // being planted on or through the wall.
         let wall = |x, y| (x, y) != (10, 12);
-        assert_eq!(approach_tile_in((10, 10), (10, 14), 1, wall), None);
+        assert_eq!(
+            approach_tile_in((10, 10), (10, 14), 1, wall),
+            Some((10, 13))
+        );
         // Already in reach there is nothing to walk to, and the answer is never
         // the target's own tile.
         assert_eq!(approach_tile_in((10, 10), (10, 11), 1, open), None);
@@ -1496,11 +1513,6 @@ mod tests {
             .expect("map 0 was not kept for the approach");
         let block = world.block_by_kind[&HERO1];
 
-        // Real ground, real mask: from any safe group tile out of reach, the
-        // walk ends on a tile the weapon reaches and never on the target. A
-        // wall on the line is a wait rather than a failure — the legacy's own
-        // `Move()` gets stuck there too — so what has to hold is that *some*
-        // shipped pairing closes the gap.
         let mut closed = 0usize;
         for m in &world.monsters {
             let target = (m.x, m.y);
@@ -1508,14 +1520,21 @@ mod tests {
                 if (x - target.0).abs().max((y - target.1).abs()) <= 1 {
                     continue; // already in reach; the swing arm never asks
                 }
+                // Real ground, real mask: from any safe group tile out of reach, the
+                // walk ends somewhere strictly closer and never on the target — on
+                // the weapon's reach when the line is clear, on the last open tile
+                // before a wall when it is not. What has to hold is that *some*
+                // shipped pairing closes the gap.
                 let standable = |ax, ay| is_walkable(map, ax, ay, block);
                 let Some(to) = approach_tile_in(target, (x, y), 1, standable) else {
                     continue;
                 };
                 assert_ne!(to, target, "the approach stood on its target");
+                let before = (x - target.0).abs().max((y - target.1).abs());
+                let after = (to.0 - target.0).abs().max((to.1 - target.1).abs());
                 assert!(
-                    (to.0 - target.0).abs().max((to.1 - target.1).abs()) <= 1,
-                    "{to:?} is not within reach of {target:?}"
+                    after < before,
+                    "{to:?} is no closer to {target:?} than the tile walked from"
                 );
                 closed += 1;
                 if closed >= 4 {
@@ -1524,6 +1543,66 @@ mod tests {
             }
         }
         assert!(closed > 0, "no shipped monster could be approached at all");
+    }
+
+    /// A wall on the approach line stops the walk at the wall — it does not
+    /// cancel the approach.
+    ///
+    /// The live report this pins: a player at (291,358) clicking a monster at
+    /// (285,371) on map 0 got `OutOfRange` for seventeen consecutive seconds and
+    /// never moved. The line is 13 tiles and tile 3, (288,361), is not standable,
+    /// so `approach_tile_in` handed back `None` and the caller stood still —
+    /// while the client happily walked its own copy of that approach.
+    #[test]
+    fn a_wall_on_the_approach_line_stops_at_the_wall_instead_of_nowhere() {
+        let target: (i32, i32) = (0, 0);
+        let from: (i32, i32) = (0, 5);
+
+        // The whole line open: unchanged behaviour, the in-range tile comes back.
+        let open = |_, _| true;
+        assert_eq!(approach_tile_in(target, from, 1, open), Some((0, 1)));
+
+        // Three tiles in, the line hits something. The player still closes the two
+        // tiles that were genuinely reachable rather than staying put.
+        let wall_at_third = |x: i32, y: i32| (x, y) != (0, 3);
+        assert_eq!(
+            approach_tile_in(target, from, 1, wall_at_third),
+            Some((0, 4)),
+            "the approach must return the last open tile before the wall"
+        );
+
+        // Obstructed on the very first step: nowhere to go. It must not answer with
+        // the tile the player is already standing on, or the per-tick re-plan in
+        // `main.rs` would build a zero-length walk forever.
+        let wall_at_first = |x: i32, y: i32| (x, y) != (0, 4);
+        assert_eq!(approach_tile_in(target, from, 1, wall_at_first), None);
+    }
+
+    /// The real-map form of the same thing, using the geometry the live log
+    /// recorded. Skipped when the game data is not on this machine.
+    #[test]
+    fn the_live_out_of_range_geometry_now_has_an_answer() {
+        if !Path::new(DATA_ROOT).exists() {
+            return; // the game data is not part of this repository
+        }
+        let world = MonsterWorld::load(Path::new(DATA_ROOT)).expect("the field data loads");
+        let map = world.map.as_ref().expect("map 0 kept");
+        // `class 7` is the character the 2026-10-17 live run was played on; the
+        // mask joined then, so it has to join now or this is a different bug.
+        let block = *world
+            .block_by_kind
+            .get(&7)
+            .expect("class 7 joins KindInfo_Create");
+        let target: (i32, i32) = (285, 371);
+        let from: (i32, i32) = (291, 358);
+        let plan = approach_tile_in(target, from, 1, |x, y| is_walkable(map, x, y, block));
+        let Some(to) = plan else {
+            panic!("(288,361) is the only obstruction on that line, so an answer is owed");
+        };
+        assert_ne!(to, from, "the approach made no progress at all");
+        let before = (from.0 - target.0).abs().max((from.1 - target.1).abs());
+        let after = (to.0 - target.0).abs().max((to.1 - target.1).abs());
+        assert!(after < before, "{to:?} is not closer than the start");
     }
 
     /// A hit that does not kill leaves the monster where and as it was; one
