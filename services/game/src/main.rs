@@ -663,6 +663,15 @@ async fn handle_client(
                                     target,
                                 )
                                 .await?;
+                                // A landing swing is self-evident — the client
+                                // prints the number — so only the two ways it
+                                // fails are worth a line.
+                                if outcome != Swing::Landed {
+                                    logln!(
+                                        "game: {peer}: swing at {target} did not land: \
+                                         {outcome:?}"
+                                    );
+                                }
                                 // `OutOfRange` waits instead of ending the fight:
                                 // the legacy closes the distance itself
                                 // (`CHARWORKSTEP_DECIDELENGTH`,
@@ -1275,6 +1284,12 @@ async fn handle_client(
                         );
                         // Armed for "now": the next pass of the read loop lands
                         // the first swing, then re-arms on the interval.
+                        logln!(
+                            "game: {peer}: ORDER_ATTACK -> monster {target_unique}, \
+                             attacker at ({}, {}); swing armed",
+                            me.x,
+                            me.y
+                        );
                         attack = Some((target_unique, Instant::now()));
                         continue;
                     }

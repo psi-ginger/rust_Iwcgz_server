@@ -625,7 +625,15 @@ impl MonsterWorld {
         } else {
             self.monsters[index].life = new_life;
             // Retaliation. Only a survivor holds a grudge — a monster removed
-            // above is not in the vector to hold one.
+            // above is not in the vector to hold one. Logged once per
+            // engagement rather than per hit: the acquisition is the event
+            // worth seeing, the swings are the 268s that follow it.
+            if self.monsters[index].target != Some(attacker) {
+                logln!(
+                    "game: monster {monster_unique} turns on {attacker} after being hit \
+                     ({new_life} life left)"
+                );
+            }
             self.monsters[index].target = Some(attacker);
         }
 
