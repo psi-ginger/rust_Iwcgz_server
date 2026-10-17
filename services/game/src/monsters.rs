@@ -1147,6 +1147,13 @@ fn broadcast_char_update(registry: &Registry, map_id: i32, monster: &Monster) {
 /// The wire record for one monster — the same `cltMakeCharInfoCommon` shape a
 /// static NPC is announced with (`npc_record_for`, `world.rs`), with the kind's
 /// move speed so a monster is distinguishable from a standing NPC.
+///
+/// No max life rides along with [`NpcRecord::life`], and none can: the client
+/// derives it from KindInfo. An overhead health bar is gated on the kind having
+/// `ATB_NOJJIM` (`Char-Draw.cpp:2745`, checked again at `:2821`), which only 110
+/// of 563 shipped monster kinds carry — the raccoon and the other starter mobs
+/// among them are not. That is why a field monster draws no bar, and it is not
+/// reachable from here.
 fn record_for(map_id: i32, monster: &Monster) -> NpcRecord {
     NpcRecord {
         make_char_kind: monster.wire_kind,

@@ -76,6 +76,12 @@ pub struct NpcRecord {
     pub level: u8,
     /// `uiLife` (20 bits). Must be non-zero: the server refuses to build a record
     /// for a character at 0 life unless it is a hero (`char.cpp:9375`).
+    ///
+    /// There is deliberately no max-life field: `cltMakeCharInfoCommon` has
+    /// `uiLife` and nothing else (`Common.cpp:1543-1560` copies every member of
+    /// it), and the client computes its own `MaxLife` from the kind's Vit times
+    /// `VIT_LIFE_RATE` (`Parametabox.cpp:5798`). Nothing on the wire can raise
+    /// or lower it, so do not add one here to fix a bar that does not draw.
     pub life: u32,
     /// `uiX` — map tile x (10 bits).
     pub x: u16,
