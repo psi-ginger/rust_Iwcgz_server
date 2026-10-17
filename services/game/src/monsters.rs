@@ -310,9 +310,16 @@ impl MonsterWorld {
                     }
                     continue;
                 };
-                // `health_add_change` off is the legacy default branch
-                // (`MonsterStats::at`); the port has no country-switch table.
-                let stats = MonsterStats::at(create_row, attack_row, unit.level, false);
+                // `Switch_HealthAddChange` is `1` in every shipped
+                // `Data\CountrySwitch.txt`, and the client's `clPB.GetMaxLife()`
+                // gates the bar's denominator on that same switch for NPCs as
+                // well as players (`Parametabox.cpp:7268`) — so the pair has to be
+                // the one the client uses, not the legacy's older branch. This
+                // also matches the player path, which has always used it
+                // (`stats::derived_max_life`).
+                // shortcut: hardcoded rather than read from CountrySwitch.txt; read
+                // the file if a data set ships `Switch_HealthAddChange 0`.
+                let stats = MonsterStats::at(create_row, attack_row, unit.level, true);
                 let Ok(life) = u32::try_from(stats.max_hp) else {
                     logln_err!("monsters: kind {} has negative life", unit.kind);
                     continue;
@@ -1603,6 +1610,75 @@ mod tests {
         let before = (from.0 - target.0).abs().max((from.1 - target.1).abs());
         let after = (to.0 - target.0).abs().max((to.1 - target.1).abs());
         assert!(after < before, "{to:?} is not closer than the start");
+    }
+
+    /// A monster's spawn life is the denominator of every overhead bar: the
+    /// client's `clPB.GetMaxLife()` dispatches on `Switch_HealthAddChange`
+    /// (`Parametabox.cpp:7268-7282`), and the shipped `Data\CountrySwitch.txt`
+    /// sets it to `1`. The flag here is read from that file rather than
+    /// restated, so this fails if the data ever ships the other value *or* if
+    /// the spawn path hardcodes one — which it did, quietly leaving the server
+    /// on the older `vit * VIT_LIFE_RATE` branch while the client divided by
+    /// something else.
+    #[test]
+    fn a_monsters_spawn_life_follows_the_shipped_country_switch() {
+        if !Path::new(DATA_ROOT).exists() {
+            return; // the game data is not part of this repository
+        }
+        let root = Path::new(DATA_ROOT);
+        let raw = std::fs::read(root.join("Data/CountrySwitch.txt"))
+            .expect("CountrySwitch.txt ships beside KindInfo_Create.txt");
+        let units: Vec<u16> = raw
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|c| u16::from_le_bytes(*c))
+            .collect();
+        let units = units.strip_prefix(&[0xFEFF]).unwrap_or(&units);
+        let text = String::from_utf16_lossy(units);
+        assert!(
+            text.contains("Switch_HealthAddChange"),
+            "CountrySwitch.txt no longer names the switch the bar's denominator reads"
+        );
+        let health_add_change = text
+            .lines()
+            .any(|line| line.starts_with("Switch_HealthAddChange\t1"));
+
+        let create = kindinfo::load_kind_create(root).expect("KindInfo_Create.txt loads");
+        let unique = kindinfo::load_kind_unique(root).expect("KindInfo_Unique.txt loads");
+        let attack = kindinfo::canonical_char_attack();
+        let create_by_code: HashMap<&str, &KindCreateRow> =
+            create.iter().map(|r| (r.code.as_str(), r)).collect();
+        let attack_by_code: HashMap<&str, &CharAttackRow> =
+            attack.iter().map(|r| (r.code.as_str(), r)).collect();
+        let code_by_id: HashMap<u16, &str> =
+            unique.iter().map(|r| (r.id, r.code.as_str())).collect();
+
+        let world = MonsterWorld::load(root).expect("the field data loads");
+        assert!(!world.groups.is_empty());
+        let mut checked = 0usize;
+        for group in &world.groups {
+            for unit in &group.units {
+                let Some(&code) = code_by_id.get(&unit.wire_kind) else {
+                    continue; // `MonsterWorld::load` already logged the gap
+                };
+                let (Some(create_row), Some(attack_row)) = (
+                    create_by_code.get(code).copied(),
+                    attack_by_code.get(code).copied(),
+                ) else {
+                    continue;
+                };
+                let want = MonsterStats::at(create_row, attack_row, unit.level, health_add_change);
+                assert_eq!(
+                    unit.life,
+                    u32::try_from(want.max_hp).expect("a kind with negative life"),
+                    "kind {code} at level {} spawned at the wrong max",
+                    unit.level
+                );
+                checked += 1;
+            }
+        }
+        assert!(checked > 0, "no kind could be re-derived at all");
     }
 
     /// A hit that does not kill leaves the monster where and as it was; one
