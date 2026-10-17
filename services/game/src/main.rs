@@ -1300,6 +1300,18 @@ async fn handle_client(
                     // attack order outright.
                     if order.si_order == ORDER_MOVE {
                         attack = None;
+                    } else {
+                        // Anything that is neither a walk nor a swing lands here
+                        // and is dropped by `handle_userorder`. Without this line
+                        // the client's real order is invisible — which is exactly
+                        // the ambiguity a live combat test trips over.
+                        logln!(
+                            "game: {peer}: order {} ignored (para1={}, para2={}, char={})",
+                            order.si_order,
+                            order.si_para1,
+                            order.si_para2,
+                            order.char_unique
+                        );
                     }
                     match handle_userorder(
                         &mut stream,
