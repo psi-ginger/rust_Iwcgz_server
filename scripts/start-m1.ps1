@@ -35,6 +35,9 @@ foreach ($exe in @("front.exe", "game.exe")) {
 
 # Each service writes its stdout/stderr to a file under target\m1-logs so the
 # opcode trace survives after the windows are closed (target\ is git-ignored).
+# The redirect is also why those services' own windows are blank: no println!
+# ever reaches a console. The same trace is streamed into this window at the
+# bottom of the script, so the file and a live view are both kept.
 $logDir = Join-Path $root "target\m1-logs"
 New-Item -ItemType Directory -Force -Path $logDir | Out-Null
 
@@ -71,3 +74,30 @@ Write-Host "Logs: $logDir\front.log, $logDir\game.log (+ .err.log)."
 Write-Host "Log clock origin: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss.fff')."
 Write-Host "Link key $($env:GAME_LINK_KEY1)/$($env:GAME_LINK_KEY2). World entry is generated from PostgreSQL; char_unique is allocated per session."
 Write-Host "Point the client at 127.0.0.1 and log in as test / test."
+Write-Host "Live game log follows in THIS window; closing the game window ends it."
+
+# The services' own windows are empty because their stdout/stderr were
+# redirected into $logDir above, so stream that trace back out here instead —
+# otherwise every packet in a live test is invisible until the file is opened
+# afterwards. Each file needs its own watcher: Get-Content -Wait follows only
+# the first path it is given. The stream stops when the game window closes, so
+# this script still returns on its own.
+$live = @(
+    Start-Job -ScriptBlock { param($p) Get-Content -Path $p -Wait -Tail 3 } `
+        -ArgumentList (Join-Path $logDir "game.log")
+    Start-Job -ScriptBlock { param($p) Get-Content -Path $p -Wait -Tail 3 } `
+        -ArgumentList (Join-Path $logDir "game.err.log")
+)
+try {
+    while (-not $game.HasExited) {
+        $live | ForEach-Object { Receive-Job -Job $_ }
+        Start-Sleep -Milliseconds 400
+    }
+}
+finally {
+    $live | ForEach-Object {
+        Receive-Job -Job $_
+        Stop-Job -Job $_ -ErrorAction SilentlyContinue
+        Remove-Job -Job $_ -Force -ErrorAction SilentlyContinue
+    }
+}
