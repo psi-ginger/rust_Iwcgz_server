@@ -1294,6 +1294,41 @@ pub fn encode_logout(char_unique: i32) -> Vec<u8> {
     w.finish()
 }
 
+/// `cltGameMsgResponse_Jim` (`MsgType-Person.h:539-549`) — opcode
+/// [`crate::opcodes_game::GameMsg::ResponseJim`] (263), 4 bytes.
+///
+/// This, not the attack order, is what raises a monster's overhead health bar.
+/// The gate is `Char-Draw.cpp:2773-2780`:
+///
+/// ```c
+/// if (GetLife() > 0 && (IsNPC(GetCharUnique()) || IsInstanceNPC(GetCharUnique())))
+///     if (clJim.siJimHostCharUnique && clJim.siJimHostCharUnique == pclCM->CR[1]->GetCharUnique())
+///         bDrawHealthBarSwitch = true;
+/// ```
+///
+/// `bDrawHealthBarSwitch` has only three other writers: `ATB_NOJJIM` on the
+/// kind (forcing it on for every such mob), and the fixed `IDENTITY_*`
+/// characters (`CommonHeader.h:475-483`). So an ordinary field mob bars up
+/// exactly when it is *jim-ed* by the local player.
+///
+/// The server does that in `SetBeAttackedSwitch` (`CharServer-Attack.cpp:26-76`)
+/// the moment a monster is hit: `SetBeJimed(attacker)` on the monster,
+/// `SetJim(monster)` on the attacker, then this frame to everyone nearby.
+/// `SetBeJimed` refuses a second host (`Char-Common.cpp:6226`), so a monster
+/// already fought by one player keeps that player's bar and the next attacker
+/// gets none — the legacy's contention behaviour, and why a mob in a crowd bars
+/// up for exactly one person.
+///
+/// `char_unique` is the jimed char (the monster); `jim_char_unique` is its host
+/// (the attacker).
+#[must_use]
+pub fn encode_jim(char_unique: i16, jim_char_unique: i16) -> Vec<u8> {
+    let mut w = Writer::with_capacity(4);
+    w.i16(char_unique);
+    w.i16(jim_char_unique);
+    w.finish()
+}
+
 /// `cltGameMsgResponse_VillageStruct` (opcode 1102). Sent in answer to
 /// `GAMEMSG_REQUEST_VILLAGESTRUCT` (1101) so the client stops waiting
 /// (`SetCharReservedChar` refuses to pop while `bWaitVillageStructureInfoSwitch`

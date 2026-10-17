@@ -54,8 +54,11 @@ pub const ORDER_MOVE: i8 = 4;
 /// char unique rides in `siPara2` (`MakeOrder_ATTACK`, `order.cpp:314-321`).
 ///
 /// A monster's attack goes out this way *and* as the 268 hit response: the 241
-/// is what makes a bystander's client play the swing, the 268 is what moves the
-/// HP bar. There is no separate "attack animation" opcode.
+/// is what makes a client play the swing. It is **not** what raises the
+/// overhead health bar — that is [`crate::game::encode_jim`], whose frame marks
+/// the monster as fought-by a player (`Char-Draw.cpp:2773-2780` gates the bar
+/// on `clJim.siJimHostCharUnique ==` the local player). There is no separate
+/// "attack animation" opcode.
 pub const ORDER_ATTACK: i8 = 5;
 
 /// `ORDER_DIE` (`CommonHeader.h:523`) — the death order, broadcast after a
@@ -218,6 +221,16 @@ impl OrderData {
     /// *target's* character unique, and `siPara4` is the reserve-order slot the
     /// legacy passes through (`char-order.cpp:247`) — 0 when nothing is
     /// reserved.
+    ///
+    /// A client applies this in `DoMsg_GAMEMSG_RESPONSE_USERORDER`
+    /// (`Client-SystemNPC.cpp:538`), which is what puts the char into an attack
+    /// order. That drives the *swing animation*; it does not raise the overhead
+    /// health bar. The bar hangs off `clJim.siJimHostCharUnique`
+    /// (`Char-Draw.cpp:2773-2780`), set by the separate 263 `ResponseJim`
+    /// (`encode_jim`). The `switch` over `1/2/3/5/9` in that function's caller
+    /// is `clIdentity.siIdentity` — `IDENTITY_CASTLE`/`VILLAGEGOD`/
+    /// `VILLAGEGOD_SUMMON`/`VILLAGEHUNT`/`MOFUMOFUEVENT`
+    /// (`CommonHeader.h:475-483`), not an order and not a `CHARWORKSTEP`.
     #[must_use]
     pub fn attack_order(char_unique: i32, target_unique: i16) -> Self {
         Self {

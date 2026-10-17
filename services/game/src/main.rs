@@ -1861,7 +1861,14 @@ async fn player_swing(
             );
             return Ok(Swing::OutOfRange);
         }
-        world.hit_by_player(target_unique, me.char_unique, crit, now_tick(), combat_rng)
+        world.hit_by_player(
+            registry,
+            target_unique,
+            me.char_unique,
+            crit,
+            now_tick(),
+            combat_rng,
+        )
     };
     // A target the world does not hold — a player, a static NPC, or a monster
     // that just died between the lookup and the hit. The legacy's null `CR[id]`

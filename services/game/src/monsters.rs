@@ -37,7 +37,7 @@ use gz_data::map::MapFile;
 use gz_data::npc::{NPC_CHAR_UNIQUE_BASE, NPC_PLACEMENTS};
 use gz_data::npcgroup;
 use gz_data::spawn::{SpawnField, SpawnGroup, is_walkable};
-use gz_proto::game::{client_map_index, encode_logout};
+use gz_proto::game::{client_map_index, encode_jim, encode_logout};
 use gz_proto::loginmany::{LoginManyRecord, NpcRecord, encode_login_many_batches_mixed};
 use gz_proto::map_geometry::{cell_of, cells_adjacent};
 use gz_proto::opcodes_game::GameMsg;
@@ -160,6 +160,18 @@ struct Monster {
     /// The `char_unique` of the player this monster is fighting, or `None` when
     /// it is idle. The legacy's `siTargetCharUnique`.
     target: Option<i16>,
+    /// The `char_unique` of the player this monster is *jim-ed* by, or `None`
+    /// until someone lands a hit. The legacy's `cltJim::siJimHostCharUnique`
+    /// (`Char-Common.h:436`).
+    ///
+    /// Independent of [`Monster::target`] and far more stubborn: the first
+    /// player to hit takes it and it is **not** released when combat ends —
+    /// only death or another player displacing it clears it, and
+    /// `SetBeJimed` refuses a second host outright (`Char-Common.cpp:6226`).
+    /// It is also the only thing that can raise an ordinary mob's overhead
+    /// health bar, which is the whole reason it is worth carrying here — see
+    /// [`crate::game::encode_jim`].
+    jim_host: Option<i16>,
     /// A walk in progress — usually the walk into range this monster's target
     /// stands at. It outlives the `target`, so the two are held at once.
     walk: Option<Movement>,
@@ -473,6 +485,7 @@ impl MonsterWorld {
             group,
             unit,
             target: None,
+            jim_host: None,
             walk: None,
             // Staggered by id, the legacy's `(rand() + siID) % 25` term.
             next_act_ms: 0,
@@ -663,8 +676,15 @@ impl MonsterWorld {
     /// an order (`BeAttackedAction` → `FindEnemyAction` → `OrderAttack`,
     /// `CharServer-Attack.cpp:144`, `charorg.cpp:112`). `siAggressive` gates
     /// only `SearchEnemy`, so it is never consulted for retaliation.
+    ///
+    /// That same `SetBeAttackedSwitch` call also registers the attacker as this
+    /// monster's **jim host** and broadcasts the 263 that makes a client draw
+    /// the overhead health bar (`CharServer-Attack.cpp:44-74`) — the bar's only
+    /// trigger for an ordinary mob. Hence `registry`: the bar is a broadcast,
+    /// not a local state change.
     pub(crate) fn hit_by_player(
         &mut self,
+        registry: &Registry,
         monster_unique: u16,
         attacker: i16,
         raw_power: i32,
@@ -734,6 +754,29 @@ impl MonsterWorld {
                 );
             }
             self.monsters[index].target = Some(attacker);
+            // `SetBeAttackedSwitch` (`CharServer-Attack.cpp:26-76`) — being hit
+            // registers the attacker as this monster's jim host, and that alone
+            // is what raises the overhead health bar. `SetBeJimed` takes the
+            // first host and thereafter accepts only that same one
+            // (`Char-Common.cpp:6226`), so a monster already fought by another
+            // player keeps *their* bar and this attacker never sees one. Every
+            // accepted hit re-broadcasts, which is what the legacy does too.
+            let jimed = match self.monsters[index].jim_host {
+                None => {
+                    self.monsters[index].jim_host = Some(attacker);
+                    true
+                }
+                Some(host) => host == attacker,
+            };
+            if jimed {
+                registry.broadcast_near_point(
+                    FIELD_MAP,
+                    monster.x,
+                    monster.y,
+                    GameMsg::ResponseJim as u16,
+                    encode_jim(monster.unique as i16, attacker),
+                );
+            }
         }
 
         Some(MonsterHit {
@@ -1327,6 +1370,7 @@ mod tests {
             group: 0,
             unit: 0,
             target: None,
+            jim_host: None,
             walk: None,
             next_act_ms: 0,
             next_swing_ms: 0,
@@ -1390,6 +1434,7 @@ mod tests {
                 group: 0,
                 unit: 0,
                 target: None,
+                jim_host: None,
                 walk: None,
                 next_act_ms: 0,
                 next_swing_ms: 0,
@@ -1719,7 +1764,7 @@ mod tests {
         let mut rng = Rng::new(7);
 
         let hit = world
-            .hit_by_player(unique, 1000, 5, 1_000, &mut rng)
+            .hit_by_player(&Registry::new(), unique, 1000, 5, 1_000, &mut rng)
             .expect("the monster is there");
         assert_eq!(hit.life, 15);
         assert_eq!(hit.damage, 5, "ac 0 takes nothing off");
@@ -1735,7 +1780,7 @@ mod tests {
         );
 
         let hit = world
-            .hit_by_player(unique, 1000, 50, 1_000, &mut rng)
+            .hit_by_player(&Registry::new(), unique, 1000, 50, 1_000, &mut rng)
             .expect("the monster is still there");
         assert_eq!(hit.life, 0);
         assert!(hit.died);
@@ -1813,7 +1858,7 @@ mod tests {
         let mut rng = Rng::new(7);
 
         let hit = world
-            .hit_by_player(unique, 1000, 50, 1_000, &mut rng)
+            .hit_by_player(&Registry::new(), unique, 1000, 50, 1_000, &mut rng)
             .expect("the monster is there");
         assert!(hit.died);
         assert_eq!(
@@ -1983,6 +2028,115 @@ mod tests {
         assert_eq!(
             decoded.si_para2, 1000,
             "siPara2 is the target's char unique"
+        );
+    }
+
+    /// Being hit registers the attacker as the monster's **jim host** and
+    /// broadcasts the 263 that makes a client draw the overhead health bar.
+    /// This, not the attack order, is the bar's trigger: its gate is
+    /// `clJim.siJimHostCharUnique == pclCM->CR[1]->GetCharUnique()`
+    /// (`Char-Draw.cpp:2773-2780`), and the 268 never sets that field. It is
+    /// also sticky in the legacy's way — the first attacker keeps the monster
+    /// and a second one gets nothing, because `SetBeJimed` refuses a second
+    /// host (`Char-Common.cpp:6226`).
+    #[test]
+    fn being_hit_registers_the_attacker_as_the_jim_host() {
+        use crate::registry::{Outbound, SessionInfo};
+
+        fn register(
+            registry: &Registry,
+            char_unique: i16,
+            name: &str,
+        ) -> tokio::sync::mpsc::UnboundedReceiver<Outbound> {
+            let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Outbound>();
+            registry.register(
+                Registry::next_key(),
+                tx,
+                SessionInfo {
+                    char_unique,
+                    name: name.to_owned(),
+                    level: 1,
+                    map_id: FIELD_MAP,
+                    x: 0,
+                    y: 0,
+                    school_id: 0,
+                    class_kind: 1,
+                    life: 40,
+                    move_speed: 12,
+                    sex: 1,
+                    gm_level: 0,
+                },
+            );
+            rx
+        }
+
+        let registry = Registry::new();
+        let mut rx = register(&registry, 1000, "Attacker");
+
+        let mut world = MonsterWorld::empty();
+        world.groups.push(FieldGroup {
+            anchor: SpawnGroup {
+                map_index: FIELD_MAP,
+                center_x: 0,
+                center_y: 0,
+                radius: 1,
+            },
+            capacity: 1,
+            units: vec![SpawnUnit {
+                wire_kind: 15,
+                level: 1,
+                max_num: 1,
+                move_speed: 12,
+                life: 20,
+                tiles: vec![(0, 0)],
+                min_atk: 1,
+                max_atk: 1,
+                ac: 0,
+                exp: 0,
+                aggressive: 0,
+                range: 1,
+                attack_interval: 2_000,
+                critical_rate: 0,
+                drops: &[],
+            }],
+        });
+        world.spawn_all(&Registry::new());
+        let unique = world.monsters[0].unique;
+        let mut rng = Rng::new(1);
+
+        world
+            .hit_by_player(&registry, unique, 1000, 5, 1_000, &mut rng)
+            .expect("the hit lands");
+
+        let mut frames = Vec::new();
+        while let Ok(out) = rx.try_recv() {
+            frames.push(out);
+        }
+        let jim = frames
+            .iter()
+            .find(|f| f.cmd == GameMsg::ResponseJim as u16)
+            .expect("being hit broadcasts the jim frame");
+        assert_eq!(
+            jim.payload,
+            encode_jim(unique as i16, 1000),
+            "siCharUnique is the monster, siJimCharUnique is the attacker"
+        );
+        assert_eq!(world.monsters[0].jim_host, Some(1000));
+
+        // A second player lands a hit and hears nothing: the monster belongs
+        // to whoever hit it first, so only one person ever gets the bar.
+        let mut rx2 = register(&registry, 2000, "Other");
+        world
+            .hit_by_player(&registry, unique, 2000, 5, 1_000, &mut rng)
+            .expect("the hit lands");
+        assert!(
+            rx2.try_recv().is_err(),
+            "a monster already jim-ed by someone else broadcasts nothing"
+        );
+        assert_eq!(
+            world.monsters[0].jim_host,
+            Some(1000),
+            "and it stays the first attacker's"
         );
     }
 
