@@ -536,6 +536,14 @@ async fn handle_client(
     // fight. That is also why the legacy sets a persistent order rather than
     // answering a hit per request (`char-order.cpp:234-238`).
     let mut attack: Option<(u16, Instant)> = None;
+    // The monster this connection is *walking toward*, when that walk is an
+    // approach rather than a player's own `ORDER_MOVE`. The swing arm plans one
+    // approach per tick; without this the chase only advanced once per attack
+    // interval, so a monster that kept moving was never caught (live log,
+    // 2026-10-17: the player followed a raccoon for four seconds at one tile a
+    // second and every swing came back `OutOfRange`). Cleared the moment the
+    // swing lands, the target drops, or the player walks off.
+    let mut approach: Option<u16> = None;
     // Which frames get built from PostgreSQL on the way out.
     let mut live = LiveFrames {
         items: &items,
@@ -673,6 +681,24 @@ async fn handle_client(
                             mv.deadline = Some(next_move_deadline(mv, Instant::now()));
                         }
                     }
+                    // A finished approach must not sit idle until the next swing
+                    // tick: against a monster that keeps moving that stalls the
+                    // chase at one tile per attack interval. Keep walking at move
+                    // speed and the already-armed swing lands as soon as the gap
+                    // closes, instead of the player trailing the target forever.
+                    if movement.is_none()
+                        && let Some(target) = approach
+                        && let Some(character) = live.character.as_ref()
+                    {
+                        start_approach(
+                            monsters.as_ref(),
+                            player_attacks.as_ref(),
+                            &mut movement,
+                            target,
+                            (character.pos_x, character.pos_y),
+                            character,
+                        );
+                    }
                     // An auto-attack swing that has fallen due. The client
                     // queued `ORDER_ATTACK` once and never repeats it — one
                     // buffer entry per click, then `siSelectedOrder` is cleared
@@ -729,26 +755,16 @@ async fn handle_client(
                                 // ordered walk, and only the player's replaces it.
                                 if outcome == Swing::OutOfRange && movement.is_none() {
                                     let range = player_attacks.range(class_kind);
-                                    let approach = monsters
-                                        .lock()
-                                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                                        .approach_tile(target, (ax, ay), range, class_kind);
-                                    match approach {
-                                        // No 241 goes with this walk: no new order
-                                        // arrived, so the legacy sends only the
-                                        // per-tile 200s `step_movement` already
-                                        // fans — and the client is walking its own
-                                        // copy of the approach already.
+                                    match start_approach(
+                                        monsters.as_ref(),
+                                        player_attacks.as_ref(),
+                                        &mut movement,
+                                        target,
+                                        (ax, ay),
+                                        character,
+                                    ) {
                                         Some(dest) => {
-                                            let mut mv = Movement::new(
-                                                dest,
-                                                (ax, ay),
-                                                character.map_id,
-                                                i32::from(character.move_speed),
-                                            );
-                                            mv.deadline =
-                                                Some(next_move_deadline(&mv, Instant::now()));
-                                            movement = Some(mv);
+                                            approach = Some(target);
                                             logln!(
                                                 "game: {peer}: out of range of {target} (range \
                                                  {range}): walking ({ax}, {ay}) -> ({}, {})",
@@ -761,6 +777,11 @@ async fn handle_client(
                                              {range}) from ({ax}, {ay}) and no approachable tile"
                                         ),
                                     }
+                                }
+                                // Whatever the swing did, only `OutOfRange` still
+                                // has a walk to keep planning.
+                                if outcome != Swing::OutOfRange {
+                                    approach = None;
                                 }
                                 (outcome != Swing::NoTarget).then(|| {
                                     (
@@ -1382,6 +1403,7 @@ async fn handle_client(
                     // attack order outright.
                     if order.si_order == ORDER_MOVE {
                         attack = None;
+                        approach = None;
                     } else {
                         // Anything that is neither a walk nor a swing lands here
                         // and is dropped by `handle_userorder`. Without this line
@@ -1730,6 +1752,43 @@ enum Swing {
     /// monster stands on that tile. Either way there is nothing to keep
     /// swinging at.
     NoTarget,
+}
+
+/// Walks toward `target` if some standable tile is in range of it, replacing any
+/// walk already running — the half of `ORDER_ATTACK` the client does for itself
+/// (`Client.cpp:3297` `LetOrder` sets `CHARWORKSTEP_DECIDELENGTH`) and this
+/// server has to do on its own tile.
+///
+/// Returns the tile it started for, or `None` when there is nothing to walk to.
+/// `None` is not always a wall: asked from inside range, `approach_tile` refuses
+/// the target's own tile as an answer and returns nothing to do, which is what
+/// a finished approach wants.
+fn start_approach(
+    monsters: &Mutex<monsters::MonsterWorld>,
+    player_attacks: &PlayerAttacks,
+    movement: &mut Option<Movement>,
+    target: u16,
+    (ax, ay): (i32, i32),
+    character: &CharacterFull,
+) -> Option<(i32, i32)> {
+    let class_kind = u16::try_from(character.class_kind).unwrap_or(1);
+    let range = player_attacks.range(class_kind);
+    let dest = monsters
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .approach_tile(target, (ax, ay), range, class_kind)?;
+    // No 241 goes with this walk: no new order arrived, so the legacy sends only
+    // the per-tile 200s `step_movement` already fans — and the client is walking
+    // its own copy of the approach already.
+    let mut mv = Movement::new(
+        dest,
+        (ax, ay),
+        character.map_id,
+        i32::from(character.move_speed),
+    );
+    mv.deadline = Some(next_move_deadline(&mv, Instant::now()));
+    *movement = Some(mv);
+    Some(dest)
 }
 
 /// Resolves one player swing against a field monster, end to end: the range

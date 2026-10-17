@@ -1384,6 +1384,29 @@ mod tests {
         assert_eq!(approach_tile_in((10, 10), (10, 11), 1, open), None);
     }
 
+    /// The read loop re-plans the approach on every tile it commits instead of
+    /// once per attack interval (live log, 2026-10-17: a player followed a
+    /// raccoon for four seconds at one tile a second, always two away, because
+    /// the plan was only refreshed on the swing). Re-planning needs the answer
+    /// to keep being an answer.
+    #[test]
+    fn an_approach_can_be_replanned_from_the_tile_it_just_reached() {
+        let open = |_, _| true;
+        // One plan's destination becomes the next plan's starting cell, so the
+        // second question has to move the player again rather than hand back
+        // the tile it is already standing on.
+        assert_eq!(
+            approach_tile_in((10, 10), (10, 15), 1, open),
+            Some((10, 11))
+        );
+        // The target stepped away in between — an AI tick is 100 ms against a
+        // walk tile's 350 — and the same question from the new cell still has
+        // an answer that is not the cell the player stands on.
+        assert_eq!(approach_tile_in((10, 9), (10, 11), 1, open), Some((10, 10)));
+        // And the walk ends the moment the weapon reaches: no plan, no spin.
+        assert_eq!(approach_tile_in((10, 10), (10, 11), 1, open), None);
+    }
+
     /// The two halves of [`MonsterWorld::approach_tile`] that only the shipped
     /// tables can prove: map 0 has to be kept, and a character's `class_kind` —
     /// a `KindInfo_Unique` id, where `KIND_HERO1` is 1 — has to join to its
