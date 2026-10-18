@@ -1,10 +1,11 @@
 //! Combat resolution — Phase 2 of `docs\DESIGN_MONSTER_COMBAT_AND_AUTOHUNT.md` §10.3.
 //!
 //! This module holds the numbers: what an attacker rolls, what a defender
-//! subtracts, and what a hit is worth in experience. The *wiring* — the 267
-//! dispatch, the 268 broadcast, the death sequence, the monster's own swings —
-//! lives in [`crate::main`] and [`crate::monsters`], because those need the
-//! registry and the world and this deliberately does not.
+//! subtracts, and what a hit is worth in experience — and, since the combat
+//! consolidation, the player-side flow that spends them ([`start_approach`],
+//! [`player_swing`]) and the throttle the dispatcher keeps on the 267 arm.
+//! The *wiring* — the 267/240 dispatch arms and the monster's own swings —
+//! still lives in [`crate::main`] and [`crate::monsters`].
 //!
 //! # The damage path, in legacy order
 //!
@@ -21,8 +22,22 @@
 
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::Mutex;
+use std::time::Instant;
 
 use gz_data::kindinfo::{CharAttackRow, canonical_char_attack, load_kind_unique};
+use gz_db::{
+    CharacterFull, CharacterRepository, ItemRepository, PgCharacterRepository, PgItemRepository,
+};
+use gz_proto::combat::{GetExpResponse, HIT_TARGET_MONSTER, HitResponse};
+use gz_proto::item::{Item, encode_person_item_gained};
+use gz_proto::opcodes_game::GameMsg;
+use gz_proto::order::OrderData;
+
+use crate::monsters;
+use crate::movement::{Movement, next_move_deadline};
+use crate::registry::{Registry, SessionKey};
+use crate::{AnyError, GameSession, logln, logln_err, now_tick};
 
 /// The tier ladder `CalcLevelDamage` (`Parametabox.cpp:56-89`) and `CalcLevelAC`
 /// (`:7325-7338`) share. Each arm takes what is above its threshold, divides by
@@ -311,6 +326,261 @@ impl Rng {
     }
 }
 
+/// `CheckLastMsgClock(200)` — the legacy's per-character gate on the whole
+/// `DoMsg_GAMEMSG_REQUEST_HIT` handler (`Server-Person.cpp:2760`).
+pub(crate) const HIT_THROTTLE_MS: u64 = 200;
+
+/// What one swing did, so a caller holding an engagement can tell "wait for a
+/// better moment" from "there is nobody there".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Swing {
+    /// Damage went out and the target took it.
+    Landed,
+    /// The target is a monster, just not close enough yet.
+    OutOfRange,
+    /// The swing could not be thrown at all: the attacker is dead, or no
+    /// monster stands on that tile. Either way there is nothing to keep
+    /// swinging at.
+    NoTarget,
+}
+
+/// Walks toward `target` if some standable tile is in range of it, replacing any
+/// walk already running — the half of `ORDER_ATTACK` the client does for itself
+/// (`Client.cpp:3297` `LetOrder` sets `CHARWORKSTEP_DECIDELENGTH`) and this
+/// server has to do on its own tile.
+///
+/// Returns the tile it started for, or `None` when there is nothing to walk to.
+/// `None` is not always a wall: asked from inside range, `approach_tile` refuses
+/// the target's own tile as an answer and returns nothing to do, which is what
+/// a finished approach wants.
+pub(crate) fn start_approach(
+    monsters: &Mutex<monsters::MonsterWorld>,
+    player_attacks: &PlayerAttacks,
+    movement: &mut Option<Movement>,
+    target: u16,
+    (ax, ay): (i32, i32),
+    character: &CharacterFull,
+) -> Option<(i32, i32)> {
+    let class_kind = u16::try_from(character.class_kind).unwrap_or(1);
+    let range = player_attacks.range(class_kind);
+    let dest = monsters
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .approach_tile(target, (ax, ay), range, class_kind)?;
+    // No 241 goes with this walk: no new order arrived, so the legacy sends only
+    // the per-tile 200s `step_movement` already fans — and the client is walking
+    // its own copy of the approach already.
+    let mut mv = Movement::new(
+        dest,
+        (ax, ay),
+        character.map_id,
+        i32::from(character.move_speed),
+    );
+    mv.deadline = Some(next_move_deadline(&mv, Instant::now()));
+    *movement = Some(mv);
+    Some(dest)
+}
+
+/// Resolves one player swing against a field monster, end to end: the range
+/// gate, the power and crit rolls, the 268 that carries the new life, and — on
+/// a kill — the death frames, the EXP grant and the drop roll.
+///
+/// One body serves both wire shapes that reach it. `REQUEST_HIT` (267) is what
+/// the design doc assumed, but the shipped client only ever built it inside a
+/// commented-out block (`char-attack.cpp:2100-2109`); the attack it really
+/// sends is `ORDER_ATTACK` (5) inside `REQUEST_USERORDER` (240)
+/// (`MouseOperation.cpp:5631`, `Client.cpp:3299`), and that is what makes this
+/// worth sharing rather than duplicating.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn player_swing(
+    registry: &Registry,
+    monsters: &Mutex<monsters::MonsterWorld>,
+    player_attacks: &PlayerAttacks,
+    combat_rng: &mut Rng,
+    characters: &PgCharacterRepository,
+    items: &PgItemRepository,
+    session_key: SessionKey,
+    login: &Option<GameSession>,
+    character: &CharacterFull,
+    (ax, ay): (i32, i32),
+    target_unique: u16,
+) -> Result<Swing, AnyError> {
+    // A dead character cannot swing (the legacy's `IsAlive` guard,
+    // `Server-Person.cpp:2758`). `me` also carries this session's own unique,
+    // which is the only attacker id the world needs.
+    let Some(me) = registry.info(session_key) else {
+        return Ok(Swing::NoTarget);
+    };
+    if me.life == 0 {
+        return Ok(Swing::NoTarget);
+    }
+    let class_kind = u16::try_from(character.class_kind).unwrap_or(1);
+    let range = player_attacks.range(class_kind);
+    let (min, max) =
+        player_attacks.raw_power(class_kind, character.str, i32::from(character.level));
+    let raw = roll_power(min, max, combat_rng.up_to((max - min).max(0)));
+    let crit = apply_critical(
+        raw,
+        player_attacks.critical_rate(class_kind),
+        combat_rng.up_to(99),
+    );
+
+    let hit = {
+        let mut world = monsters
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // The gate reads the monster's own tile rather than one the client
+        // claimed (`IsInRange` reads `pcltarget->clPos`,
+        // `Server-Person.cpp:2765`): the claim adds nothing a server-side
+        // lookup does not already have, and a client does not get to name the
+        // distance.
+        let Some((tx, ty)) = world.position(target_unique) else {
+            return Ok(Swing::NoTarget);
+        };
+        if (tx - ax).abs() > range || (ty - ay).abs() > range {
+            // Both sides of this comparison come from stores that are updated on
+            // separate paths, and a player has a third copy in the registry — so
+            // a failure is only actionable with every copy of "where I am" in
+            // view next to the target's.
+            let seen = registry
+                .info(session_key)
+                .map_or_else(|| "unknown".to_string(), |i| format!("({}, {})", i.x, i.y));
+            logln!(
+                "game: swing {target_unique} out of range: gate uses ({ax}, {ay}), registry \
+                 says {seen}, monster at ({tx}, {ty}), range {range}, class {class_kind}"
+            );
+            return Ok(Swing::OutOfRange);
+        }
+        world.hit_by_player(
+            registry,
+            target_unique,
+            me.char_unique,
+            crit,
+            now_tick(),
+            combat_rng,
+        )
+    };
+    // A target the world does not hold — a player, a static NPC, or a monster
+    // that just died between the lookup and the hit. The legacy's null `CR[id]`
+    // guard drops the hit the same way (`Server-Attack.cpp:586`).
+    let Some(hit) = hit else {
+        return Ok(Swing::NoTarget);
+    };
+
+    // The 268 answers the *target*, so everyone near the monster sees the same
+    // frame (`Server-Attack.cpp:2775`).
+    registry.broadcast_near_point(
+        monsters::FIELD_MAP,
+        hit.x,
+        hit.y,
+        GameMsg::ResponseHit as u16,
+        HitResponse {
+            char_unique: hit.unique as i16,
+            damage: hit.damage,
+            double_damage: 0,
+            life: hit.life as i32,
+            mode: 0,
+            special_attack_switch: 0,
+            b_indure: false,
+            b_miss_hit: false,
+            b_dodge_hit: false,
+            ui_type: HIT_TARGET_MONSTER,
+        }
+        .encode()
+        .to_vec(),
+    );
+
+    if !hit.died {
+        return Ok(Swing::Landed);
+    }
+    // Death: no dedicated opcode. `Life = 0` in the 268 is the first half and
+    // `ORDER_DIE` in a 241 is the animation, which is what this frame is. The
+    // 11 that removes the avatar is deliberately *not* sent here — a client
+    // that receives both in one pass deletes the avatar before the animation
+    // can draw, so the world holds the corpse and `despawn_corpses` sends the
+    // removal once [`monsters::CORPSE_MS`] has run. The legacy reaches the same
+    // place by holding the dead char until its action loop finds it invalid
+    // (`CharManager.cpp:257-277`).
+    registry.broadcast_near_point(
+        monsters::FIELD_MAP,
+        hit.x,
+        hit.y,
+        GameMsg::ResponseUserorder as u16,
+        OrderData::die_order(i32::from(hit.unique))
+            .encode()
+            .to_vec(),
+    );
+
+    let Some(character_id) = login.as_ref().and_then(|s| s.character_id) else {
+        // `GetExp`'s share, per hit and not per kill
+        // (`Server-Attack.cpp:4138`) needs an owning row; without one the kill
+        // still stands and only the reward is lost.
+        return Ok(Swing::Landed);
+    };
+    let gained = exp_for_hit(
+        hit.exp,
+        hit.level,
+        crit,
+        i32::try_from(hit.max_life).unwrap_or(i32::MAX),
+    );
+    if gained > 0 {
+        characters.add_exp(character_id, gained).await?;
+        registry.send_to(
+            session_key,
+            GameMsg::ResponseGetexp as u16,
+            GetExpResponse {
+                si_char_unique: me.char_unique,
+                si_reason: 0,
+                si_exp: gained.min(i32::MAX as i64) as i32,
+                si_fame_exp: 0,
+            }
+            .encode()
+            .to_vec(),
+        );
+    }
+    // `GetRandDropItem` rolled at most one entry at death
+    // (`kindinfo-Manager.cpp:68-107`); grant it into the bag.
+    for (item_unique, count) in hit.drops {
+        let Ok(item_unique) = u16::try_from(item_unique) else {
+            continue;
+        };
+        match items.grant(character_id, item_unique, count).await {
+            // One 7210 does both halves of "the drop landed": it writes the
+            // slot, so the item is in the bag without a relog, and because it
+            // carries `OPTION_SHOW` with a non-zero `siChangedNum` the client
+            // also *says* so — `ItemGetChatRecv` puts "Obtained <name> x<n>" in
+            // the loot line and `SetItemData` raises the acquisition popup
+            // (`Client-Person-BigInfo.cpp:1054-1093`).
+            Ok(Some(granted)) => {
+                let gained = encode_person_item_gained(
+                    granted.slot,
+                    granted.count,
+                    &Item::from_raw(&granted.raw),
+                );
+                registry.send_to(
+                    session_key,
+                    GameMsg::ResponsePersoniteminfo as u16,
+                    gained.to_vec(),
+                );
+                logln!(
+                    "game: character {character_id} received item {item_unique} x{} (slot {})",
+                    granted.count,
+                    granted.slot
+                );
+            }
+            Ok(None) => logln_err!(
+                "game: drop {item_unique} found no free slot for character {character_id}"
+            ),
+            Err(e) => logln_err!("game: drop grant failed: {e}"),
+        }
+    }
+    Ok(Swing::Landed)
+}
+
+// The player-side flow over those numbers, moved here from `main.rs` so the
+// combat family has one home: the approach step, one swing end to end, and
+// the throttle the dispatcher keeps on the 267 arm. Unlike the numbers above,
+// these touch the registry and the world.
 #[cfg(test)]
 mod tests {
     use super::*;
