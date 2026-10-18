@@ -238,6 +238,18 @@ impl Registry {
         self.sessions.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
+    /// Sessions per map id, for a system that must know where the players are
+    /// without walking every session itself — map hibernation being the first
+    /// (`docs/DESIGN_MAP_DORMANCY.md`). O(players online).
+    #[must_use]
+    pub fn online_map_counts(&self) -> HashMap<i32, usize> {
+        let mut counts: HashMap<i32, usize> = HashMap::new();
+        for session in self.lock().values() {
+            *counts.entry(session.info.map_id).or_default() += 1;
+        }
+        counts
+    }
+
     /// Claims `account_id` for `key`'s connection. Returns the session key that
     /// already holds the account if another one does, in which case this
     /// connection must be refused; `None` means the claim succeeded (or was

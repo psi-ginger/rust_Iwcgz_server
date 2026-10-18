@@ -244,6 +244,84 @@ pub(crate) struct MonsterHit {
     pub(crate) drops: Vec<(i32, i32)>,
 }
 
+/// How long a map with nobody on it stays ticked before it hibernates, in
+/// milliseconds.
+///
+/// The recorded decision (docs/DESIGN_MAP_DORMANCY.md §3.1) is anti-flapping
+/// hysteresis: the last player leaving does **not** freeze the map — warps
+/// bounce and clients sit in loading screens — so the map counts down 30 s and
+/// only then stops being sampled. A player entering inside the window discards
+/// the countdown.
+const DORMANCY_GRACE_MS: u64 = 30_000;
+
+/// One map's sleep state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MapSleep {
+    /// Players present (or just arrived).
+    Awake,
+    /// Nobody on the map, counting down to hibernation.
+    Grace { deadline_ms: u64 },
+    /// Nobody for the whole grace window: the tick loop skips the map.
+    Hibernating,
+}
+
+/// Which maps are being watched, and which may sleep.
+///
+/// Encapsulates the whole dormancy state machine so the monster loop stays a
+/// consumer: [`MonsterWorld`] owns one manager, feeds it the per-map player
+/// counts once per tick through [`Self::update`], and asks [`Self::is_dormant`]
+/// before sampling a monster. No timestamp math or state check leaks across
+/// that boundary, and the manager is testable on its own — no world, no
+/// registry, no network.
+///
+/// Every deadline is an absolute timestamp in the house style (`next_act_ms`,
+/// `respawn`): there is no timer object and nothing to cancel — a player
+/// entering simply moves the map back to [`MapSleep::Awake`].
+#[derive(Debug, Default)]
+pub(crate) struct MapDormancyManager {
+    maps: HashMap<i32, MapSleep>,
+}
+
+impl MapDormancyManager {
+    #[must_use]
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    /// Advances one map's sleep state from the number of players on it.
+    ///
+    /// An unseen map defaults to [`MapSleep::Awake`], so a map with players is
+    /// always awake, and a map whose very first observation has nobody on it
+    /// opens its grace window rather than freezing outright.
+    pub(crate) fn update(&mut self, map_id: i32, player_count: usize, now_ms: u64) {
+        let state = self.maps.entry(map_id).or_insert(MapSleep::Awake);
+        *state = if player_count > 0 {
+            // Anybody home: awake, and any countdown is simply discarded.
+            MapSleep::Awake
+        } else {
+            match *state {
+                // The last player left: open the grace window.
+                MapSleep::Awake => MapSleep::Grace {
+                    deadline_ms: now_ms + DORMANCY_GRACE_MS,
+                },
+                // Still counting down: hold the deadline...
+                MapSleep::Grace { deadline_ms } if now_ms < deadline_ms => {
+                    MapSleep::Grace { deadline_ms }
+                }
+                // ...or the window ran out with nobody coming back.
+                MapSleep::Grace { .. } | MapSleep::Hibernating => MapSleep::Hibernating,
+            }
+        };
+    }
+
+    /// True when the map is past its grace window with nobody on it. A map the
+    /// manager has never seen is awake by definition.
+    #[must_use]
+    pub(crate) fn is_dormant(&self, map_id: i32) -> bool {
+        matches!(self.maps.get(&map_id), Some(MapSleep::Hibernating))
+    }
+}
+
 /// Map 0's monster population: the loaded groups and the instances they spawned.
 #[derive(Debug, Default)]
 pub(crate) struct MonsterWorld {
@@ -268,6 +346,9 @@ pub(crate) struct MonsterWorld {
     /// attacker's own class decides what it may step onto, and only the world
     /// load sees both tables at once.
     block_by_kind: HashMap<u16, u16>,
+    /// Which maps are being watched and which may sleep — the dormancy state
+    /// machine behind the tick loop's skip (docs/DESIGN_MAP_DORMANCY.md).
+    dormancy: MapDormancyManager,
 }
 
 impl MonsterWorld {
@@ -421,6 +502,7 @@ impl MonsterWorld {
             corpses: Vec::new(),
             map: Some(map),
             block_by_kind,
+            dormancy: MapDormancyManager::new(),
         })
     }
 
@@ -600,11 +682,36 @@ impl MonsterWorld {
         if self.monsters.is_empty() && self.respawn.is_empty() && self.corpses.is_empty() {
             return Vec::new();
         }
+        // Map dormancy first (docs/DESIGN_MAP_DORMANCY.md): advance every
+        // group's map through the sleep state machine from the live player
+        // counts, then build the awake mask the loop reads. A hibernating map
+        // is skipped wholesale below — no draws, no walks, no deadline
+        // evaluation — and its timestamps simply wait; the first tick after a
+        // player enters fires whatever came due.
+        let map_counts = registry.online_map_counts();
+        let mut group_awake = vec![true; self.groups.len()];
+        for (group_index, group) in self.groups.iter().enumerate() {
+            self.dormancy.update(
+                group.anchor.map_index,
+                map_counts
+                    .get(&group.anchor.map_index)
+                    .copied()
+                    .unwrap_or(0),
+                now_ms,
+            );
+            group_awake[group_index] = !self.dormancy.is_dormant(group.anchor.map_index);
+        }
         self.despawn_corpses(registry, now_ms);
         self.respawn_due(registry, now_ms);
         self.advance_walks(registry, now_ms);
         let mut hits = Vec::new();
         for index in 0..self.monsters.len() {
+            // A hibernating map has nobody to watch it: no draws, no walks, no
+            // deadline evaluation. Its state is exactly as it was when the map
+            // slept, and the wake fires due timestamps lazily.
+            if !group_awake[self.monsters[index].group] {
+                continue;
+            }
             // Two clocks, as the legacy runs them. The legacy gates the wander
             // and the enemy search on a fresh `1/25` draw **per action slot**
             // (`char-wait.cpp:342`, one slot = 300 ms, see [`AI_SLOT_MS`]), and
@@ -2393,6 +2500,215 @@ mod tests {
             "the geometric tail keeps late first decisions rare (expected ~3.4 of {SEEDS} beyond slot 100, Poisson): {:?}",
             first_swing_slot
         );
+    }
+
+    /// The 1 -> 0 edge opens a grace window, it does not freeze the map: the
+    /// map is still awake one millisecond before the deadline and hibernating
+    /// at the deadline itself.
+    #[test]
+    fn a_map_is_not_frozen_on_the_last_player_leaving_but_hibernates_after_the_window() {
+        let mut dormancy = MapDormancyManager::new();
+        dormancy.update(FIELD_MAP, 1, 0);
+        assert!(!dormancy.is_dormant(FIELD_MAP), "players keep it awake");
+
+        dormancy.update(FIELD_MAP, 0, 1_000);
+        assert!(!dormancy.is_dormant(FIELD_MAP), "grace, not hibernation");
+        dormancy.update(FIELD_MAP, 0, 1_000 + DORMANCY_GRACE_MS - 1);
+        assert!(!dormancy.is_dormant(FIELD_MAP), "the window is still open");
+        dormancy.update(FIELD_MAP, 0, 1_000 + DORMANCY_GRACE_MS);
+        assert!(
+            dormancy.is_dormant(FIELD_MAP),
+            "and it closes on the deadline"
+        );
+    }
+
+    /// A player entering inside the grace window cancels the countdown
+    /// seamlessly, and a later empty edge opens a *fresh* window from that
+    /// edge — not the leftover deadline.
+    #[test]
+    fn a_player_entering_inside_the_grace_window_cancels_the_countdown() {
+        let mut dormancy = MapDormancyManager::new();
+        dormancy.update(FIELD_MAP, 0, 0);
+        assert!(!dormancy.is_dormant(FIELD_MAP), "the window just opened");
+
+        dormancy.update(FIELD_MAP, 1, DORMANCY_GRACE_MS - 1);
+        assert!(!dormancy.is_dormant(FIELD_MAP), "someone warped back in");
+        dormancy.update(FIELD_MAP, 0, DORMANCY_GRACE_MS - 1);
+        assert!(
+            !dormancy.is_dormant(FIELD_MAP),
+            "a fresh window from this edge"
+        );
+
+        // The old deadline (30_000) would have hibernated the map by now; the
+        // fresh one, opened at 29_999, runs to 59_999.
+        dormancy.update(FIELD_MAP, 0, 2 * DORMANCY_GRACE_MS - 2);
+        assert!(
+            !dormancy.is_dormant(FIELD_MAP),
+            "the fresh window is still open"
+        );
+        dormancy.update(FIELD_MAP, 0, 2 * DORMANCY_GRACE_MS - 1);
+        assert!(
+            dormancy.is_dormant(FIELD_MAP),
+            "and it closes 30 s after the re-entry"
+        );
+    }
+
+    /// Hibernation ends the moment a player enters — waking is not lazy — and
+    /// the awakened map is a grace-protected awake, not a hair trigger.
+    #[test]
+    fn hibernation_ends_the_moment_a_player_enters() {
+        let mut dormancy = MapDormancyManager::new();
+        dormancy.update(FIELD_MAP, 0, 0);
+        dormancy.update(FIELD_MAP, 0, DORMANCY_GRACE_MS);
+        assert!(dormancy.is_dormant(FIELD_MAP), "the window ran out");
+
+        dormancy.update(FIELD_MAP, 1, DORMANCY_GRACE_MS + 60_000);
+        assert!(!dormancy.is_dormant(FIELD_MAP), "waking is immediate");
+        dormancy.update(FIELD_MAP, 0, DORMANCY_GRACE_MS + 60_000);
+        assert!(
+            !dormancy.is_dormant(FIELD_MAP),
+            "a new window opens, not instant freeze"
+        );
+    }
+
+    /// An unseen map is awake by definition, and a map with players on it is
+    /// never dormant however long it runs.
+    #[test]
+    fn an_unseen_map_and_an_occupied_map_are_never_dormant() {
+        let mut dormancy = MapDormancyManager::new();
+        assert!(!dormancy.is_dormant(7), "an unseen map is awake by default");
+
+        dormancy.update(7, 3, 0);
+        for now_ms in [1_000, 100_000, 10_000_000] {
+            dormancy.update(7, 2, now_ms);
+            assert!(
+                !dormancy.is_dormant(7),
+                "players keep a map awake at {now_ms}"
+            );
+        }
+        // Only the empty edge opens a window at all.
+        dormancy.update(7, 0, 10_000_000);
+        assert!(!dormancy.is_dormant(7), "and even then, grace first");
+    }
+
+    /// End to end through [`MonsterWorld::tick`]: a map with nobody on it opens
+    /// its grace window at the first tick and keeps acting through it (the
+    /// monster still wanders), freezes at the deadline (position and walk
+    /// never change again), and a returning player wakes it — the monster
+    /// closes in and swings again.
+    #[test]
+    fn a_hibernating_map_is_skipped_and_resumes_when_a_player_returns() {
+        use crate::registry::{Outbound, SessionInfo};
+
+        let registry = Registry::new();
+        let mut world = MonsterWorld::empty();
+        world.groups.push(FieldGroup {
+            anchor: SpawnGroup {
+                map_index: FIELD_MAP,
+                center_x: 0,
+                center_y: 0,
+                radius: 3,
+            },
+            capacity: 1,
+            units: vec![SpawnUnit {
+                wire_kind: 15,
+                level: 1,
+                max_num: 1,
+                move_speed: 12,
+                life: 20,
+                tiles: vec![(0, 0), (1, 0), (2, 0), (3, 0), (4, 0)],
+                min_atk: 40,
+                max_atk: 40,
+                ac: 0,
+                exp: 0,
+                aggressive: 5,
+                range: 1,
+                attack_interval: 2_000,
+                critical_rate: 0,
+                drops: &[],
+            }],
+        });
+        world.spawn_all(&registry);
+        world.monsters[0].x = 0;
+        world.monsters[0].y = 0;
+        world.monsters[0].next_act_ms = 0;
+
+        let mut rng = Rng::new(7);
+        // No session anywhere: the map opens its grace window at the very
+        // first tick, and grace means alive — the monster still wanders.
+        // (Seed 7's first gate-hit lands at slot 10; seed 5's lands at slot 95
+        // and its wander pick selects the monster's own tile, so it walks
+        // never.)
+        let mut walked_while_grace = false;
+        for slot in 0..100u64 {
+            world.tick(&registry, slot * AI_SLOT_MS, &mut rng);
+            walked_while_grace |= world.monsters[0].walk.is_some();
+        }
+        assert!(
+            walked_while_grace,
+            "grace keeps the map alive: the monster still wanders"
+        );
+
+        // The window closes at exactly slot 100's timestamp. The loop's own
+        // re-arm stamp is the crisp observable of the skip: during grace every
+        // pass re-arms `next_act_ms` to `now + AI_SLOT_MS` (it reads exactly
+        // the boundary here), and once the map hibernates the loop `continue`s
+        // before that re-arm, so the stamp freezes. Position and walk state are
+        // deliberately *not* asserted frozen: `advance_walks` accrues credit
+        // from `Instant::now()`, which a tight test loop never grants, so a
+        // started walk sits unfinished no matter what the guard did — the trap
+        // documented on the AI-distribution test.
+        world.tick(&registry, 100 * AI_SLOT_MS, &mut rng);
+        assert_eq!(
+            world.monsters[0].next_act_ms,
+            100 * AI_SLOT_MS,
+            "grace re-armed the deadline right up to the boundary"
+        );
+        for extra in 0..200u64 {
+            let now = 100 * AI_SLOT_MS + (extra + 1) * AI_TICK_MS;
+            world.tick(&registry, now, &mut rng);
+            assert_eq!(
+                world.monsters[0].next_act_ms,
+                100 * AI_SLOT_MS,
+                "a hibernating map is skipped before the re-arm: the stamp freezes"
+            );
+        }
+
+        // A player returns: the map wakes, the idle draw resumes, and the
+        // monster — co-located with the returner, since the tight loop never
+        // let its grace wander commit a tile — engages and swings. The stale
+        // grace walk is dropped by hand: a real server finishes it in
+        // wall-clock time, which a tight loop never grants.
+        world.monsters[0].walk = None;
+        let key = Registry::next_key();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<Outbound>();
+        registry.register(
+            key,
+            tx,
+            SessionInfo {
+                char_unique: 1000,
+                name: "Returner".to_owned(),
+                level: 1,
+                map_id: FIELD_MAP,
+                x: 0,
+                y: 0,
+                school_id: 0,
+                class_kind: 1,
+                life: 400,
+                move_speed: 12,
+                sex: 1,
+                gm_level: 0,
+            },
+        );
+        let mut resumed = false;
+        for slot in 0..400u64 {
+            let now = 100 * AI_SLOT_MS + 200 * AI_TICK_MS + slot * AI_SLOT_MS;
+            if world.tick(&registry, now, &mut rng).len() == 1 {
+                resumed = true;
+                break;
+            }
+        }
+        assert!(resumed, "the map woke and the monster fought again");
     }
 
     /// `wander` must not re-pick while its last walk is still running: it
