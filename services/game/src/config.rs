@@ -28,6 +28,7 @@
 //! | `GAME_HANDSHAKE_TIMEOUT_MS` | no | override for the 10 s handshake window |
 //! | `GAME_CONNECT_TIMEOUT_MS` | no | override for the 7 s outbound connect window |
 //! | `GAME_CLOSE_THROTTLE_MS` | no | override for the 600 ms close throttle |
+//! | `GAME_DEBUG_LOG` | no | `1`/`true`/`on` prints the debug-tier log lines (probes that repeat on a timer) |
 //!
 //! There is deliberately no `GAME_PROLOGUE` / `GAME_WORLD_BULK` any more. The
 //! capture-replay mode they selected was retired on 2026-10-09: world entry is
@@ -87,6 +88,10 @@ pub struct GameConfig {
     /// The client data tree the field-monster load reads. See
     /// [`DEFAULT_DATA_ROOT`].
     pub data_root: PathBuf,
+    /// Whether the debug-tier log lines print — probes that answer an open
+    /// question but repeat on a timer (e.g. the 230 heartbeat's type-`N` line).
+    /// Off by default so the console stays readable during normal play.
+    pub debug_log: bool,
 }
 
 impl GameConfig {
@@ -118,6 +123,9 @@ impl GameConfig {
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from(DEFAULT_DATA_ROOT));
 
+        let debug_log = std::env::var("GAME_DEBUG_LOG")
+            .is_ok_and(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "on"));
+
         let defaults = SessionTimeouts::default();
         let timeouts = SessionTimeouts {
             handshake: optional_millis("GAME_HANDSHAKE_TIMEOUT_MS", defaults.handshake)?,
@@ -134,6 +142,7 @@ impl GameConfig {
             server_unique,
             timeouts,
             data_root,
+            debug_log,
         })
     }
 
@@ -216,7 +225,7 @@ mod tests {
     /// would let two tests interleave and each see the other's values.
     static ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-    const TOUCHED: [&str; 12] = [
+    const TOUCHED: [&str; 13] = [
         "DATABASE_URL",
         "GAME_LISTEN",
         "GAME_LINK_KEY1",
@@ -227,6 +236,7 @@ mod tests {
         "GAME_HANDSHAKE_TIMEOUT_MS",
         "GAME_CONNECT_TIMEOUT_MS",
         "GAME_CLOSE_THROTTLE_MS",
+        "GAME_DEBUG_LOG",
         "GAME_PROLOGUE",
         "GAME_WORLD_BULK",
     ];
@@ -437,6 +447,31 @@ mod tests {
         env.set("GAME_HANDSHAKE_TIMEOUT_MS", "soon");
         let err = GameConfig::from_env().unwrap_err();
         assert!(err.contains("GAME_HANDSHAKE_TIMEOUT_MS"), "{err}");
+    }
+
+    /// The debug tier is off unless asked for, and accepts the documented
+    /// spellings. A probe line like the 230 heartbeat's type-`N` line repeats
+    /// on a timer, so its default has to be silence.
+    #[test]
+    fn debug_log_is_off_unless_enabled() {
+        let env = EnvGuard::take();
+        env.key_only();
+        assert!(!GameConfig::from_env().unwrap().debug_log);
+
+        for on in ["1", "true", "on", " TRUE "] {
+            env.set("GAME_DEBUG_LOG", on);
+            assert!(
+                GameConfig::from_env().unwrap().debug_log,
+                "{on:?} should enable"
+            );
+        }
+        for off in ["0", "false", ""] {
+            env.set("GAME_DEBUG_LOG", off);
+            assert!(
+                !GameConfig::from_env().unwrap().debug_log,
+                "{off:?} should not enable"
+            );
+        }
     }
 
     #[test]

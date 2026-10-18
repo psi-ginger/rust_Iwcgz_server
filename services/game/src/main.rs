@@ -1313,6 +1313,7 @@ async fn handle_client(
                         &mut outbound,
                         char_unique,
                         payload.as_ref(),
+                        cfg.debug_log,
                     )
                     .await?;
                 }

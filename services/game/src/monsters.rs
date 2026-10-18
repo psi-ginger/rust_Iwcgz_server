@@ -151,6 +151,15 @@ struct FieldGroup {
     /// (`NPC.cpp:922-938`), so this is a top-up gate, **not** a hard cap: a
     /// group whose unit targets sum above it overshoots it by design.
     capacity: i32,
+    /// `BOSS` — non-zero in the shipped file. A boss group's dead monster
+    /// returns on the group's own [`FieldGroup::respawn_ms`] rather than the
+    /// fixed [`RESPAWN_MS`] stand-in (`NPC.cpp:862-888`).
+    boss: bool,
+    /// `Interval` — the file's seconds converted to milliseconds at load, the
+    /// one conversion the legacy does in the group constructor
+    /// (`NPC.cpp:223`: `interval * 1000`). 0 when the file carries none, which
+    /// is most field groups.
+    respawn_ms: u64,
     units: Vec<SpawnUnit>,
 }
 
@@ -480,6 +489,10 @@ impl MonsterWorld {
                 out.push(FieldGroup {
                     anchor,
                     capacity: group.max_npc_num,
+                    boss: group.boss,
+                    // The file carries seconds; the legacy converts once at
+                    // load (`NPC.cpp:223`). A malformed negative is 0.
+                    respawn_ms: u64::try_from(group.interval).unwrap_or(0) * 1_000,
                     units,
                 });
             }
@@ -852,11 +865,22 @@ impl MonsterWorld {
             // removes the avatar goes out when [`Self::despawn_corpses`] runs
             // the deadline down.
             self.corpses.push((monster, now_ms + CORPSE_MS));
-            // The legacy respawns on the group's `Interval`, which is 0 in every
-            // shipped field file — so there is no value to honour.
-            // shortcut: a fixed delay stands in. Upgrade when a per-group
-            // respawn cadence is wanted.
-            self.respawn.push((group, now_ms + RESPAWN_MS));
+            // A boss group's `Interval` (seconds in the file, ms at load —
+            // `NPC.cpp:223`) is its respawn delay: the legacy holds the whole
+            // group dark for the window and only then drip-refills it
+            // (`NPC.cpp:862-888`, `:1077`). An ordinary group keeps the fixed
+            // stand-in — the legacy's non-boss interval is a *batch top-up
+            // cadence* for the whole group, not a per-monster delay, and is
+            // deliberately not modelled here.
+            let delay = {
+                let group_data = &self.groups[group];
+                if group_data.boss && group_data.respawn_ms > 0 {
+                    group_data.respawn_ms
+                } else {
+                    RESPAWN_MS
+                }
+            };
+            self.respawn.push((group, now_ms + delay));
             logln!(
                 "game: monster {monster_unique} (kind {}, group {group}) died at ({}, {})",
                 monster.wire_kind,
@@ -1250,9 +1274,11 @@ impl MonsterWorld {
     }
 }
 
-/// How long a dead monster stays gone before its group respawns it. The
-/// shipped `NPCGroup` files all carry `Interval = 0`, so the legacy's own value
-/// is not available to honour.
+/// How long a dead monster stays gone before its group respawns it, for every
+/// group whose own cadence does not apply: any non-boss group (the legacy's
+/// non-boss `Interval` is a group top-up cadence, not a per-monster delay), and
+/// a boss group whose file carries `Interval = 0`. A boss group with an
+/// interval honours it instead — see [`FieldGroup::respawn_ms`].
 const RESPAWN_MS: u64 = 30_000;
 
 /// How long a corpse stays on the map before the 11 that removes its avatar
@@ -1877,6 +1903,8 @@ mod tests {
                 radius: 1,
             },
             capacity: 1,
+            boss: false,
+            respawn_ms: RESPAWN_MS,
             units: vec![SpawnUnit {
                 wire_kind: 15,
                 level: 1,
@@ -1932,6 +1960,119 @@ mod tests {
         assert_eq!(world.monsters[0].life, 20);
     }
 
+    /// A boss group's `Interval` is its respawn delay; an ordinary group's is
+    /// not. The file carries seconds and the load converts once
+    /// (`NPC.cpp:223`), but the death path only *honours* the window for a
+    /// boss group (`NPC.cpp:862-888` gates every group, `:928` then excludes
+    /// boss groups from the batch top-up and `:1077` drip-refills them) — an
+    /// ordinary group's interval is a group top-up cadence, not a per-monster
+    /// delay, so it keeps the fixed stand-in.
+    #[test]
+    fn a_boss_group_respawns_on_its_interval_and_an_ordinary_group_does_not() {
+        fn group(boss: bool, respawn_ms: u64) -> FieldGroup {
+            FieldGroup {
+                anchor: SpawnGroup {
+                    map_index: FIELD_MAP,
+                    center_x: 0,
+                    center_y: 0,
+                    radius: 1,
+                },
+                capacity: 1,
+                boss,
+                respawn_ms,
+                units: vec![SpawnUnit {
+                    wire_kind: 15,
+                    level: 1,
+                    max_num: 1,
+                    move_speed: 12,
+                    life: 20,
+                    tiles: vec![(0, 0)],
+                    min_atk: 1,
+                    max_atk: 2,
+                    ac: 0,
+                    exp: 90,
+                    aggressive: 0,
+                    range: 1,
+                    attack_interval: 2_000,
+                    critical_rate: 0,
+                    drops: &[],
+                }],
+            }
+        }
+
+        let registry = Registry::new();
+        let mut world = MonsterWorld::empty();
+        world.groups.push(group(true, 60_000));
+        world.groups.push(group(false, 60_000));
+        world.spawn_all(&registry);
+        assert_eq!(world.monster_count(), 2);
+        let mut rng = Rng::new(7);
+
+        // Kill the boss first, then the ordinary one, so the respawn vec's
+        // order is (group 0, group 1).
+        for unique in [world.monsters[0].unique, world.monsters[1].unique] {
+            let hit = world
+                .hit_by_player(&registry, unique, 1000, 9_999, 50_000, &mut rng)
+                .expect("the monster is there");
+            assert!(hit.died);
+        }
+        assert_eq!(
+            world.respawn,
+            vec![(0, 50_000 + 60_000), (1, 50_000 + RESPAWN_MS)],
+            "the boss waits out its group's window; the ordinary mob keeps the stand-in"
+        );
+    }
+
+    /// A boss group whose file carries `Interval = 0` — the shipped default for
+    /// most groups — falls back to the fixed stand-in rather than respawning
+    /// instantly: the legacy's cooldown gate only runs when the interval is
+    /// non-zero (`NPC.cpp:862`), and a zero window here must not mean "no
+    /// window".
+    #[test]
+    fn a_boss_group_without_an_interval_uses_the_default_delay() {
+        let registry = Registry::new();
+        let mut world = MonsterWorld::empty();
+        world.groups.push(FieldGroup {
+            anchor: SpawnGroup {
+                map_index: FIELD_MAP,
+                center_x: 0,
+                center_y: 0,
+                radius: 1,
+            },
+            capacity: 1,
+            boss: true,
+            respawn_ms: 0,
+            units: vec![SpawnUnit {
+                wire_kind: 15,
+                level: 1,
+                max_num: 1,
+                move_speed: 12,
+                life: 20,
+                tiles: vec![(0, 0)],
+                min_atk: 1,
+                max_atk: 2,
+                ac: 0,
+                exp: 90,
+                aggressive: 0,
+                range: 1,
+                attack_interval: 2_000,
+                critical_rate: 0,
+                drops: &[],
+            }],
+        });
+        world.spawn_all(&registry);
+        let mut rng = Rng::new(7);
+
+        let unique = world.monsters[0].unique;
+        world
+            .hit_by_player(&registry, unique, 1000, 9_999, 1_000, &mut rng)
+            .expect("the monster is there")
+            .died
+            .then_some(())
+            .expect("one swing kills at ac 0");
+        assert_eq!(world.respawn, vec![(0, 1_000 + RESPAWN_MS)]);
+    }
+
     /// A kill leaves a corpse behind, and the 11 that deletes the avatar waits
     /// out [`CORPSE_MS`] so the `ORDER_DIE` the kill already sent has a client
     /// left to draw it on. Sent in the same pass the avatar is deleted before
@@ -1972,6 +2113,8 @@ mod tests {
                 radius: 1,
             },
             capacity: 1,
+            boss: false,
+            respawn_ms: RESPAWN_MS,
             units: vec![SpawnUnit {
                 wire_kind: 15,
                 level: 1,
@@ -2047,6 +2190,8 @@ mod tests {
                 radius: 1,
             },
             capacity: 1,
+            boss: false,
+            respawn_ms: RESPAWN_MS,
             units: vec![SpawnUnit {
                 wire_kind: 15,
                 level: 1,
@@ -2114,6 +2259,8 @@ mod tests {
                 radius: 1,
             },
             capacity: 1,
+            boss: false,
+            respawn_ms: RESPAWN_MS,
             units: vec![SpawnUnit {
                 wire_kind: 15,
                 level: 1,
@@ -2229,6 +2376,8 @@ mod tests {
                 radius: 1,
             },
             capacity: 1,
+            boss: false,
+            respawn_ms: RESPAWN_MS,
             units: vec![SpawnUnit {
                 wire_kind: 15,
                 level: 1,
@@ -2336,6 +2485,8 @@ mod tests {
                 radius: 1,
             },
             capacity: 1,
+            boss: false,
+            respawn_ms: RESPAWN_MS,
             units: vec![SpawnUnit {
                 wire_kind: 15,
                 level: 1,
@@ -2449,6 +2600,8 @@ mod tests {
                     radius: 1,
                 },
                 capacity: 1,
+                boss: false,
+                respawn_ms: RESPAWN_MS,
                 units: vec![SpawnUnit {
                     wire_kind: 15,
                     level: 1,
@@ -2610,6 +2763,8 @@ mod tests {
                 radius: 3,
             },
             capacity: 1,
+            boss: false,
+            respawn_ms: RESPAWN_MS,
             units: vec![SpawnUnit {
                 wire_kind: 15,
                 level: 1,
@@ -2728,6 +2883,8 @@ mod tests {
                 radius: 1,
             },
             capacity: 1,
+            boss: false,
+            respawn_ms: RESPAWN_MS,
             units: vec![SpawnUnit {
                 wire_kind: 15,
                 level: 1,

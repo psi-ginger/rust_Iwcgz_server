@@ -29,6 +29,11 @@ use crate::{AnyError, LiveFrames, logln, send_raw};
 /// (`Client-Person.cpp:1659-1660`), so echoing the session's own unique is what
 /// lets the toggle take effect.
 ///
+/// A change type other than auto-food is the debug tier: the shipped KR client
+/// heartbeats a type the 2010 enum never had (33, every 30 s — verified live
+/// 2026-10-18) on the same path, so that line repeats on a timer and stays out
+/// of the console unless `GAME_DEBUG_LOG` asks for it.
+///
 /// # Errors
 ///
 /// A malformed body ([`gz_proto::wire::WireError`]), a `char_unique` that does
@@ -38,14 +43,17 @@ pub(crate) async fn handle_change_status_info(
     outbound: &mut Cipher,
     char_unique: i32,
     payload: &[u8],
+    debug_log: bool,
 ) -> Result<(), AnyError> {
     let change = decode_change_status_info(payload)?;
     if change.change_type != CHANGETYPE_AUTOFOOD {
-        logln!(
-            "game: changestatusinfo type {} -> no reply (legacy answers only AUTOFOOD; \
-             Server-Person.cpp:2841-2858)",
-            change.change_type
-        );
+        if debug_log {
+            logln!(
+                "game: changestatusinfo type {} -> no reply (legacy answers only AUTOFOOD; \
+                 Server-Person.cpp:2841-2858)",
+                change.change_type
+            );
+        }
         return Ok(());
     }
 
