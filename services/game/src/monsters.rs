@@ -63,19 +63,36 @@ const MAX_CHAR_NUMBER: u32 = 20_000;
 /// every one of them.
 pub(crate) const AI_TICK_MS: u64 = 100;
 
-/// One **idle** action per monster, on average, in milliseconds.
+/// One action slot, in milliseconds.
 ///
-/// The legacy's gate is `data = (rand() + siID) % (150 / CHAR_ACTION_INTERVAL_FRAME)`
-/// = `% 25`, one pass in 25 (`char-wait.cpp:315-406`,
-/// `CHAR_ACTION_INTERVAL_FRAME = 6`, `Char-Common.h:221`), so a monster thinks
-/// about once every 25 frames. This is that pacing expressed as a deadline,
-/// with the `siID` term folded in as a per-id stagger so 1536 monsters do not
-/// all act on the same tick.
+/// The legacy runs a character's action once per `CHAR_ACTION_INTERVAL_FRAME`
+/// frames (`Char-Common.h:221` = 6) at 50 ms a frame — `char-move.cpp:145`
+/// derives its 350 ms move cap as `(CHAR_ACTION_INTERVAL_FRAME + 1) * 50` — and
+/// `cltCharCommon::Action()` returns unless `GetID() % 6 == GetFrame() % 6`
+/// (`Char-Common.cpp:1476-1480`). So a character, monster included, gets one
+/// action every **300 ms**.
+pub(crate) const AI_SLOT_MS: u64 = 300;
+
+/// The idle decision is a `1 / AI_DECIDE_ONE_IN` draw **per action slot**, not a
+/// deadline.
+///
+/// `char-wait.cpp:342` is
+/// `data = (rand() + siID) % (150 / CHAR_ACTION_INTERVAL_FRAME)` (= `% 25`) and
+/// `if (data == 0)` at `:344` is the whole gate. `rand()` there is a fresh draw,
+/// not a frame counter, so the interval is **geometric**: mean `25 * 300 ms` =
+/// **7,500 ms**, which is also `150 frames * 50 ms` — the `150` in the source is
+/// that same 7.5 s window expressed in frames, and the two routes agreeing is
+/// the check that the reading is right. `siID` only decorrelates each
+/// character's random stream; it is not a timer offset.
+///
+/// The previous `AI_ACT_MS = 6_250` was `25 * 250 ms`: the wrong slot length
+/// *and* a fixed beat in place of a draw, which is why idle monsters could sit
+/// frozen and then all re-decide together.
 ///
 /// It gates **wandering and the enemy search only**. A monster with a target
 /// runs on [`AI_TICK_MS`] instead, and its swing on its own
 /// [`SpawnUnit::attack_interval`] — see [`MonsterWorld::tick`].
-const AI_ACT_MS: u64 = 6_250;
+const AI_DECIDE_ONE_IN: u32 = 25;
 
 /// How far a monster will step toward a wander target, in tiles. The legacy
 /// picks ±5 inside a group and ±10 outside (`char-wait.cpp:202-300`); ours
@@ -487,7 +504,8 @@ impl MonsterWorld {
             target: None,
             jim_host: None,
             walk: None,
-            // Staggered by id, the legacy's `(rand() + siID) % 25` term.
+            // No stagger here: the legacy's `+ siID` term only decorrelates
+            // the random streams, which the per-slot draw already does.
             next_act_ms: 0,
             next_swing_ms: 0,
         };
@@ -588,15 +606,12 @@ impl MonsterWorld {
         let mut hits = Vec::new();
         for index in 0..self.monsters.len() {
             // Two clocks, as the legacy runs them. The legacy gates the wander
-            // and the enemy search together on `data = (rand() + siID) % 25`
-            // (`char-wait.cpp:315-406`), and gates the swing separately on the
-            // kind's own `Attack_Interval` (`char-attack.cpp:1869`). Folding both
-            // into `AI_ACT_MS` put a monster's hit three swing-intervals late
-            // against the animation its client repeats on that interval — the
-            // live report of "the raccoon swings 3-4 times before a number
-            // appears". So an idle monster keeps the long gate and one with a
-            // target runs on the fine tick; the swing has its own deadline
-            // inside [`Self::act`].
+            // and the enemy search on a fresh `1/25` draw **per action slot**
+            // (`char-wait.cpp:342`, one slot = 300 ms, see [`AI_SLOT_MS`]), and
+            // gates the swing separately on the kind's own `Attack_Interval`
+            // (`char-attack.cpp:1869`). So an idle monster is sampled on the
+            // slot and one with a target runs on the fine tick; the swing has
+            // its own deadline inside [`Self::act`].
             if now_ms < self.monsters[index].next_act_ms {
                 continue;
             }
@@ -611,7 +626,7 @@ impl MonsterWorld {
             let gate = if self.monsters[index].target.is_some() {
                 AI_TICK_MS
             } else {
-                AI_ACT_MS
+                AI_SLOT_MS
             };
             self.monsters[index].next_act_ms = self.monsters[index].next_act_ms.max(now_ms + gate);
         }
@@ -928,6 +943,21 @@ impl MonsterWorld {
         };
 
         if self.monsters[index].target.is_none() {
+            // A walking monster is in `ORDER_MOVE`, not `ORDER_WAIT`: the
+            // legacy's dispatcher reaches `OperateWaitServer` only from the
+            // wait branch (`Char-Common.cpp:1634-1640`), so a character never
+            // draws this gate — and never starts a fight — while it walks.
+            // The draw stays `ORDER_WAIT`-shaped and waits out the walk.
+            if self.monsters[index].walk.is_some() {
+                return None;
+            }
+            // One draw per action slot, and a miss costs the slot: the legacy's
+            // `(rand() + siID) % 25` gate (`char-wait.cpp:342`), not a timer.
+            // Re-arming is the tick loop's job — an idle monster is on
+            // [`AI_SLOT_MS`] there.
+            if rng.below(AI_DECIDE_ONE_IN) != 0 {
+                return None;
+            }
             self.engage(registry, index, aggressive);
             if self.monsters[index].target.is_none() {
                 // Nothing to fight: `RandomMove` (`char-wait.cpp:202`).
@@ -960,13 +990,13 @@ impl MonsterWorld {
             // walking that route does not re-order it: the client walks the order
             // it was given, and a fresh 241 every fine tick would restart it in
             // place instead of letting it arrive. One with nowhere to walk — a
-            // wall on the route — backs off to the long gate rather than
-            // rescanning a blocked path every tick.
+            // wall on the route — waits an action slot rather than rescanning a
+            // blocked path every 100 ms tick.
             if self.monsters[index].walk.is_none() {
                 self.order_move(registry, index, (target.x, target.y), now_ms);
                 if self.monsters[index].walk.is_none() {
                     self.monsters[index].next_act_ms =
-                        self.monsters[index].next_act_ms.max(now_ms + AI_ACT_MS);
+                        self.monsters[index].next_act_ms.max(now_ms + AI_SLOT_MS);
                 }
             }
             return None;
@@ -2000,8 +2030,18 @@ mod tests {
         world.monsters[0].next_act_ms = 0;
 
         let mut rng = Rng::new(99);
-        let hits = world.tick(&registry, 0, &mut rng);
-        assert_eq!(hits.len(), 1, "one swing on the first pass");
+        // Engagement is a 1/25 draw per 300 ms action slot now (`char-wait.cpp:342`),
+        // so the first swing lands on the first slot whose draw hits, not on the
+        // first pass. Walk the slots until one does — 25 slots is the mean, 200 is
+        // eight means, far past any plausible tail for this fixed seed.
+        let mut hits = Vec::new();
+        for slot in 0..400u64 {
+            hits = world.tick(&registry, slot * AI_SLOT_MS, &mut rng);
+            if !hits.is_empty() {
+                break;
+            }
+        }
+        assert_eq!(hits.len(), 1, "one swing when the draw first hits");
         assert_eq!(hits[0].key, key);
         assert_eq!(hits[0].attacker_unique, world.monsters[0].unique);
         // 40 raw, level-1 AC is 0, so the full 40 lands.
@@ -2145,7 +2185,7 @@ mod tests {
     /// clocks apart — `char-wait.cpp:315-406` decides *whether* to look for a
     /// fight, `char-attack.cpp:1869` decides *when* the weapon fires — and the
     /// client repeats this monster's attack animation on that same interval
-    /// (`dwAttackInterval`), so a hit paced by `AI_ACT_MS` lands about three
+    /// (`dwAttackInterval`), so a hit paced by the idle slot lands about three
     /// animations after the swing that shows it. That is the live report: "the
     /// raccoon plays its attack animation 3-4 times before a single damage
     /// number registers".
@@ -2210,29 +2250,38 @@ mod tests {
         world.spawn_all(&registry);
 
         let mut rng = Rng::new(99);
-        // The weapon is ready the moment the fight starts: `next_swing_ms`
-        // opens at 0, so the engaging act falls straight through to the swing.
-        assert_eq!(world.tick(&registry, 0, &mut rng).len(), 1, "first swing");
+        // Engagement is a 1/25 draw per 300 ms action slot, so anchor every
+        // timing assertion on the slot where this seed's stream first hits and
+        // the fight opens.
+        let mut t0 = None;
+        for slot in 0..400u64 {
+            let now = slot * AI_SLOT_MS;
+            if world.tick(&registry, now, &mut rng).len() == 1 {
+                t0 = Some(now);
+                break;
+            }
+        }
+        let t0 = t0.expect("a 1/25 draw lands well inside 400 slots");
         // Half way through the interval the act gate has long since opened —
         // `next_act_ms` is on `AI_TICK_MS` while a monster has a target — but
         // the weapon has not recovered.
         assert_eq!(
-            world.tick(&registry, 1_000, &mut rng).len(),
+            world.tick(&registry, t0 + 1_000, &mut rng).len(),
             0,
             "the interval is only half spent"
         );
         // One AI tick past the kind's own deadline: another swing. Under the
-        // old single gate this pass fell at `AI_ACT_MS` (6 250 ms) and there
-        // would be none here.
+        // old fixed gate this pass fell at 6 250 ms and there would be none
+        // here.
         assert_eq!(
-            world.tick(&registry, 2_100, &mut rng).len(),
+            world.tick(&registry, t0 + 2_100, &mut rng).len(),
             1,
             "Attack_Interval has elapsed"
         );
-        assert_eq!(world.tick(&registry, 3_000, &mut rng).len(), 0);
+        assert_eq!(world.tick(&registry, t0 + 3_000, &mut rng).len(), 0);
         // The clock restarts from the swing itself, not from the act gate.
         assert_eq!(
-            world.tick(&registry, 4_200, &mut rng).len(),
+            world.tick(&registry, t0 + 4_200, &mut rng).len(),
             1,
             "the second interval runs from the second swing"
         );
@@ -2240,6 +2289,109 @@ mod tests {
             registry.info(key).expect("the session is there").life,
             400 - 3 * 40,
             "every swing landed"
+        );
+    }
+
+    /// The idle decision is the legacy's `1/25` draw per 300 ms action slot
+    /// (`char-wait.cpp:342`), not the fixed 6,250 ms beat this port used
+    /// before. One world per seed, first slot whose tick produces a swing.
+    /// A fixed beat would put every seed's first decision on the same slot and
+    /// the same wall time; a geometric draw spreads them with a mean near 25
+    /// slots (7,500 ms).
+    ///
+    /// Deliberately not measured through `wander`: [`Self::advance_walks`]
+    /// accrues walk credit from `Instant::now()`, so in a tight test loop a
+    /// started walk never finishes and every later draw dies on the
+    /// already-walking guard. Engagement is the observable that does not
+    /// depend on real time.
+    #[test]
+    fn the_idle_decision_is_a_one_in_twenty_five_draw_per_action_slot() {
+        use crate::registry::{Outbound, SessionInfo};
+
+        const SEEDS: u64 = 200;
+
+        let mut first_swing_slot = Vec::new();
+        for seed in 1..=SEEDS {
+            let registry = Registry::new();
+            let key = Registry::next_key();
+            let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<Outbound>();
+            registry.register(
+                key,
+                tx,
+                SessionInfo {
+                    char_unique: 1000,
+                    name: "Victim".to_owned(),
+                    level: 1,
+                    map_id: FIELD_MAP,
+                    x: 0,
+                    y: 0,
+                    school_id: 0,
+                    class_kind: 1,
+                    life: 400,
+                    move_speed: 12,
+                    sex: 1,
+                    gm_level: 0,
+                },
+            );
+            let mut world = MonsterWorld::empty();
+            world.groups.push(FieldGroup {
+                anchor: SpawnGroup {
+                    map_index: FIELD_MAP,
+                    center_x: 0,
+                    center_y: 0,
+                    radius: 1,
+                },
+                capacity: 1,
+                units: vec![SpawnUnit {
+                    wire_kind: 15,
+                    level: 1,
+                    max_num: 1,
+                    move_speed: 12,
+                    life: 20,
+                    tiles: vec![(0, 0)],
+                    min_atk: 40,
+                    max_atk: 40,
+                    ac: 0,
+                    exp: 0,
+                    aggressive: 5,
+                    range: 1,
+                    attack_interval: 2_000,
+                    critical_rate: 0,
+                    drops: &[],
+                }],
+            });
+            world.spawn_all(&registry);
+            world.monsters[0].next_act_ms = 0;
+
+            let mut rng = Rng::new(seed);
+            let mut slot = None;
+            for s in 0..400u64 {
+                if world.tick(&registry, s * AI_SLOT_MS, &mut rng).len() == 1 {
+                    slot = Some(s);
+                    break;
+                }
+            }
+            first_swing_slot.push(slot.expect("a 1/25 draw lands well inside 400 slots"));
+        }
+
+        // A fixed 6,250 ms deadline arms the same wall time for every monster,
+        // so under it every seed here would read the same slot. The draw does
+        // not.
+        let distinct: std::collections::HashSet<u64> = first_swing_slot.iter().copied().collect();
+        assert!(
+            distinct.len() > 10,
+            "first decisions spread over many slots: {:?}",
+            first_swing_slot
+        );
+        let mean: f64 = first_swing_slot.iter().sum::<u64>() as f64 / SEEDS as f64;
+        assert!(
+            (18.0..=32.0).contains(&mean),
+            "the mean first decision sits near the legacy's 25 slots: {mean}"
+        );
+        assert!(
+            first_swing_slot.iter().filter(|s| **s >= 100).count() <= 12,
+            "the geometric tail keeps late first decisions rare (expected ~3.4 of {SEEDS} beyond slot 100, Poisson): {:?}",
+            first_swing_slot
         );
     }
 
