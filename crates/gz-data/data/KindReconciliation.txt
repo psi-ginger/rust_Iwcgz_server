@@ -1223,7 +1223,7 @@ KIND_Trihornbishop	en_only	688	none	-
 KIND_Trihornbishop_T	en_only	689	none	-
 KIND_UGLYPILLAR	kr_only	-	kr	-
 KIND_UNDERSEA_CROCODILE	kr_only	-	kr	-
-KIND_UNDERSEA_WHALE	kr_only	-	kr	-
+KIND_UNDERSEA_WHALE	kr_only	918	kr	KIND_DeepSeaWhale
 KIND_UNDINE	kr_only	-	kr	-
 KIND_UNIVERSALGENERAL	kr_only	-	kr	-
 KIND_VALKYRIELONG	en_only	508	none	-
@@ -1309,7 +1309,7 @@ KIND_XMASTREE	kr_only	-	none	-
 KIND_XMASTREE_LV1	kr_only	-	none	-
 KIND_XMASTREE_LV2	kr_only	-	none	-
 KIND_XUANWU	kr_only	-	kr	-
-KIND_Xmas_Penguin	kr_only	-	none	-
+KIND_Xmas_Penguin	kr_only	960	none	KIND_CAVINE_RANGE
 KIND_XunShou01	en_only	643	none	-
 KIND_XunShou02	en_only	644	en	-
 KIND_YACHAKING_SUMMON	kr_only	-	none	-
@@ -1352,7 +1352,7 @@ KIND_ZORRORACCOON_AGIT2	en_only	407	none	-
 KIND_ZORRORACCOON_FAKE	en_only	478	none	-
 KIND_ZORRORACCOON_NPC	en_only	104	en	-
 KIND_beastmaster	kr_only	-	kr	-
-KIND_breadtiger	kr_only	-	kr	-
+KIND_breadtiger	kr_only	401	kr	KIND_DRAGON_BABY
 KIND_doora	en_only	776	en	-
 KIND_doorb	en_only	777	en	-
 KIND_doorc	en_only	778	en	-

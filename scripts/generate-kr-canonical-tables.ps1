@@ -323,10 +323,19 @@ $renamePairs = [ordered]@{
     "KIND_SOULGUARD_WomanGhost" = "KIND_SOULGUARD_Ghostwoman"
     "KIND_Soulguard_Miho" = "KIND_SOULGUARD_Miho_Elite"
     "KIND_THIRTEENFACE_3" = "KIND_THIRTEENFACE"
+
+    # Section 2.3 (the KR-only list with no candidate target) reverse-sprite screen,
+    # 2026-10-18: 3 of the 7 candidates whose sprite is unique on both sides are
+    # monsters. The other four are event props and stay quarantined -- KIND_NEWYEARBASE
+    # is a statue, and KIND_WORLDTREE_LV1..3 shares the tree sprite with four other KR
+    # event decorations, so a sprite match there identifies a prop family, not a kind.
+    "KIND_breadtiger"     = "KIND_DRAGON_BABY"
+    "KIND_UNDERSEA_WHALE" = "KIND_DeepSeaWhale"
+    "KIND_Xmas_Penguin"   = "KIND_CAVINE_RANGE"
 }
 $attackPairs = Apply-RenamePairs $attack $krAttack $renamePairs
 $itemPairs = Apply-RenamePairs $item $krItem $renamePairs
-# Every pair must land on the attack master (the KR attack roster holds all 36); a
+# Every pair must land on the attack master (the KR attack roster holds all 39); a
 # shortfall means a typo in the pair table, not legitimate missing data.
 if (($attackPairs.Upgraded.Count + $attackPairs.Appended.Count) -ne $renamePairs.Count) {
     throw "rename pairs applied to attack: $($attackPairs.Upgraded.Count + $attackPairs.Appended.Count) of $($renamePairs.Count)"

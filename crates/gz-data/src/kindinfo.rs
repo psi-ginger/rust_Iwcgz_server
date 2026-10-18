@@ -882,9 +882,9 @@ mod tests {
         en_spawn_without_id.sort_unstable();
         assert_eq!(en_spawn_without_id, expected_en);
 
-        // Tier C: the 36 human-confirmed rename pairs (docs/MONSTER_PAIRING_CANDIDATES.md
-        // sections 2.1 and 2.2). Each KR-only code now resolves to its EN code's wire id, so
-        // it has left the quarantine while keeping its own row for the audit.
+        // Tier C: the 39 rename pairs (sections 2.1, 2.2, and the three monster rows of
+        // the 2.3 sprite screen). Each KR-only code now resolves to its EN code's wire id,
+        // so it has left the quarantine while keeping its own row for the audit.
         let mut expected_pairs = vec![
             ("KIND_BEAST06YOUNG", "331", "KIND_HOR14YOUNG"),
             ("KIND_BLACKTIGER", "961", "KIND_BLACKTIGER_MELEE"),
@@ -928,6 +928,11 @@ mod tests {
             ),
             ("KIND_Soulguard_Miho", "816", "KIND_SOULGUARD_Miho_Elite"),
             ("KIND_THIRTEENFACE_3", "449", "KIND_THIRTEENFACE"),
+            // Section 2.3 batch (2026-10-18): the monsters among the 7 candidates whose
+            // sprite is unique on both sides. The four event props stay quarantined.
+            ("KIND_breadtiger", "401", "KIND_DRAGON_BABY"),
+            ("KIND_UNDERSEA_WHALE", "918", "KIND_DeepSeaWhale"),
+            ("KIND_Xmas_Penguin", "960", "KIND_CAVINE_RANGE"),
         ];
         expected_pairs.sort_unstable();
         pairs_to.sort_unstable();
