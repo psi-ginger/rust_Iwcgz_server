@@ -77,14 +77,14 @@ KIND_BLACKBOSS	en_only	240	none	-
 KIND_BLACKPRIEST	en_only	446	en	-
 KIND_BLACKPRIEST_1	kr_only	-	kr	-
 KIND_BLACKPRIEST_2	kr_only	-	kr	-
-KIND_BLACKPRIEST_3	kr_only	-	kr	-
+KIND_BLACKPRIEST_3	kr_only	446	kr	KIND_BLACKPRIEST
 KIND_BLACKPRIEST_4	kr_only	-	kr	-
 KIND_BLACKPRIEST_5	kr_only	-	kr	-
 KIND_BLACKRABIT	kr_only	-	none	-
 KIND_BLACKSOUL	en_only	448	en	-
 KIND_BLACKSOUL_1	kr_only	-	kr	-
 KIND_BLACKSOUL_2	kr_only	-	kr	-
-KIND_BLACKSOUL_3	kr_only	-	kr	-
+KIND_BLACKSOUL_3	kr_only	448	kr	KIND_BLACKSOUL
 KIND_BLACKSOUL_4	kr_only	-	kr	-
 KIND_BLACKSOUL_5	kr_only	-	kr	-
 KIND_BLACKSPIDER	en_only	247	en	-
@@ -193,7 +193,7 @@ KIND_CLONESTEIN	en_only	505	none	-
 KIND_CLOWN	en_only	435	en	-
 KIND_CLOWN_1	kr_only	-	kr	-
 KIND_CLOWN_2	kr_only	-	kr	-
-KIND_CLOWN_3	kr_only	-	kr	-
+KIND_CLOWN_3	kr_only	435	kr	KIND_CLOWN
 KIND_CLOWN_4	kr_only	-	kr	-
 KIND_CLOWN_5	kr_only	-	kr	-
 KIND_CLUBCAR	kr_only	-	kr	-
@@ -263,7 +263,7 @@ KIND_DR_GURI	kr_only	-	kr	-
 KIND_DUCHESS	en_only	445	en	-
 KIND_DUCHESS_1	kr_only	-	kr	-
 KIND_DUCHESS_2	kr_only	-	kr	-
-KIND_DUCHESS_3	kr_only	-	kr	-
+KIND_DUCHESS_3	kr_only	445	kr	KIND_DUCHESS
 KIND_DUCHESS_4	kr_only	-	kr	-
 KIND_DUCHESS_5	kr_only	-	kr	-
 KIND_DUMEORI	kr_only	-	kr	-
@@ -339,7 +339,7 @@ KIND_FLOWERPIG	shared	18	kr+en	-
 KIND_FOGBRIDE	en_only	436	en	-
 KIND_FOGBRIDE_1	kr_only	-	kr	-
 KIND_FOGBRIDE_2	kr_only	-	kr	-
-KIND_FOGBRIDE_3	kr_only	-	kr	-
+KIND_FOGBRIDE_3	kr_only	436	kr	KIND_FOGBRIDE
 KIND_FOGBRIDE_4	kr_only	-	kr	-
 KIND_FOGBRIDE_5	kr_only	-	kr	-
 KIND_FOX	en_only	825	en	-
@@ -366,7 +366,7 @@ KIND_GEMBOX	kr_only	-	none	-
 KIND_GENTLEMAN	en_only	447	en	-
 KIND_GENTLEMAN_1	kr_only	-	kr	-
 KIND_GENTLEMAN_2	kr_only	-	kr	-
-KIND_GENTLEMAN_3	kr_only	-	kr	-
+KIND_GENTLEMAN_3	kr_only	447	kr	KIND_GENTLEMAN
 KIND_GENTLEMAN_4	kr_only	-	kr	-
 KIND_GENTLEMAN_5	kr_only	-	kr	-
 KIND_GIFTRACCOON	en_only	452	none	-
@@ -391,7 +391,7 @@ KIND_GOLDGEMBOX	kr_only	-	none	-
 KIND_GOLD_CKNIGHT	en_only	599	none	-
 KIND_GOLEM	kr_only	-	kr	-
 KIND_GOMG	kr_only	-	none	-
-KIND_GOONZUDAY	kr_only	-	none	-
+KIND_GOONZUDAY	kr_only	693	none	KIND_GOONZUDAYNPC
 KIND_GOONZUDAYNPC	en_only	693	none	-
 KIND_GOONZUDEV	kr_only	-	none	-
 KIND_GOONZUDEV_2	shared	953	none	-
@@ -670,7 +670,7 @@ KIND_KOINOBORYRED	en_only	176	none	-
 KIND_KOINOBORYYELLOW	en_only	175	none	-
 KIND_KONMYEONG	kr_only	-	kr	-
 KIND_KRAKEN	kr_only	635	kr	KIND_Kracken
-KIND_KRAKEN_T	kr_only	-	none	-
+KIND_KRAKEN_T	kr_only	636	none	KIND_Kracken_T
 KIND_KUIJIAB	shared	751	kr+en	-
 KIND_KUIJIAJ	shared	749	kr+en	-
 KIND_KUIJIAY	shared	750	kr+en	-
@@ -756,7 +756,7 @@ KIND_MINICERBERUS	en_only	486	none	-
 KIND_MINIFROZENQUEEN	en_only	485	none	-
 KIND_MINIGOBLIN	shared	67	kr	-
 KIND_MINIRABBIT_BOY	kr_only	-	none	-
-KIND_MINIRABBIT_GIRL	kr_only	-	none	-
+KIND_MINIRABBIT_GIRL	kr_only	474	none	KIND_RABBITGIRL
 KIND_MIR	kr_only	-	none	-
 KIND_MISA	kr_only	-	kr	-
 KIND_MISSIONFLAG	kr_only	-	none	-
@@ -882,7 +882,7 @@ KIND_PANG	en_only	403	en	-
 KIND_PANOCKSUN	kr_only	-	none	-
 KIND_PAPAGOBLIN	shared	68	kr	-
 KIND_PAPAGOBLIN_2	en_only	305	none	-
-KIND_PAPAGOBLIN_FB	kr_only	-	kr	-
+KIND_PAPAGOBLIN_FB	kr_only	305	kr	KIND_PAPAGOBLIN_2
 KIND_PARKMOONSOO	kr_only	-	none	-
 KIND_PARROT	kr_only	-	none	-
 KIND_PARTYMATCHING	kr_only	-	kr	-
@@ -987,7 +987,7 @@ KIND_ROLLINGSTEGO	en_only	368	en	-
 KIND_ROULETTESTATUE	en_only	325	none	-
 KIND_ROULETTESTATUEBASE	en_only	324	none	-
 KIND_ROYALGUARD	shared	41	kr+en	-
-KIND_RUDOLF	kr_only	-	none	-
+KIND_RUDOLF	kr_only	86	none	KIND_RUDOLPH
 KIND_RUDOLPH	en_only	86	en	-
 KIND_RUDOLPHPET	en_only	345	none	-
 KIND_RUDOLPHPET_T	en_only	423	none	-
@@ -1079,14 +1079,14 @@ KIND_SOULGUARD_FIRESPIRIT	en_only	396	none	-
 KIND_SOULGUARD_FlameBird	en_only	968	none	-
 KIND_SOULGUARD_Ghostman	en_only	699	none	-
 KIND_SOULGUARD_Ghostwoman	en_only	698	none	-
-KIND_SOULGUARD_GodEagle	kr_only	-	none	-
+KIND_SOULGUARD_GodEagle	kr_only	571	none	KIND_SOULGUARD_GoldEagle
 KIND_SOULGUARD_GoldEagle	en_only	571	none	-
 KIND_SOULGUARD_Halloween	en_only	655	none	-
 KIND_SOULGUARD_ICESPIRIT	en_only	432	none	-
 KIND_SOULGUARD_LAND	en_only	494	none	-
 KIND_SOULGUARD_Luna	en_only	717	none	-
 KIND_SOULGUARD_Magra	shared	622	none	-
-KIND_SOULGUARD_ManGhost	kr_only	-	none	-
+KIND_SOULGUARD_ManGhost	kr_only	699	none	KIND_SOULGUARD_Ghostman
 KIND_SOULGUARD_Mermaid	en_only	588	none	-
 KIND_SOULGUARD_Miho_Elite	en_only	816	none	-
 KIND_SOULGUARD_Miho_Epic	en_only	817	none	-
@@ -1103,7 +1103,7 @@ KIND_SOULGUARD_TK_EVENT	en_only	430	none	-
 KIND_SOULGUARD_Tamie	en_only	568	none	-
 KIND_SOULGUARD_UFO	en_only	759	none	-
 KIND_SOULGUARD_WINDSPIRIT	en_only	453	none	-
-KIND_SOULGUARD_WomanGhost	kr_only	-	none	-
+KIND_SOULGUARD_WomanGhost	kr_only	698	none	KIND_SOULGUARD_Ghostwoman
 KIND_SOULSOLDIER	kr_only	-	kr	-
 KIND_SOUTHGUARDIAN	kr_only	-	kr	-
 KIND_SPAMONKEY	kr_only	24	kr	KIND_MONKEYSON
@@ -1152,7 +1152,7 @@ KIND_Skeleton_King	en_only	526	none	-
 KIND_Skeleton_Melee	en_only	695	none	-
 KIND_Skeleton_Range	en_only	696	none	-
 KIND_Smokey_Raccoonies	en_only	764	none	-
-KIND_Soulguard_Miho	kr_only	-	none	-
+KIND_Soulguard_Miho	kr_only	816	none	KIND_SOULGUARD_Miho_Elite
 KIND_Sulday_RABBIT	kr_only	-	none	-
 KIND_Sulday_RACCOON	kr_only	-	none	-
 KIND_SummerDRAGON	kr_only	-	none	-
@@ -1171,7 +1171,7 @@ KIND_THIEFWOLFNINJA	kr_only	-	none	-
 KIND_THIRTEENFACE	en_only	449	en	-
 KIND_THIRTEENFACE_1	kr_only	-	kr	-
 KIND_THIRTEENFACE_2	kr_only	-	kr	-
-KIND_THIRTEENFACE_3	kr_only	-	kr	-
+KIND_THIRTEENFACE_3	kr_only	449	kr	KIND_THIRTEENFACE
 KIND_THIRTEENFACE_4	kr_only	-	kr	-
 KIND_THIRTEENFACE_5	kr_only	-	kr	-
 KIND_TIGER	shared	11	kr+en	-

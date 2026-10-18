@@ -882,9 +882,9 @@ mod tests {
         en_spawn_without_id.sort_unstable();
         assert_eq!(en_spawn_without_id, expected_en);
 
-        // Tier C: the 20 human-confirmed rename pairs (docs/MONSTER_PAIRING_CANDIDATES.md
-        // section 2.1). Each KR-only code now resolves to its EN code's wire id, so it has
-        // left the quarantine while keeping its own row for the audit.
+        // Tier C: the 36 human-confirmed rename pairs (docs/MONSTER_PAIRING_CANDIDATES.md
+        // sections 2.1 and 2.2). Each KR-only code now resolves to its EN code's wire id, so
+        // it has left the quarantine while keeping its own row for the audit.
         let mut expected_pairs = vec![
             ("KIND_BEAST06YOUNG", "331", "KIND_HOR14YOUNG"),
             ("KIND_BLACKTIGER", "961", "KIND_BLACKTIGER_MELEE"),
@@ -906,6 +906,28 @@ mod tests {
             ("KIND_SPATOAD", "26", "KIND_TOAD"),
             ("KIND_VIRGINGHOST", "604", "KIND_Ghost_NvGui1"),
             ("KIND_WERWOLF", "196", "KIND_WEREWOLF"),
+            // Section 2.2 batch (2026-10-18): the 7 stage-3 family members and 9
+            // standalones, three of them on corrected targets.
+            ("KIND_BLACKPRIEST_3", "446", "KIND_BLACKPRIEST"),
+            ("KIND_BLACKSOUL_3", "448", "KIND_BLACKSOUL"),
+            ("KIND_CLOWN_3", "435", "KIND_CLOWN"),
+            ("KIND_DUCHESS_3", "445", "KIND_DUCHESS"),
+            ("KIND_FOGBRIDE_3", "436", "KIND_FOGBRIDE"),
+            ("KIND_GENTLEMAN_3", "447", "KIND_GENTLEMAN"),
+            ("KIND_GOONZUDAY", "693", "KIND_GOONZUDAYNPC"),
+            ("KIND_KRAKEN_T", "636", "KIND_Kracken_T"),
+            ("KIND_MINIRABBIT_GIRL", "474", "KIND_RABBITGIRL"),
+            ("KIND_PAPAGOBLIN_FB", "305", "KIND_PAPAGOBLIN_2"),
+            ("KIND_RUDOLF", "86", "KIND_RUDOLPH"),
+            ("KIND_SOULGUARD_GodEagle", "571", "KIND_SOULGUARD_GoldEagle"),
+            ("KIND_SOULGUARD_ManGhost", "699", "KIND_SOULGUARD_Ghostman"),
+            (
+                "KIND_SOULGUARD_WomanGhost",
+                "698",
+                "KIND_SOULGUARD_Ghostwoman",
+            ),
+            ("KIND_Soulguard_Miho", "816", "KIND_SOULGUARD_Miho_Elite"),
+            ("KIND_THIRTEENFACE_3", "449", "KIND_THIRTEENFACE"),
         ];
         expected_pairs.sort_unstable();
         pairs_to.sort_unstable();

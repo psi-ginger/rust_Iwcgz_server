@@ -300,10 +300,33 @@ $renamePairs = [ordered]@{
     "KIND_SPATOAD"       = "KIND_TOAD"
     "KIND_VIRGINGHOST"   = "KIND_Ghost_NvGui1"
     "KIND_WERWOLF"       = "KIND_WEREWOLF"
+
+    # Section 2.2 of docs/MONSTER_PAIRING_CANDIDATES.md, vetted by
+    # docs/MONSTER_PAIRING_OVERNIGHT_AUDIT.md and confirmed 2026-10-18: the 7 stage-3
+    # members of the numbered families (never n->1 by default) and 9 standalones.
+    # Three targets are corrected from the candidate doc: the soul-guard ghosts
+    # resolve to SOULGUARD_Ghostman / _Ghostwoman, and the kraken event variant to
+    # KIND_Kracken_T -- not KIND_Ghost / KIND_Kracken, which are different kinds.
+    "KIND_BLACKPRIEST_3"  = "KIND_BLACKPRIEST"
+    "KIND_BLACKSOUL_3"    = "KIND_BLACKSOUL"
+    "KIND_CLOWN_3"        = "KIND_CLOWN"
+    "KIND_DUCHESS_3"      = "KIND_DUCHESS"
+    "KIND_FOGBRIDE_3"     = "KIND_FOGBRIDE"
+    "KIND_GENTLEMAN_3"    = "KIND_GENTLEMAN"
+    "KIND_GOONZUDAY"      = "KIND_GOONZUDAYNPC"
+    "KIND_KRAKEN_T"       = "KIND_Kracken_T"
+    "KIND_MINIRABBIT_GIRL" = "KIND_RABBITGIRL"
+    "KIND_PAPAGOBLIN_FB"  = "KIND_PAPAGOBLIN_2"
+    "KIND_RUDOLF"         = "KIND_RUDOLPH"
+    "KIND_SOULGUARD_GodEagle"   = "KIND_SOULGUARD_GoldEagle"
+    "KIND_SOULGUARD_ManGhost"   = "KIND_SOULGUARD_Ghostman"
+    "KIND_SOULGUARD_WomanGhost" = "KIND_SOULGUARD_Ghostwoman"
+    "KIND_Soulguard_Miho" = "KIND_SOULGUARD_Miho_Elite"
+    "KIND_THIRTEENFACE_3" = "KIND_THIRTEENFACE"
 }
 $attackPairs = Apply-RenamePairs $attack $krAttack $renamePairs
 $itemPairs = Apply-RenamePairs $item $krItem $renamePairs
-# Every pair must land on the attack master (the KR attack roster holds all 20); a
+# Every pair must land on the attack master (the KR attack roster holds all 36); a
 # shortfall means a typo in the pair table, not legitimate missing data.
 if (($attackPairs.Upgraded.Count + $attackPairs.Appended.Count) -ne $renamePairs.Count) {
     throw "rename pairs applied to attack: $($attackPairs.Upgraded.Count + $attackPairs.Appended.Count) of $($renamePairs.Count)"

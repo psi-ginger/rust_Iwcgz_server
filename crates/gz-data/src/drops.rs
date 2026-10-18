@@ -401,8 +401,8 @@ mod tests {
         let rows = parse_char_drops(&bytes).expect("parses");
         assert_eq!(
             rows.len(),
-            337,
-            "the EN row set plus the 3 rename-pair drop rows"
+            338,
+            "the EN row set plus the 4 rename-pair drop rows"
         );
 
         // KIND_RACCOON (map 108 starter): the KR capture numbers and the KR drop
