@@ -481,7 +481,7 @@ pub(crate) async fn player_swing(
         world.hit_by_player(
             registry,
             target_unique,
-            me.char_unique,
+            me.char_unique.si16(),
             crit,
             now_tick(),
             combat_rng,
@@ -556,7 +556,7 @@ pub(crate) async fn player_swing(
             session_key,
             GameMsg::ResponseGetexp as u16,
             GetExpResponse {
-                si_char_unique: me.char_unique,
+                si_char_unique: me.char_unique.si16(),
                 si_reason: 0,
                 si_exp: gained.min(i32::MAX as i64) as i32,
                 si_fame_exp: 0,

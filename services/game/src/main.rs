@@ -70,6 +70,7 @@ mod combat;
 mod config;
 mod friends;
 mod geography;
+mod ids;
 mod items;
 mod monsters;
 mod movement;
@@ -83,10 +84,8 @@ use combat::{
     HIT_THROTTLE_MS, PlayerAttacks, Rng, Swing, may_start_approach, player_swing, start_approach,
 };
 use config::GameConfig;
-use registry::{
-    MAX_CHAR_NUMBER, OUTBOUND_CAP, Outbound, PLAYER_CHAR_UNIQUE_TOP, Registered, Registry,
-    SessionInfo,
-};
+use ids::PlayerCharUnique;
+use registry::{OUTBOUND_CAP, Outbound, PLAYER_CHAR_UNIQUE_TOP, Registered, Registry, SessionInfo};
 
 // The auth/character-lifecycle family lives in `auth.rs`. The dispatcher calls
 // the login/selectchar/make-new-char/delete handlers; `send_char_list`,
@@ -1082,12 +1081,17 @@ async fn handle_client(
                         out_tx.clone(),
                         close.clone(),
                         SessionInfo {
-                            char_unique: i16::try_from(char_unique).map_err(|_| {
-                                format!(
-                                    "session char_unique {char_unique} does not fit the \
-                                     SI16 siCharUnique"
-                                )
-                            })?,
+                            // Typed at construction: an out-of-band capture
+                            // id now fails here (design doc §5.3), before the
+                            // registry's own belt-and-braces band check below.
+                            char_unique: PlayerCharUnique::try_from_si16(
+                                i16::try_from(char_unique).map_err(|_| {
+                                    format!(
+                                        "session char_unique {char_unique} does not fit the \
+                                         SI16 siCharUnique"
+                                    )
+                                })?,
+                            )?,
                             name: character_id.name.clone(),
                             level: i32::from(character_id.level),
                             map_id: character_id.map_id,
@@ -1502,9 +1506,12 @@ async fn handle_client(
                             &me,
                             session_key,
                             GameMsg::ResponseUserorder as u16,
-                            OrderData::attack_order(i32::from(me.char_unique), order.si_para2)
-                                .encode()
-                                .to_vec(),
+                            OrderData::attack_order(
+                                i32::from(me.char_unique.si16()),
+                                order.si_para2,
+                            )
+                            .encode()
+                            .to_vec(),
                         );
                         // Armed for "now": the next pass of the read loop lands
                         // the first swing, then re-arms on the interval.
@@ -2035,9 +2042,11 @@ async fn handle_rightmouse_userlist_name(
         .into());
     }
     let char_unique = i32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
-    // The legacy rejects ids outside the CharUnique array (`Server-Person.cpp:2677`);
-    // that bound also guarantees the cast to the registry's SI16 key is lossless.
-    if !(0..i32::from(MAX_CHAR_NUMBER)).contains(&char_unique) {
+    // The legacy rejects ids outside the CharUnique array (`Server-Person.cpp:2677`,
+    // its `MAX_CHAR_NUMBER` measured at 20,000, design doc §2.3); the registry
+    // can only ever resolve the player band, so that is the bound here — and it
+    // guarantees the cast to the registry's SI16 key is lossless.
+    if !(0..=i32::from(PLAYER_CHAR_UNIQUE_TOP)).contains(&char_unique) {
         logln!("game: right-mouse name for out-of-range char_unique {char_unique} -> no reply");
         return Ok(());
     }

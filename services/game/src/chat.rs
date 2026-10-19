@@ -171,7 +171,7 @@ pub(crate) fn handle_chat(registry: &Registry, session_key: SessionKey, request:
                         target_key,
                         GameMsg::ResponseChat as u16,
                         encode_chat_response(
-                            sender.char_unique,
+                            sender.char_unique.si16(),
                             &sender.name,
                             0,
                             CHATMODE_SECRET,
@@ -213,7 +213,7 @@ pub(crate) fn handle_chat(registry: &Registry, session_key: SessionKey, request:
             registry.broadcast_near(
                 &sender,
                 GameMsg::ResponseHeadchat as u16,
-                encode_head_chat_response(sender.char_unique, &text),
+                encode_head_chat_response(sender.char_unique.si16(), &text),
             );
         }
         ChatRoute::Home => {
@@ -226,7 +226,7 @@ pub(crate) fn handle_chat(registry: &Registry, session_key: SessionKey, request:
                     sender.school_id,
                     GameMsg::ResponseChat as u16,
                     encode_chat_response(
-                        sender.char_unique,
+                        sender.char_unique.si16(),
                         &sender.name,
                         0,
                         request.mode,
@@ -253,7 +253,7 @@ pub(crate) fn handle_chat(registry: &Registry, session_key: SessionKey, request:
             registry.broadcast_all(
                 GameMsg::ResponseChat as u16,
                 encode_chat_response(
-                    sender.char_unique,
+                    sender.char_unique.si16(),
                     &sender.name,
                     0,
                     request.mode,
@@ -316,7 +316,7 @@ pub(crate) fn handle_secret_chat(
         target,
         GameMsg::ResponseChat as u16,
         encode_chat_response(
-            sender.char_unique,
+            sender.char_unique.si16(),
             &sender.name,
             sender.level,
             CHATMODE_SECRET,
@@ -392,7 +392,7 @@ pub(crate) fn handle_makesecret_chat_channel(
         session_key,
         encode_makesecret_chat_channel_response(
             target.gm_level >= BASIC_GAMEMASTER_LEVEL,
-            target.char_unique,
+            target.char_unique.si16(),
             target.level,
             &target.name,
             &basic.account_id,

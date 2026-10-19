@@ -62,24 +62,22 @@ use tokio::sync::Notify;
 use tokio::sync::mpsc::Sender;
 use tokio::sync::mpsc::error::TrySendError;
 
+use crate::ids::{self, PlayerCharUnique};
 use crate::logln_err;
 
-/// `MAX_CHAR_NUMBER` (`CommonHeader.h:556`) — `GetIDFromCharUnique` returns 0
-/// for `charunique <= 0` and for `charunique >=` this (`CharManager.cpp:205`),
-/// so neither can name a session.
-pub const MAX_CHAR_NUMBER: i16 = 20_000;
-
 /// The top of the player id band, tied to the NPC band's floor so the two can
-/// never overlap (audit H3).
+/// never overlap (audit H3). The number itself lives beside the id types in
+/// [`crate::ids`]; this alias is what the band-gate callers import.
 ///
 /// The legacy partitions `CharUniqueInfo` in three bands (`Char-Server.h:
 /// 1006-1037`): PCs first, then NPCs. This port's approved split is players in
 /// `1..=PLAYER_CHAR_UNIQUE_TOP`, monsters and NPCs from
-/// [`gz_data::npc::NPC_CHAR_UNIQUE_BASE`] (8500) up to `MAX_CHAR_NUMBER`.
-/// Sessions allocate inside the player band (`crate::allocate_char_unique`),
-/// and [`Registry::register`] refuses anything else, so a session can never
-/// take an id the monster allocator hands out.
-pub const PLAYER_CHAR_UNIQUE_TOP: i16 = gz_data::npc::NPC_CHAR_UNIQUE_BASE as i16 - 1;
+/// [`gz_data::npc::NPC_CHAR_UNIQUE_BASE`] (8500) up — now the two typed pools
+/// of `crate::ids`, behind [`ids::MonsterEntityId`]. Sessions allocate inside the
+/// player band (`crate::allocate_char_unique`), [`PlayerCharUnique`] refuses
+/// anything else at construction, and [`Registry::register`] re-checks it, so a
+/// session can never take an id the monster allocator hands out.
+pub const PLAYER_CHAR_UNIQUE_TOP: i16 = ids::PLAYER_BAND_TOP;
 
 /// Frames a connection's outbound queue holds before it counts as lagging.
 ///
@@ -128,8 +126,11 @@ pub struct Outbound {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionInfo {
     /// `siCharUnique` — what 118/120/121/122 put on the wire and what the
-    /// 119/121 lookups resolve.
-    pub char_unique: i16,
+    /// 119/121 lookups resolve. Typed ([`PlayerCharUnique`], design doc §5.3):
+    /// a value outside `1..=PLAYER_CHAR_UNIQUE_TOP` cannot be *stored* here
+    /// anymore, so cross-assignment with a monster id is a compile error;
+    /// `.si16()` carries it onto the wire.
+    pub char_unique: PlayerCharUnique,
     /// The character's name, and the target `find_by_name` matches exactly.
     pub name: String,
     /// `clIP.siLevel` as `i32`, because 118's `siLevel` is `SI32`.
@@ -355,7 +356,10 @@ impl Registry {
         close: Arc<Notify>,
         info: SessionInfo,
     ) -> bool {
-        if !(1..=PLAYER_CHAR_UNIQUE_TOP).contains(&info.char_unique) {
+        // Belt-and-braces: `PlayerCharUnique`'s constructor already refuses
+        // this band, so a `false` here means a caller built the type by some
+        // other road (design doc §5.3).
+        if !(1..=PLAYER_CHAR_UNIQUE_TOP).contains(&info.char_unique.si16()) {
             logln_err!(
                 "registry: refusing char_unique {}: outside the player band 1..={}",
                 info.char_unique,
@@ -403,7 +407,7 @@ impl Registry {
                 let info = departing.info.clone();
                 // Encode LOGOUT (11) = 4-byte char_unique (little-endian)
                 let mut payload = Vec::with_capacity(4);
-                payload.extend_from_slice(&info.char_unique.to_le_bytes());
+                payload.extend_from_slice(&info.char_unique.si16().to_le_bytes());
                 // Broadcast to near block (excluding self, which is already going away)
                 for (other_key, other) in sessions.iter() {
                     if *other_key != key && is_near(&info, &other.info) {
@@ -555,15 +559,20 @@ impl Registry {
     }
 
     /// The session whose character carries `char_unique` —
-    /// `GetIDFromCharUnique` (`CharManager.cpp:203`), bounds and all.
+    /// `GetIDFromCharUnique` (`CharManager.cpp:203`), bounds and all. The
+    /// bound is now the player band: nothing outside it can name a session
+    /// (the type refuses it, `register` re-checks it), and the legacy's own
+    /// wall (`MAX_CHAR_NUMBER`, measured at 20,000, design doc §2.3) sits
+    /// strictly above the band, so every refusal the old bound produced this
+    /// one produces too.
     #[must_use]
     pub fn find_by_charunique(&self, char_unique: i16) -> Option<SessionKey> {
-        if char_unique <= 0 || char_unique >= MAX_CHAR_NUMBER {
+        if !(1..=PLAYER_CHAR_UNIQUE_TOP).contains(&char_unique) {
             return None;
         }
         self.lock()
             .iter()
-            .filter(|(_, s)| s.info.char_unique == char_unique)
+            .filter(|(_, s)| s.info.char_unique.si16() == char_unique)
             .map(|(key, _)| *key)
             .min()
     }
@@ -652,7 +661,7 @@ impl Registry {
                     encode_friend_login_response(
                         friend.group,
                         basic.character_id,
-                        i32::from(info.char_unique),
+                        i32::from(info.char_unique.si16()),
                         &basic.account_id,
                     ),
                 )
@@ -1112,7 +1121,8 @@ mod tests {
     /// cell, one home village.
     fn info(char_unique: i16, name: &str, x: i32, y: i32) -> SessionInfo {
         SessionInfo {
-            char_unique,
+            char_unique: PlayerCharUnique::try_from_si16(char_unique)
+                .expect("test id in the player band"),
             name: name.to_owned(),
             level: 34,
             map_id: 7,
@@ -1743,18 +1753,26 @@ mod tests {
         );
     }
 
-    /// `GetIDFromCharUnique` returns 0 for `<= 0` and for `>= MAX_CHAR_NUMBER`
-    /// (`CharManager.cpp:205`), so neither can resolve — and the out-of-range
-    /// test has to happen on an id an `i16` can actually hold.
+    /// `GetIDFromCharUnique` returns 0 for `<= 0` (`CharManager.cpp:205`), so
+    /// it cannot resolve — and the port's bound is the player band: the type
+    /// refuses to *store* anything above it, so nothing above it can name a
+    /// session either. The legacy's own wall (`MAX_CHAR_NUMBER`, measured at
+    /// 20,000, design doc §2.3) sits above the band, so every id it refused
+    /// this refuses too.
     #[test]
-    fn find_by_charunique_applies_the_legacy_id_bound() {
+    fn find_by_charunique_applies_the_player_band_bound() {
         let registry = Registry::new();
         let (key, _rx) = join(&registry, info(1471, "Tester", 0, 0));
 
         assert_eq!(registry.find_by_charunique(1471), Some(key));
         assert_eq!(registry.find_by_charunique(0), None);
         assert_eq!(registry.find_by_charunique(-1), None);
-        assert_eq!(registry.find_by_charunique(MAX_CHAR_NUMBER), None);
+        assert_eq!(
+            registry.find_by_charunique(PLAYER_CHAR_UNIQUE_TOP + 1),
+            None,
+            "the first id above the band resolves to nothing"
+        );
+        assert_eq!(registry.find_by_charunique(i16::MAX), None);
         assert_eq!(registry.find_by_charunique(1470), None);
     }
 

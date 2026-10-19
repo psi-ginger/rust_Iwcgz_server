@@ -34,7 +34,6 @@ use std::time::Instant;
 use gz_data::drops::{DropEntry, roll_drop};
 use gz_data::kindinfo::{self, CharAttackRow, KindCreateRow, MonsterStats};
 use gz_data::map::MapFile;
-use gz_data::npc::{NPC_CHAR_UNIQUE_BASE, NPC_PLACEMENTS};
 use gz_data::npcgroup;
 use gz_data::spawn::{SpawnField, SpawnGroup, is_walkable};
 use gz_proto::game::{client_map_index, encode_jim, encode_logout};
@@ -44,16 +43,13 @@ use gz_proto::opcodes_game::GameMsg;
 use gz_proto::order::{BasicCharUpdate, OrderData};
 
 use crate::combat::{self, Rng};
+use crate::ids::{self, IdAllocator, MonsterEntityId, SpawnContext, SpawnTier};
 use crate::movement::Movement;
 use crate::registry::{Registry, SessionKey};
 use crate::{logln, logln_err};
 
 /// The one map this phase spawns: the main field (`map.h:67`).
 pub(crate) const FIELD_MAP: i32 = 0;
-
-/// `MAX_CHAR_NUMBER` (`CommonHeader.h:639`) — the exclusive top of the client's
-/// NPC id range, so a monster id must stay below it (`IsNPC` is `8500..20000`).
-const MAX_CHAR_NUMBER: u32 = 20_000;
 
 /// How often [`MonsterWorld::tick`] is called, in milliseconds.
 ///
@@ -166,9 +162,11 @@ struct FieldGroup {
 /// One live monster instance.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Monster {
-    /// `uiMakeCharUnique` — inside the client's `IsNPC` range, and never one of
-    /// the static NPCs' ids.
-    unique: u16,
+    /// `uiMakeCharUnique` — a [`ids::StandardMonsterId`] in H3's band (never a
+    /// static NPC's id, never a session's), or a [`MonsterEntityId::Tier3`]
+    /// once P3 opens the extended band. The type is what keeps that claim
+    /// checkable at every call site (design doc §5.0).
+    unique: MonsterEntityId,
     wire_kind: u16,
     level: u8,
     /// Current life. Reaches 0 only long enough for the death path to remove
@@ -336,15 +334,14 @@ impl MapDormancyManager {
 pub(crate) struct MonsterWorld {
     groups: Vec<FieldGroup>,
     monsters: Vec<Monster>,
-    /// The monotonic half of the id allocator, carried across respawns so it
-    /// never rewinds — [`Self::free`] hands recycled ids back out first.
-    next_unique: u32,
-    /// Ids freed when a corpse left the map, recycled by [`Self::spawn_one`]
-    /// (audit H3, the legacy's `FindEmptyCharUnique`, `Char-Server.h:1006-1037`):
-    /// the band bounds *simultaneous* monsters, not lifetime kills. An id is
+    /// The id pools behind [`Self::spawn_one`] (design doc §3.5): the standard
+    /// band with the T1 ↔ T2 borrow, and the isolated Tier-3 window. Replaced
+    /// batch-2's `next_unique`/`free` pair wholesale; the pools still bound
+    /// *simultaneous* monsters rather than lifetime kills, because an id is
     /// freed only at corpse removal — after its 11 has gone out — so a client
-    /// still drawing the death animation never sees the id reused.
-    free: Vec<u32>,
+    /// still drawing the death animation never sees the id reused (audit H3,
+    /// the legacy's `FindEmptyCharUnique`, `Char-Server.h:1006-1037`).
+    ids: IdAllocator,
     /// `(group index, when it is due)` — the legacy's respawn gate, one entry
     /// per monster that has died.
     respawn: Vec<(usize, u64)>,
@@ -371,12 +368,10 @@ impl MonsterWorld {
     /// does not stop the server (the same posture the quest load takes).
     #[must_use]
     pub(crate) fn empty() -> Self {
-        Self {
-            // Seeded like `load`: the head must never start below the NPC
-            // band, or a hand-built world would mint player-band uniques (H3).
-            next_unique: u32::from(NPC_CHAR_UNIQUE_BASE),
-            ..Self::default()
-        }
+        // The default allocator seeds its floor above the static-NPC block,
+        // exactly like `load`, so a hand-built world can never mint a static
+        // NPC's id or a player's (H3).
+        Self::default()
     }
 
     /// Load map 0's field groups and resolve every unit's kind and safe ground.
@@ -519,10 +514,9 @@ impl MonsterWorld {
         Ok(Self {
             groups: out,
             monsters: Vec::new(),
-            // Monsters number from just above the static-NPC block, so the two
-            // id ranges cannot overlap (`IsNPC` covers both, `npc.rs`).
-            next_unique: u32::from(NPC_CHAR_UNIQUE_BASE) + NPC_PLACEMENTS.len() as u32,
-            free: Vec::new(),
+            // The pools start above the static-NPC block, so the two id
+            // ranges cannot overlap (`IsNPC` covers both, `npc.rs`).
+            ids: IdAllocator::new(),
             respawn: Vec::new(),
             corpses: Vec::new(),
             map: Some(map),
@@ -581,14 +575,15 @@ impl MonsterWorld {
     }
 
     /// Places one monster into `group` at `at`, taking the next id and
-    /// announcing it. `false` when the id range is spent, which stops the
+    /// announcing it. `false` when the id pools are spent, which stops the
     /// caller's whole loop.
     ///
-    /// Ids come from [`Self::free`] (recycled at corpse removal) before the
-    /// monotonic head, and either way must sit inside the NPC band
-    /// `NPC_CHAR_UNIQUE_BASE..MAX_CHAR_NUMBER` — audit H3. Exhaustion at the
-    /// band top mirrors the legacy's `FindEmptyCharUnique` returning 0: the
-    /// spawn is refused and logged, never a panic (A8).
+    /// Which pool an id comes from is [`ids::spawn_tier`]'s answer (design doc
+    /// §3.3): today every group is a field group and `tier3_level_floor` is
+    /// `None`, so every spawn is Tier 1 — the structure is in place and the
+    /// switch stays off until the P3 client rebuild (§4). Exhaustion mirrors
+    /// the legacy's `FindEmptyCharUnique` returning 0: the spawn is refused
+    /// and logged, never a panic (A8).
     fn spawn_one(
         &mut self,
         registry: &Registry,
@@ -596,38 +591,40 @@ impl MonsterWorld {
         unit: usize,
         at: (i32, i32),
     ) -> bool {
-        let band = u32::from(NPC_CHAR_UNIQUE_BASE)..MAX_CHAR_NUMBER;
-        let unique = loop {
-            if let Some(freed) = self.free.pop() {
-                if band.contains(&freed) {
-                    break freed;
-                }
-                // Defensive: nothing in this world frees a foreign-band id,
-                // so a hit here is corruption — discard rather than spawn it.
-                logln_err!("monsters: discarding out-of-band freed id {freed}");
-                continue;
-            }
-            if self.next_unique >= MAX_CHAR_NUMBER {
-                logln_err!(
-                    "monsters: NPC id range exhausted at {} monster(s)",
-                    self.monsters.len()
-                );
-                return false;
-            }
-            let fresh = self.next_unique;
-            if !band.contains(&fresh) {
-                // Defensive: both `load` and `empty` seed the head inside the
-                // band, so a hit here is corruption — refuse rather than mint
-                // a session-band id (H3).
-                logln_err!("monsters: head id {fresh} is outside the NPC band");
-                return false;
-            }
-            self.next_unique += 1;
-            break fresh;
-        };
         let u = &self.groups[group].units[unit];
+        // Every group this loader produces is a field group (map 0); a dungeon
+        // map's groups prefer Tier 2 when multi-map loading arrives — P1 ships
+        // the routing rule, not a dungeon to apply it to (§3.3).
+        let context = if self.groups[group].anchor.map_index == FIELD_MAP {
+            SpawnContext::WorldMap
+        } else {
+            SpawnContext::Dungeon
+        };
+        let tier = ids::spawn_tier(u.level, context, self.ids.tier3_level_floor());
+        let unique = match tier {
+            SpawnTier::Tier1 => self.ids.alloc_tier1().map(MonsterEntityId::Standard),
+            SpawnTier::Tier2 => self.ids.alloc_tier2().map(MonsterEntityId::Standard),
+            // Tier 3 exhausted falls back to the context's standard tier
+            // rather than refusing outright (§3.3); unreachable while the P1
+            // floor is `None`.
+            SpawnTier::Tier3 => self
+                .ids
+                .alloc_tier3()
+                .map(MonsterEntityId::Tier3)
+                .or_else(|| match context {
+                    SpawnContext::WorldMap => self.ids.alloc_tier1().map(MonsterEntityId::Standard),
+                    SpawnContext::Dungeon => self.ids.alloc_tier2().map(MonsterEntityId::Standard),
+                }),
+        };
+        let Some(unique) = unique else {
+            logln_err!(
+                "monsters: id pools exhausted at {} monster(s)",
+                self.monsters.len()
+            );
+            return false;
+        };
         let monster = Monster {
-            unique: unique as u16,
+            unique,
             wire_kind: u.wire_kind,
             level: u.level.clamp(0, 255) as u8,
             life: u.life,
@@ -798,7 +795,7 @@ impl MonsterWorld {
     pub(crate) fn position(&self, monster_unique: u16) -> Option<(i32, i32)> {
         self.monsters
             .iter()
-            .find(|m| m.unique == monster_unique)
+            .find(|m| m.unique.u16() == monster_unique)
             .map(|m| (m.x, m.y))
     }
 
@@ -868,7 +865,7 @@ impl MonsterWorld {
         let index = self
             .monsters
             .iter()
-            .position(|m| m.unique == monster_unique)?;
+            .position(|m| m.unique.u16() == monster_unique)?;
         let monster = self.monsters[index];
         let (group, unit) = (monster.group, monster.unit);
         // Copy the shared numbers out before touching `monsters`, so the two
@@ -953,13 +950,16 @@ impl MonsterWorld {
                 }
                 Some(host) => host == attacker,
             };
-            if jimed {
+            // Pre-P4 a Tier-3 id above the SI16 cap has no 263 frame to carry
+            // (§4); no pool mints one until P3, so this is the frame-skip rule
+            // rather than a live path.
+            if jimed && let Some(jimed_unique) = monster.unique.si16() {
                 registry.broadcast_near_point(
                     FIELD_MAP,
                     monster.x,
                     monster.y,
                     GameMsg::ResponseJim as u16,
-                    encode_jim(monster.unique as i16, attacker),
+                    encode_jim(jimed_unique, attacker),
                 );
             }
         }
@@ -999,11 +999,11 @@ impl MonsterWorld {
                 monster.x,
                 monster.y,
                 GameMsg::ResponseLogout as u16,
-                encode_logout(i32::from(monster.unique)),
+                encode_logout(i32::from(monster.unique.u16())),
             );
             // The 11 has gone out, so every client near the tile has deleted
             // the avatar: the id is safe to hand out again (audit H3).
-            self.free.push(u32::from(monster.unique));
+            self.ids.free_monster(monster.unique);
             logln!(
                 "game: monster {} (kind {}) corpse removed at ({}, {})",
                 monster.unique,
@@ -1192,7 +1192,7 @@ impl MonsterWorld {
             target.x,
             target.y,
             GameMsg::ResponseUserorder as u16,
-            OrderData::attack_order(i32::from(self.monsters[index].unique), target_unique)
+            OrderData::attack_order(i32::from(self.monsters[index].unique.u16()), target_unique)
                 .encode()
                 .to_vec(),
         );
@@ -1213,7 +1213,7 @@ impl MonsterWorld {
             y: target.y,
             life,
             damage,
-            attacker_unique: self.monsters[index].unique,
+            attacker_unique: self.monsters[index].unique.u16(),
         })
     }
 
@@ -1231,7 +1231,7 @@ impl MonsterWorld {
                 continue;
             }
             if (session.x - x).abs() <= aggressive && (session.y - y).abs() <= aggressive {
-                self.monsters[index].target = Some(session.char_unique);
+                self.monsters[index].target = Some(session.char_unique.si16());
                 logln!(
                     "game: monster {} engaged character {}",
                     self.monsters[index].unique,
@@ -1298,7 +1298,7 @@ impl MonsterWorld {
             dest.1,
             GameMsg::ResponseUserorder as u16,
             OrderData::move_order(
-                i32::from(unique),
+                i32::from(unique.u16()),
                 dest.0.clamp(0, 0x3FF) as i16,
                 dest.1.clamp(0, 0x3FF) as i16,
             )
@@ -1445,13 +1445,19 @@ fn broadcast_spawn(registry: &Registry, map_id: i32, monster: &Monster) {
 /// Queues one monster's per-tile position to every session near the new cell —
 /// the 200 half of a walk. Life is the resulting total, as in every other 200.
 fn broadcast_char_update(registry: &Registry, map_id: i32, monster: &Monster) {
+    // Pre-P4, a Tier-3 id above the SI16 wire cap has no 200 frame to carry
+    // it (§4); no pool mints one until P3, so this is the frame-skip rule
+    // rather than a live path.
+    let Some(si_unique) = monster.unique.si16() else {
+        return;
+    };
     registry.broadcast_near_point(
         map_id,
         monster.x,
         monster.y,
         GameMsg::ResponseCharupdate as u16,
         BasicCharUpdate {
-            si_char_unique: monster.unique as i16,
+            si_char_unique: si_unique,
             si_move_speed: monster.move_speed as i8,
             b_urgent_mode: false,
             si_life: monster.life as i32,
@@ -1481,7 +1487,7 @@ fn broadcast_char_update(registry: &Registry, map_id: i32, monster: &Monster) {
 fn record_for(map_id: i32, monster: &Monster) -> NpcRecord {
     NpcRecord {
         make_char_kind: monster.wire_kind,
-        make_char_unique: monster.unique,
+        make_char_unique: monster.unique.u16(),
         level: monster.level,
         life: monster.life,
         x: monster.x.clamp(0, 0x3FF) as u16,
@@ -1507,6 +1513,31 @@ mod tests {
     /// locate it.
     const DATA_ROOT: &str = "C:/Data/04_Server_Goonzu/New Era Live";
 
+    /// A player-band unique for a session fixture — the typed field can only
+    /// be built through the band check (T11 pins the refusals).
+    fn pc(raw: i16) -> crate::ids::PlayerCharUnique {
+        crate::ids::PlayerCharUnique::try_from_si16(raw).expect("test id in the player band")
+    }
+
+    /// A standard-band monster unique for a hand-built `Monster`.
+    fn sid(raw: u16) -> MonsterEntityId {
+        MonsterEntityId::Standard(
+            crate::ids::StandardMonsterId::try_from_u16(raw).expect("test id in the standard band"),
+        )
+    }
+
+    /// Whether either standard free list holds this raw id (T7's H3 probe).
+    fn free_holds(world: &MonsterWorld, raw: u16) -> bool {
+        let (t1, t2, _) = world.ids.free_snapshot();
+        t1.contains(&raw) || t2.contains(&raw)
+    }
+
+    /// Whether any pool's free list holds anything at all.
+    fn free_holds_any(world: &MonsterWorld) -> bool {
+        let (t1, t2, t3) = world.ids.free_snapshot();
+        !t1.is_empty() || !t2.is_empty() || !t3.is_empty()
+    }
+
     #[test]
     fn the_shipped_field_groups_spawn_on_safe_ground_with_usable_ids() {
         if !Path::new(DATA_ROOT).exists() {
@@ -1529,12 +1560,13 @@ mod tests {
             "the shipped map-0 unit targets"
         );
 
-        let npc_top = u32::from(NPC_CHAR_UNIQUE_BASE) + NPC_PLACEMENTS.len() as u32;
+        let npc_top =
+            gz_data::npc::NPC_CHAR_UNIQUE_BASE + gz_data::npc::NPC_PLACEMENTS.len() as u16;
         let mut seen = std::collections::HashSet::new();
         for m in &world.monsters {
             assert!(
-                u32::from(m.unique) >= npc_top && u32::from(m.unique) < MAX_CHAR_NUMBER,
-                "id {} outside the monster block",
+                m.unique.u16() >= npc_top && m.unique.u16() <= ids::T2_TOP,
+                "id {} outside the standard band",
                 m.unique
             );
             assert!(seen.insert(m.unique), "duplicate id {}", m.unique);
@@ -1565,7 +1597,7 @@ mod tests {
     #[test]
     fn the_wire_record_round_trips() {
         let monster = Monster {
-            unique: 9001,
+            unique: sid(9001),
             wire_kind: 15,
             level: 30,
             life: 40,
@@ -1610,7 +1642,7 @@ mod tests {
             tx,
             std::sync::Arc::new(tokio::sync::Notify::new()),
             SessionInfo {
-                char_unique: 1000,
+                char_unique: pc(1000),
                 name: "Watcher".to_owned(),
                 level: 1,
                 map_id: FIELD_MAP,
@@ -1628,9 +1660,9 @@ mod tests {
         let mut world = MonsterWorld::empty();
         // One monster in the block the session is entering, one in the block it
         // was already in.
-        for (unique, at) in [(9001, (100, 100)), (9002, (200, 200))] {
+        for (unique, at) in [(9001u16, (100, 100)), (9002, (200, 200))] {
             world.monsters.push(Monster {
-                unique,
+                unique: sid(unique),
                 wire_kind: 15,
                 level: 1,
                 life: 10,
@@ -1972,7 +2004,7 @@ mod tests {
         let mut rng = Rng::new(7);
 
         let hit = world
-            .hit_by_player(&Registry::new(), unique, 1000, 5, 1_000, &mut rng)
+            .hit_by_player(&Registry::new(), unique.u16(), 1000, 5, 1_000, &mut rng)
             .expect("the monster is there");
         assert_eq!(hit.life, 15);
         assert_eq!(hit.damage, 5, "ac 0 takes nothing off");
@@ -1988,7 +2020,7 @@ mod tests {
         );
 
         let hit = world
-            .hit_by_player(&Registry::new(), unique, 1000, 50, 1_000, &mut rng)
+            .hit_by_player(&Registry::new(), unique.u16(), 1000, 50, 1_000, &mut rng)
             .expect("the monster is still there");
         assert_eq!(hit.life, 0);
         assert!(hit.died);
@@ -2044,7 +2076,7 @@ mod tests {
         assert_eq!(world.monsters.len(), 1);
         let unique = world.monsters[0].unique;
         assert!(
-            u32::from(unique) >= u32::from(NPC_CHAR_UNIQUE_BASE),
+            unique.u16() >= gz_data::npc::NPC_CHAR_UNIQUE_BASE,
             "the boot spawn already sits inside the NPC band"
         );
         let mut rng = Rng::new(7);
@@ -2052,38 +2084,37 @@ mod tests {
         // The kill: the id leaves `monsters` but stays held by the corpse —
         // the client is still drawing the death animation under that id.
         let hit = world
-            .hit_by_player(&registry, unique, 1000, 50, 1_000, &mut rng)
+            .hit_by_player(&registry, unique.u16(), 1000, 50, 1_000, &mut rng)
             .expect("the monster is there");
         assert!(hit.died);
         assert!(
-            !world.free.contains(&u32::from(unique)),
+            !free_holds(&world, unique.u16()),
             "the corpse still holds the id"
         );
 
         // Corpse removal frees it — after the 11, which is what makes reuse
         // safe for anyone who was watching the tile.
         world.tick(&registry, 1_000 + CORPSE_MS + 1, &mut rng);
-        assert!(world.free.contains(&u32::from(unique)));
+        assert!(free_holds(&world, unique.u16()));
 
         // The respawn hands the same id straight back out.
         world.tick(&registry, 1_000 + RESPAWN_MS + 1, &mut rng);
         assert_eq!(world.monsters.len(), 1);
         assert_eq!(world.monsters[0].unique, unique, "the id was recycled");
-        assert!(world.free.is_empty());
+        assert!(!free_holds_any(&world), "nothing is left in the free lists");
 
-        // A spent band refuses the spawn: no panic, nothing outside the band.
-        world.free.clear();
-        world.next_unique = MAX_CHAR_NUMBER;
+        // Spent pools refuse the spawn: no panic, nothing outside the bands.
+        world.ids.exhaust_standard();
         assert!(!world.spawn_one(&registry, 0, 0, (0, 0)));
         assert_eq!(world.monsters.len(), 1, "nothing was spawned");
 
         // A foreign id in the free list is discarded, not spawned: the top of
         // the *player* band would shadow a session under the same unique.
         world
-            .free
-            .push(crate::registry::PLAYER_CHAR_UNIQUE_TOP as u32);
+            .ids
+            .inject_free_raw(crate::registry::PLAYER_CHAR_UNIQUE_TOP as u16);
         assert!(!world.spawn_one(&registry, 0, 0, (0, 0)));
-        assert!(world.free.is_empty(), "the foreign id was discarded");
+        assert!(!free_holds_any(&world), "the foreign id was discarded");
         assert_eq!(world.monsters.len(), 1);
     }
 
@@ -2139,7 +2170,7 @@ mod tests {
         // order is (group 0, group 1).
         for unique in [world.monsters[0].unique, world.monsters[1].unique] {
             let hit = world
-                .hit_by_player(&registry, unique, 1000, 9_999, 50_000, &mut rng)
+                .hit_by_player(&registry, unique.u16(), 1000, 9_999, 50_000, &mut rng)
                 .expect("the monster is there");
             assert!(hit.died);
         }
@@ -2192,7 +2223,7 @@ mod tests {
 
         let unique = world.monsters[0].unique;
         world
-            .hit_by_player(&registry, unique, 1000, 9_999, 1_000, &mut rng)
+            .hit_by_player(&registry, unique.u16(), 1000, 9_999, 1_000, &mut rng)
             .expect("the monster is there")
             .died
             .then_some(())
@@ -2217,7 +2248,7 @@ mod tests {
             tx,
             std::sync::Arc::new(tokio::sync::Notify::new()),
             SessionInfo {
-                char_unique: 1000,
+                char_unique: pc(1000),
                 name: "Killer".to_owned(),
                 level: 1,
                 map_id: FIELD_MAP,
@@ -2266,7 +2297,7 @@ mod tests {
         let mut rng = Rng::new(7);
 
         let hit = world
-            .hit_by_player(&Registry::new(), unique, 1000, 50, 1_000, &mut rng)
+            .hit_by_player(&Registry::new(), unique.u16(), 1000, 50, 1_000, &mut rng)
             .expect("the monster is there");
         assert!(hit.died);
         assert_eq!(
@@ -2300,7 +2331,7 @@ mod tests {
         assert_eq!(payload.len(), 4, "the 11 is one char unique");
         assert_eq!(
             i32::from_le_bytes(payload.as_slice().try_into().expect("four bytes")),
-            i32::from(unique)
+            i32::from(unique.u16())
         );
     }
 
@@ -2364,7 +2395,7 @@ mod tests {
             tx,
             std::sync::Arc::new(tokio::sync::Notify::new()),
             SessionInfo {
-                char_unique: 1000,
+                char_unique: pc(1000),
                 name: "Victim".to_owned(),
                 level: 1,
                 map_id: FIELD_MAP,
@@ -2426,7 +2457,7 @@ mod tests {
         }
         assert_eq!(hits.len(), 1, "one swing when the draw first hits");
         assert_eq!(hits[0].key, key);
-        assert_eq!(hits[0].attacker_unique, world.monsters[0].unique);
+        assert_eq!(hits[0].attacker_unique, world.monsters[0].unique.u16());
         // 40 raw, level-1 AC is 0, so the full 40 lands.
         assert_eq!(hits[0].damage, 40);
         assert_eq!(hits[0].life, 0, "40 life minus 40 damage");
@@ -2477,7 +2508,7 @@ mod tests {
                 tx,
                 std::sync::Arc::new(tokio::sync::Notify::new()),
                 SessionInfo {
-                    char_unique,
+                    char_unique: pc(char_unique),
                     name: name.to_owned(),
                     level: 1,
                     map_id: FIELD_MAP,
@@ -2531,7 +2562,7 @@ mod tests {
         let mut rng = Rng::new(1);
 
         world
-            .hit_by_player(&registry, unique, 1000, 5, 1_000, &mut rng)
+            .hit_by_player(&registry, unique.u16(), 1000, 5, 1_000, &mut rng)
             .expect("the hit lands");
 
         let mut frames = Vec::new();
@@ -2544,7 +2575,10 @@ mod tests {
             .expect("being hit broadcasts the jim frame");
         assert_eq!(
             jim.payload,
-            encode_jim(unique as i16, 1000),
+            encode_jim(
+                unique.si16().expect("a standard id fits the 263 frame"),
+                1000
+            ),
             "siCharUnique is the monster, siJimCharUnique is the attacker"
         );
         assert_eq!(world.monsters[0].jim_host, Some(1000));
@@ -2553,7 +2587,7 @@ mod tests {
         // to whoever hit it first, so only one person ever gets the bar.
         let mut rx2 = register(&registry, 2000, "Other");
         world
-            .hit_by_player(&registry, unique, 2000, 5, 1_000, &mut rng)
+            .hit_by_player(&registry, unique.u16(), 2000, 5, 1_000, &mut rng)
             .expect("the hit lands");
         assert!(
             rx2.try_recv().is_err(),
@@ -2590,7 +2624,7 @@ mod tests {
             tx,
             std::sync::Arc::new(tokio::sync::Notify::new()),
             SessionInfo {
-                char_unique: 1000,
+                char_unique: pc(1000),
                 name: "Victim".to_owned(),
                 level: 1,
                 map_id: FIELD_MAP,
@@ -2709,7 +2743,7 @@ mod tests {
                 tx,
                 std::sync::Arc::new(tokio::sync::Notify::new()),
                 SessionInfo {
-                    char_unique: 1000,
+                    char_unique: pc(1000),
                     name: "Victim".to_owned(),
                     level: 1,
                     map_id: FIELD_MAP,
@@ -2974,7 +3008,7 @@ mod tests {
             tx,
             std::sync::Arc::new(tokio::sync::Notify::new()),
             SessionInfo {
-                char_unique: 1000,
+                char_unique: pc(1000),
                 name: "Returner".to_owned(),
                 level: 1,
                 map_id: FIELD_MAP,

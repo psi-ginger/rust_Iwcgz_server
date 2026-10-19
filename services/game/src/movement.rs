@@ -22,6 +22,7 @@ use crate::geography::{
     GATES, Gate, gate_at, gate_within, village_at, village_exit, village_warp_gate, village_within,
     warp_gate_to,
 };
+use crate::ids::PlayerCharUnique;
 use crate::registry::{Registry, SessionInfo, SessionKey};
 use crate::{
     AnyError, LiveFrames, announce_map_npcs, announce_nearby_characters, logln, make_char_info_for,
@@ -761,7 +762,7 @@ pub(crate) async fn handle_userorder(
     // per-tile 200s and animates each tile as a discrete jump.
     //
     // Build a temporary SessionInfo for the mover to fan the 241.
-    let mover_session_info = session_info_for(live);
+    let mover_session_info = session_info_for(live)?;
     let fanned_241 = registry.broadcast_near_others(
         &mover_session_info,
         session_key,
@@ -1017,7 +1018,7 @@ async fn apply_gate_move(
     character: &mut Option<CharacterFull>,
     gate: &Gate,
 ) -> Result<GateWarp, AnyError> {
-    let was = session_info_from(character, char_unique);
+    let was = session_info_from(character, char_unique)?;
     let row = character
         .as_mut()
         .ok_or("a gate move before the character row is loaded")?;
@@ -1043,16 +1044,33 @@ async fn apply_gate_move(
 /// The [`SessionInfo`] the near fan keys off, built from the connection's live
 /// row. Shared by the move 241 fan and the sit/stand 241 fan so both compute the
 /// observer set from the one character state.
-fn session_info_for(live: &LiveFrames<'_>) -> SessionInfo {
+///
+/// # Errors
+///
+/// A live `char_unique` that is not a player-band id. Registered sessions
+/// cannot hold one (`register` gates it and the type refuses it), so this is
+/// the invariant speaking, not the flow (design doc §5.3).
+fn session_info_for(live: &LiveFrames<'_>) -> Result<SessionInfo, AnyError> {
     session_info_from(&live.character, live.char_unique)
 }
 
 /// [`session_info_for`] over a bare row, so a test can build the same view
 /// without a connection.
-fn session_info_from(character: &Option<CharacterFull>, char_unique: i32) -> SessionInfo {
+///
+/// # Errors
+///
+/// The same refusal as [`session_info_for`]: the typed conversion refuses
+/// anything outside `1..=PLAYER_CHAR_UNIQUE_TOP` — including ids that used to
+/// slip through the old `as i16` truncation.
+fn session_info_from(
+    character: &Option<CharacterFull>,
+    char_unique: i32,
+) -> Result<SessionInfo, AnyError> {
     let character = character.as_ref();
-    SessionInfo {
-        char_unique: char_unique as i16,
+    Ok(SessionInfo {
+        char_unique: PlayerCharUnique::try_from_si16(i16::try_from(char_unique).map_err(
+            |_| format!("session char_unique {char_unique} does not fit the SI16 siCharUnique"),
+        )?)?,
         name: character.map(|c| c.name.clone()).unwrap_or_default(),
         level: character.map(|c| c.level as i32).unwrap_or(1),
         map_id: character.map(|c| c.map_id).unwrap_or(0),
@@ -1066,7 +1084,7 @@ fn session_info_from(character: &Option<CharacterFull>, char_unique: i32) -> Ses
             .unwrap_or(12),
         sex: character.map(|c| c.gender as u8).unwrap_or(1),
         gm_level: 0,
-    }
+    })
 }
 
 /// Applies `GAMEMSG_REQUEST_SITDOWN` (7231) — the sit/stand toggle, T-018
@@ -1114,7 +1132,7 @@ pub(crate) async fn handle_sit_down(
     // same bytes fan to the near block, self excluded, exactly as the move 241
     // does (`char-order.cpp:526` `SendNeighbourMsg(..., true)`).
     send_encoded(stream, outbound, GameMsg::ResponseUserorder, &body).await?;
-    let origin = session_info_for(live);
+    let origin = session_info_for(live)?;
     let fanned = registry.broadcast_near_others(
         &origin,
         session_key,
@@ -1668,7 +1686,8 @@ mod tests {
             key,
             tx,
             std::sync::Arc::new(tokio::sync::Notify::new()),
-            session_info_from(&Some(row_on_the_east_gate()), 1473),
+            session_info_from(&Some(row_on_the_east_gate()), 1473)
+                .expect("the test id is in the player band"),
         );
 
         let mut character = Some(row_on_the_east_gate());
@@ -1714,7 +1733,7 @@ mod tests {
             key,
             tx,
             std::sync::Arc::new(tokio::sync::Notify::new()),
-            session_info_from(&None, 1473),
+            session_info_from(&None, 1473).expect("the test id is in the player band"),
         );
 
         let mut character = None;
@@ -1798,7 +1817,7 @@ mod tests {
             key,
             tx,
             std::sync::Arc::new(tokio::sync::Notify::new()),
-            session_info_from(&Some(row), 1473),
+            session_info_from(&Some(row), 1473).expect("the test id is in the player band"),
         );
 
         let mut movement = Some(due_movement((265, 322), (262, 322), 0));
@@ -1852,7 +1871,7 @@ mod tests {
             key,
             tx,
             std::sync::Arc::new(tokio::sync::Notify::new()),
-            session_info_from(&Some(row), 1473),
+            session_info_from(&Some(row), 1473).expect("the test id is in the player band"),
         );
 
         let mut movement = Some(due_movement((286, 350), (283, 350), 0));
@@ -1905,7 +1924,7 @@ mod tests {
             key,
             tx,
             std::sync::Arc::new(tokio::sync::Notify::new()),
-            session_info_from(&Some(row), 1473),
+            session_info_from(&Some(row), 1473).expect("the test id is in the player band"),
         );
 
         let mut movement = Some(due_movement((24, 8), (24, 9), 1));
@@ -2003,7 +2022,8 @@ mod tests {
                 key,
                 tx,
                 std::sync::Arc::new(tokio::sync::Notify::new()),
-                session_info_from(&Some(row.clone()), 1473),
+                session_info_from(&Some(row.clone()), 1473)
+                    .expect("the test id is in the player band"),
             );
 
             let (mut stream, _peer) = socket_pair().await;

@@ -426,7 +426,7 @@ pub(crate) fn announce_nearby_characters(
 /// ends up with two characters that disagree about their own class or life.
 pub(crate) fn make_char_info_from_session(info: &SessionInfo) -> Result<MakeCharInfo, AnyError> {
     Ok(MakeCharInfo {
-        make_char_unique: u16::try_from(info.char_unique).map_err(|_| {
+        make_char_unique: u16::try_from(info.char_unique.si16()).map_err(|_| {
             format!(
                 "session char_unique {} does not fit uiMakeCharUnique's u16",
                 info.char_unique
@@ -793,7 +793,8 @@ mod tests {
             tx,
             std::sync::Arc::new(tokio::sync::Notify::new()),
             SessionInfo {
-                char_unique,
+                char_unique: crate::ids::PlayerCharUnique::try_from_si16(char_unique)
+                    .expect("test id in the player band"),
                 name: "Tester".to_owned(),
                 level: 13,
                 map_id: 158,

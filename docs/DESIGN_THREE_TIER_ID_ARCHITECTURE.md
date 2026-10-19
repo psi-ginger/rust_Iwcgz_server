@@ -340,7 +340,7 @@ Types, constants, and pools exactly as §3.4/§3.5, plus:
 impl StandardMonsterId {
     pub fn si16(self) -> i16;                 // infallible: ≤ T2_TOP < WIRE_SI16_TOP
     pub fn u16(self) -> u16;
-    pub fn tier(self) -> Tier;                // diagnostic helper: Tier1 / Tier2 by range
+    pub fn tier(self) -> Tier;                // Tier1 / Tier2 by range — the free-list origin (§3.5)
     pub fn try_from_u16(v: u16) -> Result<Self, IdError>;   // 8_500..=T2_TOP or reject
 }
 impl Tier3MonsterId {
@@ -368,14 +368,18 @@ impl PlayerCharUnique {
      …
  }
 
- // world load (one new argument — the shared standard/tier3 pools):
--MonsterWorld::load(&data_root)
-+MonsterWorld::load(&data_root, Arc::clone(&ids))
+ // world load — unchanged signature: the allocator is owned by the world that
+ // mints the ids (`ids: IdAllocator`, built in `load`/`empty`), so nothing
+ // outside MonsterWorld needs a handle to it and no Arc threading is needed:
+ MonsterWorld::load(&data_root)
 ```
 
-`ids = Arc::new(IdAllocator::new())` is created in `main()` before the accept loop.
-Session teardown keeps its order and stays as batch 2: `registry.remove(key)` fans the
-11 — player ids are **not** recycled here (the wrap returns them at `8_499`, T6).
+No `main()` wiring: the `IdAllocator` lives inside `MonsterWorld` — the only component
+that mints or frees monster ids, P2/P3 consumers included — so the pools sit under the
+world's own lock; §3.5's per-pool locks keep the isolation story intact should a second
+owner ever appear. Session teardown keeps its order and stays as batch 2:
+`registry.remove(key)` fans the 11 — player ids are **not** recycled here (the wrap
+returns them at `8_499`, T6).
 
 ### 5.2 `MonsterWorld` (`monsters.rs`)
 
@@ -388,20 +392,25 @@ Session teardown keeps its order and stays as batch 2: `registry.remove(key)` fa
 -    /// ids freed at corpse removal, recycled by spawn_one (audit H3)
 -    free: Vec<u32>,
 +    /// the standard (T1↔T2) + Tier-3 pools; player band never reachable through it
-+    ids: Arc<IdAllocator>,
++    ids: IdAllocator,
      respawn: …, corpses: …, map: …, block_by_kind: …, dormancy: …,
  }
 
  fn spawn_one(…) -> bool {
 -    let band = NPC_CHAR_UNIQUE_BASE..MAX_CHAR_NUMBER;
 -    let unique = loop { /* free.pop with band gate; head >= MAX_CHAR_NUMBER => false */ };
-+    // world-map context → Tier 1 first, borrowing Tier 2 on a burst (§3.2)
-+    let unique = match self.ids.alloc_tier1() {
-+        Some(u) => u,
-+        None => { logln_err!("monsters: standard id pool exhausted at {} monster(s)", …); return false; } // A8 kept
++    // shipped shape: context from the group's map (all field today → WorldMap),
++    // tier by §3.3; Tier-3 exhaustion falls back to the context's standard tier
++    let tier = ids::spawn_tier(u.level, context, self.ids.tier3_level_floor());
++    let unique = match tier {
++        Tier1 => self.ids.alloc_tier1().map(MonsterEntityId::Standard),
++        Tier2 => self.ids.alloc_tier2().map(MonsterEntityId::Standard),
++        Tier3 => alloc_tier3().map(Tier3).or_else(/* the context's standard tier */),
 +    };
++    let Some(unique) = unique else {
++        logln_err!("monsters: id pools exhausted at {} monster(s)", …); return false; } // A8 kept
 -    let monster = Monster { unique: unique as u16, … }
-+    let monster = Monster { unique: MonsterEntityId::Standard(unique), … }
++    let monster = Monster { unique, … }   // unique: MonsterEntityId
  }
 
  // despawn_corpses (line 1006), same point in the sequence (after the 11):

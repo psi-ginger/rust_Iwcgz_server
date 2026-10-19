@@ -206,7 +206,8 @@ fn registry_join(
         tx,
         std::sync::Arc::new(tokio::sync::Notify::new()),
         SessionInfo {
-            char_unique,
+            char_unique: PlayerCharUnique::try_from_si16(char_unique)
+                .expect("test id in the player band"),
             name: name.to_owned(),
             level: 13,
             map_id: 158,
@@ -325,9 +326,11 @@ fn two_sessions_get_distinct_character_ids() {
 }
 
 /// T6 — H3: the id bands partition the space. Players wrap strictly inside
-/// `1..=8499`, and the registry — the last gate before a session can be seen
-/// by anyone — refuses 0, the NPC band floor and everything above it, so a
-/// session can never shadow a monster's unique.
+/// `1..=8499`, and the typed id refuses 0, the NPC band floor and everything
+/// above it *before a `SessionInfo` can be built* — a stronger statement than
+/// `register` returning false, whose own band check stays as the
+/// belt-and-braces behind it (design doc §5.3) — so a session can never
+/// shadow a monster's unique.
 #[test]
 fn player_ids_wrap_inside_the_player_band_and_the_registry_refuses_foreign_ids() {
     let top = u32::from(PLAYER_CHAR_UNIQUE_TOP as u16);
@@ -356,14 +359,17 @@ fn player_ids_wrap_inside_the_player_band_and_the_registry_refuses_foreign_ids()
     assert!(enter(1), "the band floor is a legal session id");
     assert!(enter(PLAYER_CHAR_UNIQUE_TOP), "so is the band ceiling");
     assert!(
-        !enter(0),
+        PlayerCharUnique::try_from_si16(0).is_err(),
         "0 is the legacy's empty pattern, never a session"
     );
     assert!(
-        !enter(gz_data::npc::NPC_CHAR_UNIQUE_BASE as i16),
+        PlayerCharUnique::try_from_si16(gz_data::npc::NPC_CHAR_UNIQUE_BASE as i16).is_err(),
         "the NPC band floor belongs to the monster allocator"
     );
-    assert!(!enter(i16::MAX), "and so does everything above it");
+    assert!(
+        PlayerCharUnique::try_from_si16(i16::MAX).is_err(),
+        "and so does everything above it"
+    );
 }
 
 /// LOGINMANY is the frame that makes another player exist, and it must be built
@@ -1746,7 +1752,8 @@ fn leave_requests_are_the_legacy_107_109_pair() {
 /// A character with the defaults a chat test cares about.
 fn chat_info(char_unique: i16, name: &str, x: i32, y: i32) -> SessionInfo {
     SessionInfo {
-        char_unique,
+        char_unique: PlayerCharUnique::try_from_si16(char_unique)
+            .expect("test id in the player band"),
         name: name.to_owned(),
         level: 34,
         map_id: 7,
@@ -2870,7 +2877,8 @@ fn lazy_repos() -> (
 /// A registered-session record for the tests below.
 fn session_info(char_unique: i16, name: &str) -> SessionInfo {
     SessionInfo {
-        char_unique,
+        char_unique: PlayerCharUnique::try_from_si16(char_unique)
+            .expect("test id in the player band"),
         name: name.to_owned(),
         level: 13,
         map_id: 158,

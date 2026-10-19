@@ -78,7 +78,7 @@ pub(crate) fn handle_friend_add(
     };
     let body = encode_friend_add_response(
         request.group,
-        i32::from(sender.char_unique),
+        i32::from(sender.char_unique.si16()),
         basic.character_id,
         &sender.name,
     );
@@ -199,7 +199,7 @@ pub(crate) async fn handle_friend_add_accept(
         slot as i16,
         request.group,
         acceptor_basic.character_id,
-        i32::from(acceptor.char_unique),
+        i32::from(acceptor.char_unique.si16()),
         &acceptor.name,
         &acceptor_basic.account_id,
     );
@@ -254,7 +254,9 @@ pub(crate) fn friend_all_list_body(registry: &Registry, session_key: SessionKey)
         let (char_id, connect) = registry
             .find_by_character_id(friend.person_id)
             .and_then(|key| registry.info(key))
-            .map_or((0, false), |info| (i32::from(info.char_unique), true));
+            .map_or((0, false), |info| {
+                (i32::from(info.char_unique.si16()), true)
+            });
         entries.push(FriendAllListEntry {
             group: friend.group,
             person_id: friend.person_id,
