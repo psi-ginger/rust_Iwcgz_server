@@ -336,9 +336,15 @@ impl MapDormancyManager {
 pub(crate) struct MonsterWorld {
     groups: Vec<FieldGroup>,
     monsters: Vec<Monster>,
-    /// The id allocator, carried across respawn so a recycled monster can never
-    /// take an id a client still has cached.
+    /// The monotonic half of the id allocator, carried across respawns so it
+    /// never rewinds — [`Self::free`] hands recycled ids back out first.
     next_unique: u32,
+    /// Ids freed when a corpse left the map, recycled by [`Self::spawn_one`]
+    /// (audit H3, the legacy's `FindEmptyCharUnique`, `Char-Server.h:1006-1037`):
+    /// the band bounds *simultaneous* monsters, not lifetime kills. An id is
+    /// freed only at corpse removal — after its 11 has gone out — so a client
+    /// still drawing the death animation never sees the id reused.
+    free: Vec<u32>,
     /// `(group index, when it is due)` — the legacy's respawn gate, one entry
     /// per monster that has died.
     respawn: Vec<(usize, u64)>,
@@ -365,7 +371,12 @@ impl MonsterWorld {
     /// does not stop the server (the same posture the quest load takes).
     #[must_use]
     pub(crate) fn empty() -> Self {
-        Self::default()
+        Self {
+            // Seeded like `load`: the head must never start below the NPC
+            // band, or a hand-built world would mint player-band uniques (H3).
+            next_unique: u32::from(NPC_CHAR_UNIQUE_BASE),
+            ..Self::default()
+        }
     }
 
     /// Load map 0's field groups and resolve every unit's kind and safe ground.
@@ -511,6 +522,7 @@ impl MonsterWorld {
             // Monsters number from just above the static-NPC block, so the two
             // id ranges cannot overlap (`IsNPC` covers both, `npc.rs`).
             next_unique: u32::from(NPC_CHAR_UNIQUE_BASE) + NPC_PLACEMENTS.len() as u32,
+            free: Vec::new(),
             respawn: Vec::new(),
             corpses: Vec::new(),
             map: Some(map),
@@ -571,6 +583,12 @@ impl MonsterWorld {
     /// Places one monster into `group` at `at`, taking the next id and
     /// announcing it. `false` when the id range is spent, which stops the
     /// caller's whole loop.
+    ///
+    /// Ids come from [`Self::free`] (recycled at corpse removal) before the
+    /// monotonic head, and either way must sit inside the NPC band
+    /// `NPC_CHAR_UNIQUE_BASE..MAX_CHAR_NUMBER` — audit H3. Exhaustion at the
+    /// band top mirrors the legacy's `FindEmptyCharUnique` returning 0: the
+    /// spawn is refused and logged, never a panic (A8).
     fn spawn_one(
         &mut self,
         registry: &Registry,
@@ -578,16 +596,38 @@ impl MonsterWorld {
         unit: usize,
         at: (i32, i32),
     ) -> bool {
-        if self.next_unique >= MAX_CHAR_NUMBER {
-            logln_err!(
-                "monsters: NPC id range exhausted at {} monster(s)",
-                self.monsters.len()
-            );
-            return false;
-        }
+        let band = u32::from(NPC_CHAR_UNIQUE_BASE)..MAX_CHAR_NUMBER;
+        let unique = loop {
+            if let Some(freed) = self.free.pop() {
+                if band.contains(&freed) {
+                    break freed;
+                }
+                // Defensive: nothing in this world frees a foreign-band id,
+                // so a hit here is corruption — discard rather than spawn it.
+                logln_err!("monsters: discarding out-of-band freed id {freed}");
+                continue;
+            }
+            if self.next_unique >= MAX_CHAR_NUMBER {
+                logln_err!(
+                    "monsters: NPC id range exhausted at {} monster(s)",
+                    self.monsters.len()
+                );
+                return false;
+            }
+            let fresh = self.next_unique;
+            if !band.contains(&fresh) {
+                // Defensive: both `load` and `empty` seed the head inside the
+                // band, so a hit here is corruption — refuse rather than mint
+                // a session-band id (H3).
+                logln_err!("monsters: head id {fresh} is outside the NPC band");
+                return false;
+            }
+            self.next_unique += 1;
+            break fresh;
+        };
         let u = &self.groups[group].units[unit];
         let monster = Monster {
-            unique: self.next_unique as u16,
+            unique: unique as u16,
             wire_kind: u.wire_kind,
             level: u.level.clamp(0, 255) as u8,
             life: u.life,
@@ -604,7 +644,6 @@ impl MonsterWorld {
             next_act_ms: 0,
             next_swing_ms: 0,
         };
-        self.next_unique += 1;
         self.monsters.push(monster);
         broadcast_spawn(registry, FIELD_MAP, &monster);
         true
@@ -962,6 +1001,9 @@ impl MonsterWorld {
                 GameMsg::ResponseLogout as u16,
                 encode_logout(i32::from(monster.unique)),
             );
+            // The 11 has gone out, so every client near the tile has deleted
+            // the avatar: the id is safe to hand out again (audit H3).
+            self.free.push(u32::from(monster.unique));
             logln!(
                 "game: monster {} (kind {}) corpse removed at ({}, {})",
                 monster.unique,
@@ -1953,12 +1995,96 @@ mod tests {
         assert_eq!(hit.exp, 90, "the kind's own Exp column");
         assert_eq!(world.monster_count(), 0, "the body is deleted");
 
-        // And the respawn comes back on the same tile, with a fresh id so a
-        // client's cached avatar cannot be reused.
+        // And the respawn comes back on the same tile. Under H3 it reuses the
+        // id the corpse freed: the 11 went out at corpse removal, so the
+        // client's cached avatar is gone before the id is handed out again.
         world.tick(&registry, 1_000 + RESPAWN_MS + 1, &mut rng);
         assert_eq!(world.monster_count(), 1);
-        assert_ne!(world.monsters[0].unique, unique);
+        assert_eq!(world.monsters[0].unique, unique, "the id was recycled");
         assert_eq!(world.monsters[0].life, 20);
+    }
+
+    /// T7 — H3/A8: an NPC id is freed when its corpse leaves the map, so the
+    /// band bounds *simultaneous* monsters rather than lifetime kills — and a
+    /// spent band refuses the spawn the way the legacy's `FindEmptyCharUnique`
+    /// returns 0: logged and skipped, never a panic.
+    #[test]
+    fn npc_ids_are_recycled_at_corpse_removal_and_a_spent_band_refuses() {
+        let registry = Registry::new();
+        let mut world = MonsterWorld::empty();
+        world.groups.push(FieldGroup {
+            anchor: SpawnGroup {
+                map_index: FIELD_MAP,
+                center_x: 0,
+                center_y: 0,
+                radius: 1,
+            },
+            capacity: 1,
+            boss: false,
+            respawn_ms: RESPAWN_MS,
+            units: vec![SpawnUnit {
+                wire_kind: 15,
+                level: 1,
+                max_num: 1,
+                move_speed: 12,
+                life: 20,
+                tiles: vec![(0, 0)],
+                min_atk: 1,
+                max_atk: 2,
+                ac: 0,
+                exp: 90,
+                aggressive: 0,
+                range: 1,
+                attack_interval: 2_000,
+                critical_rate: 0,
+                drops: &[],
+            }],
+        });
+        world.spawn_all(&registry);
+        assert_eq!(world.monsters.len(), 1);
+        let unique = world.monsters[0].unique;
+        assert!(
+            u32::from(unique) >= u32::from(NPC_CHAR_UNIQUE_BASE),
+            "the boot spawn already sits inside the NPC band"
+        );
+        let mut rng = Rng::new(7);
+
+        // The kill: the id leaves `monsters` but stays held by the corpse —
+        // the client is still drawing the death animation under that id.
+        let hit = world
+            .hit_by_player(&registry, unique, 1000, 50, 1_000, &mut rng)
+            .expect("the monster is there");
+        assert!(hit.died);
+        assert!(
+            !world.free.contains(&u32::from(unique)),
+            "the corpse still holds the id"
+        );
+
+        // Corpse removal frees it — after the 11, which is what makes reuse
+        // safe for anyone who was watching the tile.
+        world.tick(&registry, 1_000 + CORPSE_MS + 1, &mut rng);
+        assert!(world.free.contains(&u32::from(unique)));
+
+        // The respawn hands the same id straight back out.
+        world.tick(&registry, 1_000 + RESPAWN_MS + 1, &mut rng);
+        assert_eq!(world.monsters.len(), 1);
+        assert_eq!(world.monsters[0].unique, unique, "the id was recycled");
+        assert!(world.free.is_empty());
+
+        // A spent band refuses the spawn: no panic, nothing outside the band.
+        world.free.clear();
+        world.next_unique = MAX_CHAR_NUMBER;
+        assert!(!world.spawn_one(&registry, 0, 0, (0, 0)));
+        assert_eq!(world.monsters.len(), 1, "nothing was spawned");
+
+        // A foreign id in the free list is discarded, not spawned: the top of
+        // the *player* band would shadow a session under the same unique.
+        world
+            .free
+            .push(crate::registry::PLAYER_CHAR_UNIQUE_TOP as u32);
+        assert!(!world.spawn_one(&registry, 0, 0, (0, 0)));
+        assert!(world.free.is_empty(), "the foreign id was discarded");
+        assert_eq!(world.monsters.len(), 1);
     }
 
     /// A boss group's `Interval` is its respawn delay; an ordinary group's is

@@ -69,6 +69,18 @@ use crate::logln_err;
 /// so neither can name a session.
 pub const MAX_CHAR_NUMBER: i16 = 20_000;
 
+/// The top of the player id band, tied to the NPC band's floor so the two can
+/// never overlap (audit H3).
+///
+/// The legacy partitions `CharUniqueInfo` in three bands (`Char-Server.h:
+/// 1006-1037`): PCs first, then NPCs. This port's approved split is players in
+/// `1..=PLAYER_CHAR_UNIQUE_TOP`, monsters and NPCs from
+/// [`gz_data::npc::NPC_CHAR_UNIQUE_BASE`] (8500) up to `MAX_CHAR_NUMBER`.
+/// Sessions allocate inside the player band (`crate::allocate_char_unique`),
+/// and [`Registry::register`] refuses anything else, so a session can never
+/// take an id the monster allocator hands out.
+pub const PLAYER_CHAR_UNIQUE_TOP: i16 = gz_data::npc::NPC_CHAR_UNIQUE_BASE as i16 - 1;
+
 /// Frames a connection's outbound queue holds before it counts as lagging.
 ///
 /// One `mpsc` slot per queued frame, sized for a burst a healthy client drains
@@ -320,7 +332,8 @@ impl Registry {
     }
 
     /// Enters a connection into the table, replacing anything already under
-    /// `key`.
+    /// `key`. Returns `false` when `info` names an id outside the player band
+    /// and nothing was entered.
     ///
     /// Replacing is the character-switch path: a second `REQUEST_SELECTCHAR`
     /// tears the old avatar down (`ServerDB-Person.cpp:1770`), so the new
@@ -329,13 +342,27 @@ impl Registry {
     /// `close` is the connection's close signal. A second `register` under the
     /// same key (the character-switch path) leaves the old `Notify` in place,
     /// so the read loop keeps the one it armed at startup.
+    ///
+    /// The band check is audit H3's last gate: sessions live in
+    /// `1..=PLAYER_CHAR_UNIQUE_TOP`, everything from
+    /// [`gz_data::npc::NPC_CHAR_UNIQUE_BASE`] up belongs to the monster
+    /// allocator, and a session holding one of those ids would shadow a
+    /// monster under the same unique. Callers must check the result.
     pub fn register(
         &self,
         key: SessionKey,
         tx: Sender<Outbound>,
         close: Arc<Notify>,
         info: SessionInfo,
-    ) {
+    ) -> bool {
+        if !(1..=PLAYER_CHAR_UNIQUE_TOP).contains(&info.char_unique) {
+            logln_err!(
+                "registry: refusing char_unique {}: outside the player band 1..={}",
+                info.char_unique,
+                PLAYER_CHAR_UNIQUE_TOP
+            );
+            return false;
+        }
         self.lock().insert(
             key,
             OnlineSession {
@@ -348,6 +375,7 @@ impl Registry {
                 close,
             },
         );
+        true
     }
 
     /// Drops a connection's entry. Called by [`Registered`] on every exit path;

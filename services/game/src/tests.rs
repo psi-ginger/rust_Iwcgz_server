@@ -61,6 +61,49 @@ fn make_new_char_rejects_slots_at_or_above_the_roster_bound() {
     }
 }
 
+/// A click to attack from a distance hands the walk over at once — even when
+/// the player's own ordered walk is still running (the 2026-10-19 live report
+/// of the avatar hesitating on the first approach step).
+///
+/// The client replaces the order in flight on `ORDER_ATTACK`
+/// (`clCurOrder.Set(&ReserveOrder)`, `char-order.cpp:226-263`) and applies it
+/// locally before sending (`Client.cpp:3297`), so waiting for the old walk to
+/// arrive plus a weapon interval walks the avatar away from the monster the
+/// client's own copy is already approaching. A running *approach* keeps its
+/// accumulator, because the client re-decides `CHARWORKSTEP_DECIDELENGTH` only
+/// when the walk arrives.
+#[test]
+fn an_attack_click_takes_a_running_walk_over_but_a_running_approach_keeps_its() {
+    // First click of the fight, from a standstill: the approach starts at once.
+    assert!(may_start_approach(Swing::OutOfRange, false, None, 9_001));
+    // Click while the player's own ordered walk is in flight — the stutter
+    // fix: `approach` names nothing yet, so nothing is being abandoned.
+    assert!(may_start_approach(Swing::OutOfRange, true, None, 9_001));
+    // A click naming a different monster mid-chase retargets the walk.
+    assert!(may_start_approach(
+        Swing::OutOfRange,
+        true,
+        Some(9_002),
+        9_001
+    ));
+    // The approach walk already heading for this target keeps going: re-
+    // planning mid-tile would put the server ahead of the avatar it tracks.
+    assert!(!may_start_approach(
+        Swing::OutOfRange,
+        true,
+        Some(9_001),
+        9_001
+    ));
+    // A landing swing ends the walk question; a dead target ends the fight.
+    assert!(!may_start_approach(Swing::Landed, false, None, 9_001));
+    assert!(!may_start_approach(
+        Swing::NoTarget,
+        true,
+        Some(9_001),
+        9_001
+    ));
+}
+
 /// The 2026-10-10 audit's must-fix #1 (`docs/MUST_FIX.md`): the game login
 /// checked only that `auth_key` equalled the account idnum and **ignored the
 /// password**, so any client that knew (or guessed) an account's `SERIAL` id
@@ -259,25 +302,68 @@ fn live_world_entry_sends_the_per_character_state_block() {
 /// property of the allocator rather than over a socket.
 #[test]
 fn two_sessions_get_distinct_character_ids() {
+    let first = allocate_char_unique();
+    let second = allocate_char_unique();
     assert_ne!(
-        allocate_char_unique(),
-        allocate_char_unique(),
+        first, second,
         "two sessions must never share a character id"
     );
-    // And the allocator stays inside the client's `CharUniqueInfo` bound, which
-    // is what the 592-byte `uiMakeCharUnique` field and the client's own table
-    // both require.
-    let bound = MAX_SESSION_CHAR_UNIQUE;
-    let first = u64::from(NEXT_CHAR_UNIQUE.load(std::sync::atomic::Ordering::Relaxed));
-    assert!(
-        first <= bound + 1,
-        "the allocator must not exceed the client's CharUniqueInfo bound"
-    );
+    // And every allocation stays inside the player band, which clears both the
+    // client's `CharUniqueInfo` table (it indexes by `uiMakeCharUnique`) and
+    // the NPC band the monster allocator owns (audit H3).
+    for id in [first, second] {
+        assert!(
+            (1..=u32::from(PLAYER_CHAR_UNIQUE_TOP as u16)).contains(&id),
+            "allocation {id} escaped the player band"
+        );
+    }
     assert_ne!(
         gz_proto::captured_lengths::CAPTURED_CHAR_UNIQUE as u64,
-        bound,
-        "the retired capture's id is a different character, not the bound"
+        u64::from(PLAYER_CHAR_UNIQUE_TOP as u16),
+        "the retired capture's id is a different character, not the band"
     );
+}
+
+/// T6 — H3: the id bands partition the space. Players wrap strictly inside
+/// `1..=8499`, and the registry — the last gate before a session can be seen
+/// by anyone — refuses 0, the NPC band floor and everything above it, so a
+/// session can never shadow a monster's unique.
+#[test]
+fn player_ids_wrap_inside_the_player_band_and_the_registry_refuses_foreign_ids() {
+    let top = u32::from(PLAYER_CHAR_UNIQUE_TOP as u16);
+    // Every counter phase across two whole wraps — including the boundary
+    // itself, where the old allocator used to special-case a zero. The live
+    // composition (fetch_add + this step) is exercised by the distinctness
+    // test above; whatever raw value arrives here, the step must land in band.
+    for raw in 0..top * 2 {
+        let id = band_char_unique(raw);
+        assert!(
+            (1..=top).contains(&id),
+            "raw {raw} yielded {id}, out of band"
+        );
+    }
+
+    let registry = Registry::new();
+    let enter = |char_unique: i16| {
+        let (tx, _rx) = tokio::sync::mpsc::channel(crate::registry::OUTBOUND_CAP);
+        registry.register(
+            Registry::next_key(),
+            tx,
+            std::sync::Arc::new(tokio::sync::Notify::new()),
+            session_info(char_unique, "Band"),
+        )
+    };
+    assert!(enter(1), "the band floor is a legal session id");
+    assert!(enter(PLAYER_CHAR_UNIQUE_TOP), "so is the band ceiling");
+    assert!(
+        !enter(0),
+        "0 is the legacy's empty pattern, never a session"
+    );
+    assert!(
+        !enter(gz_data::npc::NPC_CHAR_UNIQUE_BASE as i16),
+        "the NPC band floor belongs to the monster allocator"
+    );
+    assert!(!enter(i16::MAX), "and so does everything above it");
 }
 
 /// LOGINMANY is the frame that makes another player exist, and it must be built

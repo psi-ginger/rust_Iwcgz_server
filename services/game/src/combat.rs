@@ -344,6 +344,33 @@ pub(crate) enum Swing {
     NoTarget,
 }
 
+/// Whether an `OutOfRange` swing may (re)start the approach walk.
+///
+/// # Why a walk in flight does not block the click
+///
+/// The legacy's `ORDER_ATTACK` replaces the order in flight outright
+/// (`clCurOrder.Set(&ReserveOrder)`, `char-order.cpp:226-263`) and the client
+/// applies it locally before sending (`Client.cpp:3297`). The port used to wait
+/// for the player's own ordered walk to arrive and then for the next weapon
+/// interval before planning the approach, so a click that landed mid-walk left
+/// the avatar finishing the old destination — and standing still for up to one
+/// interval afterwards — while the client's own copy was already closing on the
+/// monster. That desync is the first-step hesitation on a distance attack.
+///
+/// An approach already running keeps its walk: the client re-decides
+/// `CHARWORKSTEP_DECIDELENGTH` only when the walk arrives, so re-planning
+/// mid-tile on every swing would put this server ahead of the avatar it tracks.
+/// Only a click naming a *different* target — or the first click of a fight —
+/// takes the walk over, exactly as a new order does on the client.
+pub(crate) fn may_start_approach(
+    outcome: Swing,
+    movement_running: bool,
+    approach: Option<u16>,
+    target: u16,
+) -> bool {
+    outcome == Swing::OutOfRange && (!movement_running || approach != Some(target))
+}
+
 /// Walks toward `target` if some standable tile is in range of it, replacing any
 /// walk already running — the half of `ORDER_ATTACK` the client does for itself
 /// (`Client.cpp:3297` `LetOrder` sets `CHARWORKSTEP_DECIDELENGTH`) and this

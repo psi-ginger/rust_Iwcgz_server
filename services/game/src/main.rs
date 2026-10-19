@@ -79,9 +79,14 @@ mod stats;
 mod world;
 mod world_entry;
 
-use combat::{HIT_THROTTLE_MS, PlayerAttacks, Rng, Swing, player_swing, start_approach};
+use combat::{
+    HIT_THROTTLE_MS, PlayerAttacks, Rng, Swing, may_start_approach, player_swing, start_approach,
+};
 use config::GameConfig;
-use registry::{MAX_CHAR_NUMBER, OUTBOUND_CAP, Outbound, Registered, Registry, SessionInfo};
+use registry::{
+    MAX_CHAR_NUMBER, OUTBOUND_CAP, Outbound, PLAYER_CHAR_UNIQUE_TOP, Registered, Registry,
+    SessionInfo,
+};
 
 // The auth/character-lifecycle family lives in `auth.rs`. The dispatcher calls
 // the login/selectchar/make-new-char/delete handlers; `send_char_list`,
@@ -171,10 +176,6 @@ pub(crate) use world::{
 /// is 15 entries (`PutCharList` `0x48D040` rejects `GetIndex() > 14`).
 const CHAR_SLOTS: i16 = 15;
 
-/// `< 0x4E20` (20000): the client indexes its `CharUniqueInfo` table by
-/// `uiMakeCharUnique` (`SetCharReservedChar`).
-const MAX_SESSION_CHAR_UNIQUE: u64 = 19_999;
-
 /// Upper bound on one connection's blocked `write_all`/`flush`
 /// (`send_raw`). A peer that stops reading fills the kernel send buffer and
 /// the write never returns; the timeout turns that stall into an error so the
@@ -191,6 +192,16 @@ const WRITE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 /// population; the bound only matters under abuse.
 const MAX_CONCURRENT_CONNS: usize = 512;
 
+/// Audit H4: a ground item unclaimed this long is swept — nobody picks up a
+/// dropped icon an hour after it fell, and the row is the drop's only durable
+/// trace once the bag slot is gone. Freed handles go back to `world_items_free`
+/// (`sweep_expired_ground`).
+const GROUND_ITEM_TTL_MS: u64 = 3_600_000;
+
+/// How often the AI tick task runs that sweep — a minute past the TTL never
+/// hurt anyone, and it keeps the statement off the 100 ms cadence.
+const GROUND_SWEEP_EVERY_MS: u64 = 60_000;
+
 /// TCP keepalive schedule, applied to every accepted socket.
 ///
 /// An established session is never idle-kicked (the legacy wasn't), so a peer
@@ -201,22 +212,32 @@ const MAX_CONCURRENT_CONNS: usize = 512;
 const KEEPALIVE_IDLE: std::time::Duration = std::time::Duration::from_secs(60);
 const KEEPALIVE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
 
-/// Hands out per-session character ids in `1..=MAX_SESSION_CHAR_UNIQUE`.
+/// Hands out per-session character ids in `1..=PLAYER_CHAR_UNIQUE_TOP`.
 ///
 /// The legacy's equivalent is `m_uiCharID`, a UI16 the session manager assigns
 /// when it binds a session (`CharServer-Session.cpp:58` passes it straight into
 /// `MakeSimpleChar`) — a connection-scoped number, not a database column. Only
 /// [`GameConfig::char_unique`] is the only source; it always returns the allocation.
+///
+/// The band is audit H3's: the client indexes its `CharUniqueInfo` table
+/// (`uiMakeCharUnique`, `SetCharReservedChar`) by this id, and from
+/// [`PLAYER_CHAR_UNIQUE_TOP`] + 1 upward the ids belong to the monster
+/// allocator — so the wrap has to stay inside the player band.
 static NEXT_CHAR_UNIQUE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
 
-/// Next session character id, wrapping inside the client's table bound.
+/// Next session character id, wrapping inside the player band.
 ///
-/// 0 is skipped: the legacy never hands out a zeroed id, and 0 collides with the
-/// "empty" pattern every zeroed capture frame carries.
+/// 0 can never come out: the legacy never hands out a zeroed id, and 0 collides
+/// with the "empty" pattern every zeroed capture frame carries.
 fn allocate_char_unique() -> u32 {
-    let bound = MAX_SESSION_CHAR_UNIQUE as u32 + 1;
-    let n = NEXT_CHAR_UNIQUE.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % bound;
-    if n == 0 { 1 } else { n }
+    band_char_unique(NEXT_CHAR_UNIQUE.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
+}
+
+/// The one step every allocation goes through: a raw counter value to a legal
+/// player id. Pure, so the wrap can be tested across every counter phase
+/// without racing the live counter another test is allocating from.
+fn band_char_unique(raw: u32) -> u32 {
+    raw % (PLAYER_CHAR_UNIQUE_TOP as u32) + 1
 }
 
 /// A millisecond reading for [`gz_net::session::Session`], standing in for
@@ -317,13 +338,16 @@ async fn serve(cfg: &GameConfig) -> Result<(), AnyError> {
             PlayerAttacks::default()
         }
     });
-    // The field-monster AI. One pass every `AI_TICK_MS`, entirely under the
-    // world lock and never across an await.
+    // The field-monster AI, plus the ground-item sweep (audit H4). One AI pass
+    // every `AI_TICK_MS`, entirely under the world lock and never across an
+    // await; the sweep runs outside that lock on a slower deadline of its own.
     {
         let registry = registry.clone();
         let monsters = monsters.clone();
+        let items = items.clone();
         tokio::spawn(async move {
             let mut rng = Rng::new(now_tick());
+            let mut next_sweep_ms = now_tick() + GROUND_SWEEP_EVERY_MS;
             loop {
                 tokio::time::sleep(Duration::from_millis(monsters::AI_TICK_MS)).await;
                 let now = now_tick();
@@ -393,6 +417,20 @@ async fn serve(cfg: &GameConfig) -> Result<(), AnyError> {
                             "game: character {dead} died; sent the death dialog \
                              and armed the revive prompt"
                         );
+                    }
+                }
+                // H4: sweep ground items past the TTL and hand their handles
+                // back to the pool. Outside the world lock, deadline-based —
+                // a slow or failing sweep delays only the next one.
+                if now >= next_sweep_ms {
+                    next_sweep_ms = now + GROUND_SWEEP_EVERY_MS;
+                    match items
+                        .sweep_expired_ground(Duration::from_millis(GROUND_ITEM_TTL_MS))
+                        .await
+                    {
+                        Ok(0) => {}
+                        Ok(n) => logln!("game: swept {n} ground item(s) past the 1h TTL"),
+                        Err(e) => logln_err!("game: ground sweep failed: {e}"),
                     }
                 }
             }
@@ -818,10 +856,15 @@ async fn handle_client(
                                 // player who walks off issues `ORDER_MOVE`, and
                                 // that is still what ends the attack.
                                 //
-                                // One walk at a time: a movement already running
-                                // is either this approach or the player's own
-                                // ordered walk, and only the player's replaces it.
-                                if outcome == Swing::OutOfRange && movement.is_none() {
+                                // A click must close the gap at once, even over a
+                                // walk already running: the client replaced its
+                                // own order on click, so anything slower walks the
+                                // avatar away from the monster the client is
+                                // already approaching (the first-step hesitation).
+                                // An approach already running keeps its walk —
+                                // `may_start_approach` is where both halves live.
+                                if may_start_approach(outcome, movement.is_some(), approach, target)
+                                {
                                     let range = player_attacks.range(class_kind);
                                     match start_approach(
                                         monsters.as_ref(),
@@ -1031,8 +1074,10 @@ async fn handle_client(
                     // row and no head chat (`Registry::register`). The key is
                     // the connection's serial, never `char_unique` — see the
                     // registry module docs for why capture mode makes those
-                    // differ.
-                    registry.register(
+                    // differ. `register` also refuses a `char_unique` outside
+                    // the player band (audit H3); ours always allocates inside
+                    // it, so this is the invariant speaking, not the flow.
+                    if !registry.register(
                         session_key,
                         out_tx.clone(),
                         close.clone(),
@@ -1062,7 +1107,13 @@ async fn handle_client(
                                 .map(|s| u8::try_from(s.gm_level.clamp(0, 255)).unwrap_or(0))
                                 .unwrap_or(0),
                         },
-                    );
+                    ) {
+                        return Err(format!(
+                            "session char_unique {char_unique} is outside the player band \
+                             1..={PLAYER_CHAR_UNIQUE_TOP}"
+                        )
+                        .into());
+                    }
                     // Capture the full stat block for the 214 inspect: another
                     // player's pull reads it out of the registry rather than the
                     // database (`Server-Person.cpp:83`).

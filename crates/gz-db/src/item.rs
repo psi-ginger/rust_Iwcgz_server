@@ -18,6 +18,7 @@ use sqlx::postgres::PgPoolOptions;
 use gz_proto::item::{CLT_ITEM_SIZE, Item, MAX_ITEM_PER_PERSON};
 
 use crate::repository::RepositoryError;
+use std::time::Duration;
 
 use gz_proto::game::client_map_index;
 use gz_proto::item::GroundItem;
@@ -122,6 +123,13 @@ pub enum DropStatus {
         /// Cell the client asked to drop onto.
         y: i32,
     },
+    /// Every UI16 ground handle is in use — 65,535 live ground items, which no
+    /// real shard reaches — so the drop was refused and the slot left alone.
+    ///
+    /// A resource limit must never kill the session (`?`-ing this into a
+    /// disconnect would let any client drop itself by dropping an item), so
+    /// it is a status like the refusals above, answered with 7210.
+    GroundFull,
 }
 
 /// What a [`ItemRepository::drop_slot`] call did.
@@ -439,6 +447,38 @@ impl PgItemRepository {
             .connect(database_url)
             .await?;
         Ok(Self { pool })
+    }
+
+    /// Deletes every ground item dropped more than `max_age` ago and returns
+    /// its handle to the pool, in one statement (audit H4).
+    ///
+    /// Nobody claims a ground icon an hour after it fell: the bag slot is
+    /// long gone and the row is the drop's only durable trace, so the memory
+    /// and the row both go. The handle goes back to `world_items_free` in the
+    /// same statement, which is what keeps the UI16 handle space bounded by
+    /// *concurrent* ground items rather than lifetime drops.
+    ///
+    /// The count is rows removed — safe to call when nothing was due (0).
+    ///
+    /// # Errors
+    ///
+    /// [`RepositoryError::Database`] if the statement fails.
+    pub async fn sweep_expired_ground(&self, max_age: Duration) -> Result<u64, RepositoryError> {
+        let removed = sqlx::query_scalar::<_, i64>(
+            "WITH expired AS ( \
+                 DELETE FROM world_items \
+                 WHERE dropped_at < now() - $1::double precision * interval '1 second' \
+                 RETURNING obj_index), \
+             freed AS ( \
+                 INSERT INTO world_items_free (obj_index) \
+                 SELECT obj_index FROM expired \
+                 ON CONFLICT DO NOTHING) \
+             SELECT count(*)::bigint FROM expired",
+        )
+        .bind(max_age.as_secs() as f64)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(removed as u64)
     }
 }
 
@@ -1256,12 +1296,49 @@ impl ItemRepository for PgItemRepository {
         // the same case by sending `clChangedItem` only when both fields are
         // non-zero (`ServerDB-Item.cpp:2810`).
         if requested > 0 {
+            // H4: claim a handle before the cell search. Recycled handles go
+            // first (`world_items_free`, audit H4 / migration 0013), the
+            // sequence only when the pool is empty. The claim shares this
+            // transaction: the rollbacks below — a blocked cell, any error —
+            // return a pooled handle by simply undoing the claim, and burn
+            // only a sequence number when that is where the handle came from.
+            // `FOR UPDATE SKIP LOCKED` keeps two concurrent drops from
+            // claiming the same pooled handle.
+            let claimed: i64 = sqlx::query_scalar(
+                "WITH take AS ( \
+                     DELETE FROM world_items_free \
+                     WHERE obj_index = ( \
+                         SELECT obj_index FROM world_items_free \
+                         ORDER BY obj_index LIMIT 1 FOR UPDATE SKIP LOCKED) \
+                     RETURNING obj_index) \
+                 SELECT COALESCE((SELECT obj_index FROM take), \
+                                 nextval('world_items_obj_index_seq'))",
+            )
+            .fetch_one(&mut *tx)
+            .await?;
+            // The sequence has climbed past the UI16 the client names ground
+            // objects by, and the pool was empty: 65,535 concurrent ground
+            // items. Refuse the drop — a resource limit must never kill the
+            // session (`?`-ing this out would let a client disconnect itself
+            // by dropping an item).
+            let Some(handle) = i32::try_from(claimed)
+                .ok()
+                .filter(|h| (1..=65_535).contains(h))
+            else {
+                tx.rollback().await?;
+                return Ok(DropOutcome {
+                    status: DropStatus::GroundFull,
+                    current: stored,
+                    dropped: None,
+                    grounded: None,
+                });
+            };
             let mut landed: Option<(DropLocation, i32)> = None;
             for spot in drop_candidates(at) {
                 let inserted: Option<i32> = sqlx::query_scalar(
                     "INSERT INTO world_items \
                      (item_unique, count, raw, map_id, x, y, dropped_by, obj_index) \
-                     VALUES ($1, $2, $3, $4, $5, $6, $7, nextval('world_items_obj_index_seq')) \
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8) \
                      ON CONFLICT (map_id, x, y) DO NOTHING \
                      RETURNING obj_index",
                 )
@@ -1272,6 +1349,7 @@ impl ItemRepository for PgItemRepository {
                 .bind(spot.x)
                 .bind(spot.y)
                 .bind(character_id)
+                .bind(handle)
                 .fetch_optional(&mut *tx)
                 .await?;
                 if let Some(list_index) = inserted {
@@ -1471,11 +1549,19 @@ impl ItemRepository for PgItemRepository {
         if !landed_in_existing {
             write_slot(&mut tx, character_id, slot, item_unique, count, &raw).await?;
         }
-        // Delete the ground item either way.
-        sqlx::query("DELETE FROM world_items WHERE world_item_id = $1")
-            .bind(world_item_id)
-            .execute(&mut *tx)
-            .await?;
+        // Delete the ground item either way, and hand its handle back to the
+        // pool in the same transaction — a claimed item frees its slot for
+        // the next drop exactly as a swept one does (audit H4).
+        sqlx::query(
+            "WITH gone AS ( \
+                 DELETE FROM world_items WHERE world_item_id = $1 \
+                 RETURNING obj_index) \
+             INSERT INTO world_items_free (obj_index) \
+             SELECT obj_index FROM gone ON CONFLICT DO NOTHING",
+        )
+        .bind(world_item_id)
+        .execute(&mut *tx)
+        .await?;
 
         let _item = Item::decode(&raw).map_err(|e| {
             RepositoryError::Invalid(format!(
@@ -1522,8 +1608,13 @@ impl ItemRepository for PgItemRepository {
 
 #[cfg(test)]
 mod tests {
-    use super::{DropLocation, carry_slots, drop_candidates, grant_count, grant_slot, stackable};
+    use super::{
+        DropLocation, DropStatus, GroundClaim, Item, ItemRepository, MAX_ITEM_PER_PERSON,
+        PgItemRepository, PickupStatus, carry_slots, drop_candidates, grant_count, grant_slot,
+        stackable,
+    };
     use gz_proto::item::personitem::*;
+    use std::time::Duration;
 
     /// The placement rule of a grant, mirroring `cltPItemInfo::CanAddInv`
     /// (`ItemPerson.cpp:256`): pileable tops up a stack *of the same item* with room,
@@ -1667,5 +1758,220 @@ mod tests {
         // Unknown uniques are not pileable, like the legacy's type-0 result.
         assert!(!stackable(0));
         assert!(!stackable(i32::from(u16::MAX)));
+    }
+
+    /// T8 — H4, against a live database: one sweep purges an unclaimed drop
+    /// past its hour and hands its handle to `world_items_free`, and both a
+    /// landed drop and a pickup draw from and return to that pool — which is
+    /// what keeps the handle space bounded by *concurrent* ground items
+    /// instead of lifetime drops (migration `0013_world_item_recycle.sql`).
+    ///
+    /// Ignored because this crate has no live-database harness and
+    /// `scripts/check.ps1` runs the whole workspace. Run it by hand with
+    /// `DATABASE_URL` from `scripts/dev-db.ps1`:
+    ///
+    /// `cargo test -p gz-db -- --ignored ground_sweeper`
+    ///
+    /// It writes to dev character 21 ("Tester2"; override with
+    /// `GOONZU_T8_CHARACTER`) and removes exactly what it wrote, including
+    /// leftovers of an earlier failed run. The sweep itself also expires any
+    /// *other* dev ground row older than an hour — that is the sweeper
+    /// working as designed, not a side effect to avoid.
+    #[tokio::test]
+    #[ignore = "needs DATABASE_URL and a live dev database"]
+    async fn the_ground_sweeper_expires_unclaimed_drops_and_recycles_handles() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipped: DATABASE_URL is not set (see scripts/dev-db.ps1)");
+            return;
+        };
+        let items = PgItemRepository::connect(&url).await.expect("connect");
+        let pool = sqlx::PgPool::connect(&url).await.expect("pool");
+        let character_id: i32 = std::env::var("GOONZU_T8_CHARACTER")
+            .ok()
+            .and_then(|raw| raw.parse().ok())
+            .unwrap_or(21);
+        const TYPE_UNIQUE: i32 = 31_337; // one type id reserved for this test
+
+        // What an earlier failed run left behind, if any: the bag row and the
+        // ground rows this test names. Cleaning first keeps a failed assert
+        // from poisoning every rerun.
+        sqlx::query("DELETE FROM character_items WHERE character_id = $1 AND item_unique = $2")
+            .bind(character_id)
+            .bind(TYPE_UNIQUE)
+            .execute(&pool)
+            .await
+            .expect("clean leftovers");
+        sqlx::query(
+            "DELETE FROM world_items \
+             WHERE map_id = 0 AND x BETWEEN 9000 AND 9001 AND y BETWEEN 9000 AND 9001",
+        )
+        .execute(&pool)
+        .await
+        .expect("clean leftover ground rows");
+        let held: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM character_items \
+             WHERE character_id = $1 AND item_unique = $2)",
+        )
+        .bind(character_id)
+        .bind(TYPE_UNIQUE)
+        .fetch_one(&pool)
+        .await
+        .expect("read the character's items");
+        assert!(
+            !held,
+            "character {character_id} already holds {TYPE_UNIQUE}; pick another type id"
+        );
+
+        // --- 1. A drop nobody claimed, two hours old. Its handle sits above
+        // both live tables, so seeding cannot disturb real ground objects.
+        let handle: i32 = sqlx::query_scalar(
+            "SELECT GREATEST(COALESCE((SELECT MAX(obj_index) FROM world_items), 0), \
+                    COALESCE((SELECT MAX(obj_index) FROM world_items_free), 0)) + 1",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("seed handle");
+        sqlx::query(
+            "INSERT INTO world_items \
+             (item_unique, count, raw, map_id, x, y, dropped_by, obj_index, dropped_at) \
+             VALUES ($1, $2, $3, $4, $5, $6, NULL, $7, now() - interval '2 hours')",
+        )
+        .bind(TYPE_UNIQUE)
+        .bind(1i32)
+        .bind(Item::from_unique(TYPE_UNIQUE as u16, 1).encode().to_vec())
+        .bind(0i32)
+        .bind(9000i32)
+        .bind(9000i32)
+        .bind(handle)
+        .execute(&pool)
+        .await
+        .expect("seed the expired drop");
+
+        // --- 2. One sweep older than an hour takes it, and its handle comes
+        // out of the pool — the row gone, the number reusable.
+        let swept = items
+            .sweep_expired_ground(Duration::from_secs(3600))
+            .await
+            .expect("sweep");
+        assert!(swept >= 1, "the expired drop must be gone (swept {swept})");
+        let still: Option<i32> =
+            sqlx::query_scalar("SELECT obj_index FROM world_items WHERE obj_index = $1")
+                .bind(handle)
+                .fetch_optional(&pool)
+                .await
+                .expect("check the expired drop");
+        assert!(still.is_none(), "the expired drop left world_items");
+        let pooled: Option<i32> =
+            sqlx::query_scalar("SELECT obj_index FROM world_items_free WHERE obj_index = $1")
+                .bind(handle)
+                .fetch_optional(&pool)
+                .await
+                .expect("check the pool");
+        assert_eq!(pooled, Some(handle), "its handle went back to the pool");
+
+        // --- 3. A landed drop claims MIN(free): a recycled handle first,
+        // never a fresh sequence number while the pool has one.
+        let occupied: Vec<i16> =
+            sqlx::query_scalar("SELECT slot FROM character_items WHERE character_id = $1")
+                .bind(character_id)
+                .fetch_all(&pool)
+                .await
+                .expect("read the occupied slots");
+        let slot = (0..MAX_ITEM_PER_PERSON as i16)
+            .find(|s| !occupied.contains(s))
+            .expect("a free carry slot") as u16;
+        let item = Item::from_unique(TYPE_UNIQUE as u16, 3);
+        // The slot was picked as absent from `occupied` above; the upsert is
+        // what writes it.
+        items
+            .write_slot(character_id, slot, &item)
+            .await
+            .expect("seed the bag slot");
+        let min_free =
+            sqlx::query_scalar::<_, Option<i32>>("SELECT MIN(obj_index) FROM world_items_free")
+                .fetch_one(&pool)
+                .await
+                .expect("read the pool")
+                .expect("the pool is not empty after the sweep");
+        let outcome = items
+            .drop_slot(
+                character_id,
+                slot,
+                &item,
+                DropLocation {
+                    map_id: 0,
+                    x: 9001,
+                    y: 9001,
+                },
+            )
+            .await
+            .expect("drop");
+        assert_eq!(outcome.status, DropStatus::Dropped, "{outcome:?}");
+        let grounded = outcome
+            .grounded
+            .expect("a landed drop draws a ground object");
+        assert_eq!(
+            i32::from(grounded.list_index),
+            min_free,
+            "the drop claimed the pooled handle, not a fresh sequence number"
+        );
+
+        // --- 4. The pickup names that handle through the client's signed
+        // `siItemIndex` (round-tripping is why pool handles stay in S16 range
+        // on a dev box) and hands it straight back to the pool.
+        let pickup = items
+            .pickup_ground(
+                character_id,
+                GroundClaim {
+                    handle: i16::try_from(grounded.list_index)
+                        .expect("the handle round-trips the client's siItemIndex"),
+                    item_unique: i16::try_from(grounded.item_unique)
+                        .expect("a type id fits the S16 wire"),
+                    map_index: grounded.map_index,
+                    x: grounded.x,
+                    y: grounded.y,
+                },
+            )
+            .await
+            .expect("pickup");
+        assert!(
+            matches!(pickup.status, PickupStatus::PickedUp),
+            "{:?}",
+            pickup.status
+        );
+        let returned: Option<i32> =
+            sqlx::query_scalar("SELECT obj_index FROM world_items_free WHERE obj_index = $1")
+                .bind(min_free)
+                .fetch_optional(&pool)
+                .await
+                .expect("check the pool again");
+        assert_eq!(
+            returned,
+            Some(min_free),
+            "the pickup handed the handle back"
+        );
+
+        // --- 5. Restore the box: the bag row this wrote (wherever the pickup
+        // landed it), any ground row still standing, and the one pool entry
+        // this test introduced. Other pool entries were consumed and
+        // returned untouched.
+        sqlx::query("DELETE FROM character_items WHERE character_id = $1 AND item_unique = $2")
+            .bind(character_id)
+            .bind(TYPE_UNIQUE)
+            .execute(&pool)
+            .await
+            .expect("clean the bag row");
+        sqlx::query(
+            "DELETE FROM world_items \
+             WHERE map_id = 0 AND x BETWEEN 9000 AND 9001 AND y BETWEEN 9000 AND 9001",
+        )
+        .execute(&pool)
+        .await
+        .expect("clean the ground rows");
+        sqlx::query("DELETE FROM world_items_free WHERE obj_index = $1")
+            .bind(handle)
+            .execute(&pool)
+            .await
+            .expect("clean the pool entry");
     }
 }

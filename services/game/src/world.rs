@@ -723,8 +723,8 @@ impl LiveFrames<'_> {
         }
         if is_change_horse {
             // 258 narrows the id to `SI16`; the session id is already bounded
-            // below `MAX_SESSION_CHAR_UNIQUE`, so this only trips if that bound
-            // and this field ever disagree.
+            // inside the player band (`PLAYER_CHAR_UNIQUE_TOP`), so this only
+            // trips if that bound and this field ever disagree.
             let char = i16::try_from(self.char_unique).map_err(|_| {
                 format!(
                     "session char_unique {} does not fit the SI16 siCharUnique",

@@ -234,6 +234,13 @@ pub(crate) async fn handle_inv_drop(
         DropStatus::GroundBlocked { x, y } => {
             format!("drop cell ({x}, {y}): every cell of the 5x5 box around it is occupied")
         }
+        DropStatus::GroundFull => {
+            // Not a bug at shard scale (65,535 live ground items) but a hard
+            // ceiling the pool has to name when it is hit: the drop was
+            // refused, the slot untouched, and 7210 above already rolled the
+            // client's optimistic view back — the session stays up.
+            "ground handle space exhausted (65,535 live ground items), drop refused".to_owned()
+        }
     };
     logln!("game: invdrop slot {slot} for character {character_id}: {detail}");
 
