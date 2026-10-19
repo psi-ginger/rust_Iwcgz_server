@@ -16,7 +16,7 @@ use gz_proto::opcodes_game::GameMsg;
 use std::sync::Arc;
 use tokio::net::TcpStream;
 use tokio::sync::Notify;
-use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::mpsc::Sender;
 
 use crate::config::GameConfig;
 use crate::registry::{Outbound, Registry, SessionKey};
@@ -183,7 +183,7 @@ pub(crate) async fn handle_game_login(
     registry: &Registry,
     session_key: SessionKey,
     close: Arc<Notify>,
-    out_tx: UnboundedSender<Outbound>,
+    out_tx: Sender<Outbound>,
     peer: &str,
     login: &GameLogin,
 ) -> Result<GameSession, AnyError> {

@@ -1663,10 +1663,11 @@ mod tests {
         let characters = MemoryCharacters::default();
         let registry = Registry::new();
         let key = Registry::next_key();
-        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, _rx) = tokio::sync::mpsc::channel(crate::registry::OUTBOUND_CAP);
         registry.register(
             key,
             tx,
+            std::sync::Arc::new(tokio::sync::Notify::new()),
             session_info_from(&Some(row_on_the_east_gate()), 1473),
         );
 
@@ -1708,8 +1709,13 @@ mod tests {
         let characters = MemoryCharacters::default();
         let registry = Registry::new();
         let key = Registry::next_key();
-        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        registry.register(key, tx, session_info_from(&None, 1473));
+        let (tx, _rx) = tokio::sync::mpsc::channel(crate::registry::OUTBOUND_CAP);
+        registry.register(
+            key,
+            tx,
+            std::sync::Arc::new(tokio::sync::Notify::new()),
+            session_info_from(&None, 1473),
+        );
 
         let mut character = None;
         let gate = gate_at(158, 41, 90).expect("the east gate");
@@ -1787,8 +1793,13 @@ mod tests {
         };
         let registry = Registry::new();
         let key = Registry::next_key();
-        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        registry.register(key, tx, session_info_from(&Some(row), 1473));
+        let (tx, _rx) = tokio::sync::mpsc::channel(crate::registry::OUTBOUND_CAP);
+        registry.register(
+            key,
+            tx,
+            std::sync::Arc::new(tokio::sync::Notify::new()),
+            session_info_from(&Some(row), 1473),
+        );
 
         let mut movement = Some(due_movement((265, 322), (262, 322), 0));
         step_movement(
@@ -1836,8 +1847,13 @@ mod tests {
         };
         let registry = Registry::new();
         let key = Registry::next_key();
-        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        registry.register(key, tx, session_info_from(&Some(row), 1473));
+        let (tx, _rx) = tokio::sync::mpsc::channel(crate::registry::OUTBOUND_CAP);
+        registry.register(
+            key,
+            tx,
+            std::sync::Arc::new(tokio::sync::Notify::new()),
+            session_info_from(&Some(row), 1473),
+        );
 
         let mut movement = Some(due_movement((286, 350), (283, 350), 0));
         step_movement(
@@ -1884,8 +1900,13 @@ mod tests {
         };
         let registry = Registry::new();
         let key = Registry::next_key();
-        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        registry.register(key, tx, session_info_from(&Some(row), 1473));
+        let (tx, _rx) = tokio::sync::mpsc::channel(crate::registry::OUTBOUND_CAP);
+        registry.register(
+            key,
+            tx,
+            std::sync::Arc::new(tokio::sync::Notify::new()),
+            session_info_from(&Some(row), 1473),
+        );
 
         let mut movement = Some(due_movement((24, 8), (24, 9), 1));
         step_movement(
@@ -1974,11 +1995,16 @@ mod tests {
             let characters = MemoryCharacters::default();
             let registry = Registry::new();
             let key = Registry::next_key();
-            let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+            let (tx, _rx) = tokio::sync::mpsc::channel(crate::registry::OUTBOUND_CAP);
             let mut row = row_on_map0(25, 9);
             row.map_id = 1;
             let character_id = row.character_id;
-            registry.register(key, tx, session_info_from(&Some(row.clone()), 1473));
+            registry.register(
+                key,
+                tx,
+                std::sync::Arc::new(tokio::sync::Notify::new()),
+                session_info_from(&Some(row.clone()), 1473),
+            );
 
             let (mut stream, _peer) = socket_pair().await;
             let mut outbound = Cipher::new();

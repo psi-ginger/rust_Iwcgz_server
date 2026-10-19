@@ -81,7 +81,7 @@ mod world_entry;
 
 use combat::{HIT_THROTTLE_MS, PlayerAttacks, Rng, Swing, player_swing, start_approach};
 use config::GameConfig;
-use registry::{MAX_CHAR_NUMBER, Outbound, Registered, Registry, SessionInfo};
+use registry::{MAX_CHAR_NUMBER, OUTBOUND_CAP, Outbound, Registered, Registry, SessionInfo};
 
 // The auth/character-lifecycle family lives in `auth.rs`. The dispatcher calls
 // the login/selectchar/make-new-char/delete handlers; `send_char_list`,
@@ -174,6 +174,32 @@ const CHAR_SLOTS: i16 = 15;
 /// `< 0x4E20` (20000): the client indexes its `CharUniqueInfo` table by
 /// `uiMakeCharUnique` (`SetCharReservedChar`).
 const MAX_SESSION_CHAR_UNIQUE: u64 = 19_999;
+
+/// Upper bound on one connection's blocked `write_all`/`flush`
+/// (`send_raw`). A peer that stops reading fills the kernel send buffer and
+/// the write never returns; the timeout turns that stall into an error so the
+/// read loop exits and `Registered`'s drop releases the registry entry and
+/// login claim. Ten seconds is generous for a healthy client — one near-block
+/// fan is a few kilobytes — and matches the handshake budget.
+const WRITE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Concurrent connections the accept loop will spawn a handler for.
+///
+/// Once the semaphore is exhausted, `serve` drops the accepted socket
+/// immediately instead of spawning: a flood of connects can no longer grow an
+/// unbounded pile of tasks. Legitimate capacity is far above any real shard's
+/// population; the bound only matters under abuse.
+const MAX_CONCURRENT_CONNS: usize = 512;
+
+/// TCP keepalive schedule, applied to every accepted socket.
+///
+/// An established session is never idle-kicked (the legacy wasn't), so a peer
+/// that vanishes behind a NAT without a FIN would otherwise stay registered
+/// forever. Keepalive probes surface the death as a socket error, which tears
+/// the read loop down and releases the registry entry. The idle time is the
+/// time before the first probe; the interval spaces the follow-up probes.
+const KEEPALIVE_IDLE: std::time::Duration = std::time::Duration::from_secs(60);
+const KEEPALIVE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Hands out per-session character ids in `1..=MAX_SESSION_CHAR_UNIQUE`.
 ///
@@ -385,8 +411,30 @@ async fn serve(cfg: &GameConfig) -> Result<(), AnyError> {
          world entry generated from PostgreSQL"
     );
 
+    // Bounded concurrency: one permit per live handler, taken before the
+    // spawn. [`admit`] is a seam so the cap logic is testable without a
+    // listener.
+    let conn_slots = Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_CONNS));
+
     loop {
         let (stream, peer) = listener.accept().await?;
+        // Keepalive so a peer that vanishes without a FIN surfaces as a socket
+        // error instead of a forever-registered session (established sessions
+        // are never idle-kicked).
+        if let Err(e) = socket2::SockRef::from(&stream).set_tcp_keepalive(
+            &socket2::TcpKeepalive::new()
+                .with_time(KEEPALIVE_IDLE)
+                .with_interval(KEEPALIVE_INTERVAL),
+        ) {
+            logln_err!("game: {peer}: set keepalive: {e}");
+        }
+        let Some(permit) = admit(&conn_slots) else {
+            // At capacity: drop the socket now, before anything is cloned or
+            // spawned. The client sees a refused connection rather than a
+            // silently queued one.
+            logln!("game: {peer}: {MAX_CONCURRENT_CONNS} connections in flight, dropping");
+            continue;
+        };
         let accounts = accounts.clone();
         let characters = characters.clone();
         let items = items.clone();
@@ -398,6 +446,8 @@ async fn serve(cfg: &GameConfig) -> Result<(), AnyError> {
         let peer = peer.to_string();
         let cfg = cfg.clone();
         tokio::spawn(async move {
+            // Held for the whole session; the slot frees when the handler ends.
+            let _permit = permit;
             if let Err(e) = handle_client(
                 stream,
                 &peer,
@@ -417,6 +467,18 @@ async fn serve(cfg: &GameConfig) -> Result<(), AnyError> {
             }
         });
     }
+}
+
+/// Takes a connection slot, or `None` when the server is at
+/// [`MAX_CONCURRENT_CONNS`].
+///
+/// A separate function so the cap is testable: exhaust the semaphore, call
+/// `admit`, and assert `None` — no listener, no handler needed. The permit is
+/// owned so it can be moved into the handler task.
+fn admit(
+    slots: &std::sync::Arc<tokio::sync::Semaphore>,
+) -> Option<tokio::sync::OwnedSemaphorePermit> {
+    slots.clone().try_acquire_owned().ok()
 }
 
 /// One turn of the read loop's `select!`.
@@ -482,6 +544,12 @@ async fn handle_client(
         // has the same guard, so the legacy has the same dead branch.
         return Err("fresh session refused its own socket".into());
     }
+    // The handshake budget is an absolute deadline pinned at accept, not a
+    // fresh window per read-loop turn: re-arming it from "now" every turn is
+    // what let a peer that dribbled one frame per window stay unhandshaken
+    // indefinitely. One clock, set once. On tokio's clock, because that is
+    // what arms the sleep (and what a paused-clock test can control).
+    let handshake_deadline = tokio::time::Instant::now() + cfg.timeouts.handshake;
     // ITZList::push marks the session live as it enters the master list, which is
     // what arms the 10 s watchdog.
     session_state.set_active(true);
@@ -573,7 +641,7 @@ async fn handle_client(
     // a head-chat fan, the general-chat broadcast this speaker is also part of
     // — is queued here and written by this loop, so only this task ever writes
     // to the socket (`Outbound`).
-    let (out_tx, mut out_rx) = tokio::sync::mpsc::unbounded_channel::<Outbound>();
+    let (out_tx, mut out_rx) = tokio::sync::mpsc::channel::<Outbound>(OUTBOUND_CAP);
 
     // The `(map, cell)` the session's monsters were last announced for, so the
     // loop below can tell a walk into a new cell (or a warp) from standing
@@ -607,16 +675,20 @@ async fn handle_client(
             }
             last_seen = Some((info.map_id, cell));
         }
-        // The handshake window runs from accept to the first inbound frame. Past
-        // it, a peer that has said nothing is a silent half-open connection and
-        // gets reclaimed rather than parked forever -- the fix the legacy's
-        // 10 s check does not deliver. See gz_net::session.
+        // The handshake window runs from accept — `handshake_deadline`, pinned
+        // once when the connection arrived — to the first inbound frame, and
+        // each turn arms only the time *left* on that clock. Past it, a peer
+        // that has said nothing (or dribbled just enough to look busy) is a
+        // silent half-open connection and gets reclaimed rather than parked
+        // forever -- the fix the legacy's 10 s check does not deliver. See
+        // gz_net::session.
         //
         // On a live session the wait instead runs until the next thing this
         // connection owes the world: a step landing, or a swing falling due,
-        // whichever comes first.
+        // whichever comes first. An established session has no idle window at
+        // all; liveness is TCP keepalive's job.
         let read_window = if !session_state.state().is_active() {
-            Some(cfg.timeouts.handshake)
+            Some(handshake_deadline.saturating_duration_since(tokio::time::Instant::now()))
         } else {
             let now = Instant::now();
             movement
@@ -963,6 +1035,7 @@ async fn handle_client(
                     registry.register(
                         session_key,
                         out_tx.clone(),
+                        close.clone(),
                         SessionInfo {
                             char_unique: i16::try_from(char_unique).map_err(|_| {
                                 format!(
@@ -1750,6 +1823,12 @@ async fn send_encoded(
 ///
 /// Needed for the capture replay: many captured frames have no `GameMsg`
 /// variant, and the opcode on the wire is what the client dispatches on anyway.
+///
+/// The write is bounded by [`WRITE_TIMEOUT`]: a peer that stops reading fills
+/// the kernel buffer and this `write_all` never returns, so without the bound
+/// one stalled connection would leak a task forever. On timeout the error
+/// propagates, the read loop exits, and `Registered`'s drop releases the
+/// registry entry and the login claim.
 async fn send_raw(
     stream: &mut TcpStream,
     cipher: &mut Cipher,
@@ -1759,8 +1838,14 @@ async fn send_raw(
     let frame = Frame::new(cmd, payload)?;
     let wire = frame.into_bytes();
     let enciphered = cipher.encode(&wire)?;
-    stream.write_all(&enciphered).await?;
-    stream.flush().await?;
+    tokio::time::timeout(WRITE_TIMEOUT, async {
+        stream.write_all(&enciphered).await?;
+        stream.flush().await
+    })
+    .await
+    .map_err(|_| -> AnyError {
+        format!("write to peer timed out after {WRITE_TIMEOUT:?} ({cmd:#x})").into()
+    })??;
     Ok(())
 }
 

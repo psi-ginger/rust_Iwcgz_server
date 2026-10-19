@@ -155,12 +155,13 @@ fn registry_join(
     name: &str,
     x: i32,
     y: i32,
-) -> (SessionKey, tokio::sync::mpsc::UnboundedReceiver<Outbound>) {
+) -> (SessionKey, tokio::sync::mpsc::Receiver<Outbound>) {
     let key = Registry::next_key();
-    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let (tx, rx) = tokio::sync::mpsc::channel(crate::registry::OUTBOUND_CAP);
     registry.register(
         key,
         tx,
+        std::sync::Arc::new(tokio::sync::Notify::new()),
         SessionInfo {
             char_unique,
             name: name.to_owned(),
@@ -1678,15 +1679,20 @@ fn chat_info(char_unique: i16, name: &str, x: i32, y: i32) -> SessionInfo {
 fn chat_join(
     registry: &Registry,
     info: SessionInfo,
-) -> (SessionKey, tokio::sync::mpsc::UnboundedReceiver<Outbound>) {
+) -> (SessionKey, tokio::sync::mpsc::Receiver<Outbound>) {
     let key = Registry::next_key();
-    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-    registry.register(key, tx, info);
+    let (tx, rx) = tokio::sync::mpsc::channel(crate::registry::OUTBOUND_CAP);
+    registry.register(
+        key,
+        tx,
+        std::sync::Arc::new(tokio::sync::Notify::new()),
+        info,
+    );
     (key, rx)
 }
 
 /// Nothing queued, as distinct from "the sender is gone".
-fn assert_chat_silent(rx: &mut tokio::sync::mpsc::UnboundedReceiver<Outbound>, what: &str) {
+fn assert_chat_silent(rx: &mut tokio::sync::mpsc::Receiver<Outbound>, what: &str) {
     assert!(
         matches!(
             rx.try_recv(),
@@ -2658,4 +2664,488 @@ async fn friend_list_replies_with_requester_s_friends_at_their_slots() {
         "siCharKind[0]"
     );
     assert_chat_silent(&mut rb, "Bob gets nothing from Alice's list request");
+}
+
+// ---------------------------------------------------------------------------
+// Batch 1 (`AUDIT_WHOLE_SYSTEM_HARDENING.md` §7): backpressure (H1) and the
+// handshake deadline / liveness decision (H2). Tests T1–T5.
+// ---------------------------------------------------------------------------
+
+/// A loopback socket pair: one end for the handler under test, one for the
+/// hostile peer the test drives. (movement's test module has the same helper;
+/// both are private to their modules.)
+async fn socket_pair() -> (TcpStream, TcpStream) {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("a loopback port");
+    let addr = listener.local_addr().expect("the bound address");
+    let writer = TcpStream::connect(addr).await.expect("the client end");
+    let (reader, _) = listener.accept().await.expect("the server end");
+    (writer, reader)
+}
+
+/// A connected pair whose kernel buffers are ~4 KB on both ends, set **before**
+/// the handshake: Windows computes the window scale from the receive buffer at
+/// connect time and ignores post-connect shrinks, so a 60 KB frame cannot fit
+/// and the writer's `write_all` genuinely blocks. The connect is blocking —
+/// loopback to an already-listening socket completes immediately — which is
+/// fine in a test.
+async fn tiny_buffer_pair() -> (TcpStream, TcpStream) {
+    use socket2::{Domain, Protocol, SockAddr, Type};
+    let listener =
+        socket2::Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP)).expect("a socket");
+    listener
+        .set_recv_buffer_size(4096)
+        .expect("SO_RCVBUF before the handshake");
+    listener
+        .bind(&SockAddr::from(
+            "127.0.0.1:0"
+                .parse::<std::net::SocketAddr>()
+                .expect("an address"),
+        ))
+        .expect("bind");
+    listener.listen(8).expect("listen");
+    let bound = listener
+        .local_addr()
+        .expect("the bound address")
+        .as_socket()
+        .expect("an IP address");
+
+    let writer =
+        socket2::Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP)).expect("a socket");
+    writer
+        .set_send_buffer_size(4096)
+        .expect("SO_SNDBUF before connect");
+    writer
+        .connect(&SockAddr::from(bound))
+        .expect("a loopback connect");
+
+    listener
+        .set_nonblocking(true)
+        .expect("a nonblocking listener");
+    writer.set_nonblocking(true).expect("a nonblocking writer");
+    let writer = TcpStream::from_std(std::net::TcpStream::from(writer)).expect("a tokio stream");
+    let listener = tokio::net::TcpListener::from_std(std::net::TcpListener::from(listener))
+        .expect("a tokio listener");
+    let (reader, _) = listener.accept().await.expect("the server end");
+    (writer, reader)
+}
+
+/// A real-time wait that does **not** let the paused clock jump ahead of
+/// in-flight socket I/O: outstanding `spawn_blocking` work counts as runtime
+/// activity, so auto-advance stays off until the sleep ends (`tokio::time`
+/// clock docs). Used after a write whose delivery the test must observe before
+/// arming a virtual sleep.
+async fn real_millis(ms: u64) {
+    tokio::task::spawn_blocking(move || std::thread::sleep(Duration::from_millis(ms)))
+        .await
+        .expect("the blocking sleep runs");
+}
+
+/// A config with the audit's timings: `SessionTimeouts::default()` carries the
+/// 10 s handshake budget the T1/T5 deadlines are measured against. The fields
+/// are set directly rather than through `from_env` — the struct deliberately
+/// has no `Default`, and no test reads the environment.
+fn hardening_config() -> GameConfig {
+    GameConfig {
+        database_url: "postgres://none:none@127.0.0.1:1/none".to_owned(),
+        listen: "127.0.0.1:0".to_owned(),
+        link_key: (0x12, 0x34),
+        client_compat_version: 1,
+        service_area: 0,
+        server_unique: 0,
+        timeouts: gz_net::session::SessionTimeouts::default(),
+        data_root: std::path::PathBuf::from("tests/data-root-unused"),
+        debug_log: false,
+    }
+}
+
+/// The five repositories `handle_client` takes, over one pool that never
+/// connects: the T1/T5 paths end before any login, so no row is ever read.
+fn lazy_repos() -> (
+    PgAccountRepository,
+    PgCharacterRepository,
+    PgItemRepository,
+    PgFriendRepository,
+    PgQuestRepository,
+) {
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .connect_lazy("postgres://none:none@127.0.0.1:1/none")
+        .expect("a parseable URL, connected only on first use");
+    (
+        PgAccountRepository::new(pool.clone()),
+        PgCharacterRepository::new(pool.clone()),
+        PgItemRepository::new(pool.clone()),
+        PgFriendRepository::new(pool.clone()),
+        PgQuestRepository::new(pool),
+    )
+}
+
+/// A registered-session record for the tests below.
+fn session_info(char_unique: i16, name: &str) -> SessionInfo {
+    SessionInfo {
+        char_unique,
+        name: name.to_owned(),
+        level: 13,
+        map_id: 158,
+        x: 27,
+        y: 87,
+        school_id: 0,
+        class_kind: 1,
+        life: 161,
+        move_speed: 12,
+        sex: 1,
+        gm_level: 0,
+    }
+}
+
+/// T1 — H2: the handshake budget is an **absolute** window pinned at accept.
+/// A peer that dribbles an incomplete frame once a second must still be
+/// disconnected at accept + 10 s; re-arming the window from "now" on every
+/// read-loop turn (the pre-audit shape) kept such a peer alive forever. The
+/// kick must not fire early either: dribbled partial bytes are not a framing
+/// error, so nothing may end the session before the deadline.
+#[tokio::test(start_paused = true)]
+async fn a_dribbling_pre_handshake_peer_is_kicked_at_the_absolute_deadline() {
+    let (mut client, server) = socket_pair().await;
+    let cfg = hardening_config();
+    let (accounts, characters, items, friends, quests) = lazy_repos();
+    let registry = Arc::new(Registry::new());
+    let monsters = Arc::new(Mutex::new(monsters::MonsterWorld::empty()));
+    let player_attacks = Arc::new(PlayerAttacks::default());
+
+    let started = tokio::time::Instant::now();
+    let handler = tokio::spawn(async move {
+        handle_client(
+            server,
+            "t1-dribbler",
+            &cfg,
+            accounts,
+            characters,
+            items,
+            friends,
+            quests,
+            registry,
+            monsters,
+            player_attacks,
+        )
+        .await
+    });
+
+    // Ten bytes of a frame whose header declares 256: fed one per second the
+    // frame never completes (a completed frame would legitimately establish
+    // the session) and the parser never rejects it either.
+    let dribble = tokio::spawn(async move {
+        for byte in 0..10u8 {
+            if client.write_all(&[byte]).await.is_err() {
+                return; // the kick closed the socket
+            }
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+        // Hold the socket open past the deadline: an early EOF here would end
+        // the session through the read path and mask the handshake kick.
+        tokio::time::sleep(Duration::from_secs(60)).await;
+        drop(client);
+    });
+
+    let finished = tokio::time::timeout(Duration::from_millis(10_500), handler)
+        .await
+        .expect("the dribbler is kicked at accept + 10 s, not kept alive by its dribbles");
+    assert!(
+        finished.expect("the handler task joins").is_ok(),
+        "the handshake kick is a clean disconnect"
+    );
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed >= Duration::from_secs(9),
+        "the window is not cut short: the session was reaped after {elapsed:?}"
+    );
+    dribble.await.expect("the dribbler task finishes");
+}
+
+/// T2 — H1: `send_raw`'s write is bounded by [`WRITE_TIMEOUT`]. A peer that
+/// never reads fills the kernel buffers and the write blocks forever without
+/// the bound; with it, the error propagates out of `handle_client`, whose
+/// `Registered` guard drop releases the registry entry **and** the account
+/// login claim (`registry.remove` retains no claim owned by this key). This
+/// drives the handler's exact shape on that path — guard, claim, register,
+/// failing write — then checks both releases.
+#[tokio::test(start_paused = true)]
+async fn a_peer_that_never_reads_is_reaped_by_the_write_timeout_and_frees_its_claim() {
+    // Both kernel buffers ~4 KB, set before the connect (Windows fixes the
+    // window scale at handshake time and ignores post-connect shrinks).
+    let (writer, reader) = tiny_buffer_pair().await;
+    // Held open and never read — the stalled peer.
+    let _peer = reader;
+
+    let registry = Arc::new(Registry::new());
+    let key = Registry::next_key();
+    let close = Arc::new(Notify::new());
+    let (tx, _rx) = tokio::sync::mpsc::channel(OUTBOUND_CAP);
+
+    let reaped = tokio::spawn({
+        let registry = registry.clone();
+        let close = close.clone();
+        let tx = tx.clone();
+        async move {
+            // The handler's shape on this path (main.rs's setup, minus the
+            // dispatch a stalled peer never reaches).
+            let _registered = Registered::new(registry.clone(), key);
+            assert!(
+                registry
+                    .claim_login(
+                        42,
+                        key,
+                        close.clone(),
+                        tx.clone(),
+                        Outbound {
+                            cmd: 0,
+                            payload: Vec::new()
+                        },
+                    )
+                    .is_none(),
+                "the first claim takes the account"
+            );
+            registry.register(key, tx.clone(), close, session_info(1471, "Stalled"));
+            // A duplicate login for the same account is refused while this
+            // session lives: the claim is real, not decorative.
+            assert_eq!(
+                registry.claim_login(
+                    42,
+                    Registry::next_key(),
+                    Arc::new(Notify::new()),
+                    tx,
+                    Outbound {
+                        cmd: 0,
+                        payload: Vec::new()
+                    },
+                ),
+                Some(key),
+                "the account is claimed while the session lives"
+            );
+
+            let mut writer = writer;
+            // Manufacture the stall: one 60 KB frame fits Windows' loopback
+            // buffering, so the socket is flooded with raw bytes (framing is
+            // irrelevant — the peer never reads) until a write parks. The
+            // paused clock auto-advances across the park, so this short
+            // timeout fires exactly when the kernel buffers are full.
+            let flood = vec![0u8; 16_384];
+            loop {
+                if tokio::time::timeout(Duration::from_millis(100), writer.write_all(&flood))
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+            let payload = vec![0xAA; 60_000];
+            send_raw(&mut writer, &mut Cipher::new(), 0x1234, &payload).await
+        }
+    });
+
+    let err = tokio::time::timeout(Duration::from_millis(10_500), reaped)
+        .await
+        .expect("the stalled write ends within the 10 s write timeout")
+        .expect("the handler task joins")
+        .expect_err("a peer that never reads cannot be written to forever");
+    assert!(
+        err.to_string().contains("timed out"),
+        "the error names the timeout: {err}"
+    );
+
+    // The error path dropped `Registered`: entry and claim both go.
+    assert!(
+        registry.info(key).is_none(),
+        "the registry entry is released"
+    );
+    let (probe_tx, _probe_rx) = tokio::sync::mpsc::channel(OUTBOUND_CAP);
+    assert!(
+        registry
+            .claim_login(
+                42,
+                Registry::next_key(),
+                Arc::new(Notify::new()),
+                probe_tx,
+                Outbound {
+                    cmd: 0,
+                    payload: Vec::new()
+                },
+            )
+            .is_none(),
+        "the login claim is released with the session"
+    );
+}
+
+/// T3 — H1: the per-session outbound queue is bounded at [`OUTBOUND_CAP`].
+/// Over the cap a broadcast frame is **dropped** for that session (the fan
+/// keeps its non-blocking contract; sessions with room still receive), while
+/// a direct reply closes the session — a direct reply is one the peer is
+/// waiting on, and a half-answered session is worse than a disconnected one.
+/// Either way the queue never grows past the cap.
+#[tokio::test]
+async fn a_saturated_outbound_queue_drops_broadcasts_and_closes_direct_replies() {
+    let registry = Registry::new();
+    let key = Registry::next_key();
+    let (tx, rx) = tokio::sync::mpsc::channel(OUTBOUND_CAP);
+    let close = Arc::new(Notify::new());
+    registry.register(key, tx, close.clone(), session_info(1471, "Full"));
+    // One session with room, for the fan's other half.
+    let (spare_key, mut spare_rx) = registry_join(&registry, 1472, "Spare", 27, 87);
+
+    for i in 0..OUTBOUND_CAP {
+        assert!(registry.send_to(key, 1, vec![i as u8]), "queued {i}");
+    }
+    assert_eq!(rx.len(), OUTBOUND_CAP, "the queue is exactly at its cap");
+
+    // The broadcast fan stays non-blocking: the full session's frame is
+    // dropped, the spare's is delivered.
+    assert_eq!(registry.broadcast_all(2, Vec::new()), 1);
+    assert_eq!(
+        rx.len(),
+        OUTBOUND_CAP,
+        "the dropped broadcast changed nothing"
+    );
+    assert_eq!(
+        spare_rx
+            .try_recv()
+            .expect("the spare got the broadcast")
+            .cmd,
+        2
+    );
+
+    // A direct reply to a full queue closes the session instead of queueing.
+    assert!(!registry.send_to(key, 3, Vec::new()));
+    tokio::time::timeout(Duration::from_millis(10), close.notified())
+        .await
+        .expect("a full direct reply wakes the session's close");
+    assert_eq!(
+        rx.len(),
+        OUTBOUND_CAP,
+        "the refused frame was not smuggled in"
+    );
+
+    // The neighbour's backpressure never touches a session with room.
+    assert!(registry.send_to(spare_key, 4, Vec::new()));
+}
+
+/// T4 — H1: the accept loop takes a semaphore permit *before* spawning the
+/// handler, so at [`MAX_CONCURRENT_CONNS`] the next socket is dropped rather
+/// than queued or silently serviced. `admit` is that gate; the loop spawns
+/// only when it returns a permit.
+#[test]
+fn the_connection_cap_refuses_the_next_admission_and_frees_slots_on_completion() {
+    let slots = Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_CONNS));
+    let held: Vec<_> = (0..MAX_CONCURRENT_CONNS)
+        .map(|_| admit(&slots).expect("an admission within the cap"))
+        .collect();
+    assert!(
+        admit(&slots).is_none(),
+        "one past the cap is refused before any handler is spawned"
+    );
+    drop(held);
+    assert!(admit(&slots).is_some(), "a finished session frees its slot");
+}
+
+/// T5 — H2: the decision this locks is **no idle kick for an established
+/// session**. Liveness after the handshake is TCP keepalive's job (armed on
+/// accept: 60 s idle, 10 s probes), not a read-window timer — so a session
+/// that stays silent for three minutes is still alive. A peer whose socket
+/// *errors* (an RST, the closest thing a unit test can produce to a
+/// keepalive-detected death) is reaped through the read loop's error path.
+/// The keepalive *timing* itself is a real-time measurement (audit §9 [R]),
+/// not something a paused clock can reach.
+#[tokio::test(start_paused = true)]
+async fn an_established_session_is_never_idle_kicked_and_a_dead_peer_is_reaped() {
+    let (mut client, server) = socket_pair().await;
+    let cfg = hardening_config();
+    let link_key = cfg.link_key;
+    let (accounts, characters, items, friends, quests) = lazy_repos();
+    let registry = Arc::new(Registry::new());
+    let monsters = Arc::new(Mutex::new(monsters::MonsterWorld::empty()));
+    let player_attacks = Arc::new(PlayerAttacks::default());
+
+    let mut handler = tokio::spawn(async move {
+        handle_client(
+            server,
+            "t5-idle",
+            &cfg,
+            accounts,
+            characters,
+            items,
+            friends,
+            quests,
+            registry,
+            monsters,
+            player_attacks,
+        )
+        .await
+    });
+
+    // S8: the greeting carries the session keys, enciphered under the link
+    // cipher from configuration — the client's first read.
+    let mut link = Cipher::session_cipher(link_key.0, link_key.1);
+    let mut head = [0u8; 2];
+    client
+        .read_exact(&mut head)
+        .await
+        .expect("the greeting's size field");
+    let size = usize::from(u16::from_le_bytes(head));
+    assert_eq!(size, HEADER_SIZE + 8, "one CharUnique body");
+    let mut wire = vec![0u8; size];
+    wire[..2].copy_from_slice(&head);
+    client
+        .read_exact(&mut wire[2..])
+        .await
+        .expect("the greeting's body");
+    let mut plain = vec![0u8; size];
+    assert!(
+        link.decode(&wire, &mut plain)
+            .expect("the greeting decodes")
+    );
+    assert_eq!(
+        u16::from_le_bytes([plain[3], plain[4]]),
+        GameMsg::ResponseClientcharunique as u16,
+        "opcode 1"
+    );
+    let (key1, key2) = (plain[9], plain[10]);
+
+    // One complete frame under the negotiated cipher: the first inbound frame
+    // establishes the session, and from here the handshake deadline no longer
+    // applies (`gz_net::session`, `establish`).
+    let mut session = Cipher::session_cipher(key1, key2);
+    let heartbeat = Frame::new(GameMsg::RequestHeartbeat as u16, &[])
+        .expect("a 5-byte frame")
+        .into_bytes();
+    client
+        .write_all(&session.encode(&heartbeat).expect("encipher"))
+        .await
+        .expect("the heartbeat is written");
+    // Real time, not virtual: the heartbeat's I/O completion must land (and the
+    // handler establish the session) before any virtual sleep arms, or the
+    // paused clock would advance straight to the handshake deadline and kick a
+    // session that never saw its chance.
+    real_millis(50).await;
+
+    // Three idle minutes: nothing may kick it. With no timers armed on the
+    // handler side, tokio's paused clock advances straight through.
+    tokio::time::sleep(Duration::from_secs(180)).await;
+    tokio::time::timeout(Duration::from_millis(50), &mut handler)
+        .await
+        .expect_err("an established session is never idle-kicked");
+
+    // The peer vanishes without a FIN: SO_LINGER 0 turns the close into an
+    // RST, so the server's read fails — the socket-error reap path. The
+    // blocking wait again keeps the clock from jumping past the reset's I/O
+    // completion.
+    socket2::SockRef::from(&client)
+        .set_linger(Some(Duration::ZERO))
+        .expect("SO_LINGER is settable on loopback");
+    drop(client);
+    real_millis(50).await;
+    let finished = tokio::time::timeout(Duration::from_secs(5), handler)
+        .await
+        .expect("the dead peer's session is reaped promptly")
+        .expect("the handler task joins");
+    assert!(finished.is_err(), "an RST surfaces as a read error");
 }

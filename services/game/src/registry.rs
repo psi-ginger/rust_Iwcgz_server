@@ -59,12 +59,27 @@ use gz_proto::game::BasicInfo;
 use gz_proto::map_geometry::{cell_of, cells_adjacent};
 use gz_proto::opcodes_game::GameMsg;
 use tokio::sync::Notify;
-use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::mpsc::Sender;
+use tokio::sync::mpsc::error::TrySendError;
+
+use crate::logln_err;
 
 /// `MAX_CHAR_NUMBER` (`CommonHeader.h:556`) — `GetIDFromCharUnique` returns 0
 /// for `charunique <= 0` and for `charunique >=` this (`CharManager.cpp:205`),
 /// so neither can name a session.
 pub const MAX_CHAR_NUMBER: i16 = 20_000;
+
+/// Frames a connection's outbound queue holds before it counts as lagging.
+///
+/// One `mpsc` slot per queued frame, sized for a burst a healthy client drains
+/// on the next loop turn (a whole near-block fan, a stat refresh, a few chat
+/// frames). The bound is the whole point: the legacy handed a `siSendBufSize`
+/// to `CreateFactory` (`ITZSessionFactory.h:15`) and this replaces the port's
+/// unbounded queue, which let a peer that stopped reading grow memory at the
+/// world's broadcast rate (audit A1). A `Full` queue is handled at the send
+/// sites — broadcasts drop that one subscriber, a direct `send_to` closes the
+/// lagging session.
+pub const OUTBOUND_CAP: usize = 256;
 
 /// The registry's key: one per connection, from [`Registry::next_key`].
 ///
@@ -157,7 +172,12 @@ pub struct OnlineSession {
     /// stamp where it is — which is exactly what keeps an idle shopkeeper's
     /// clock running.
     last_activity_ms: Option<u64>,
-    tx: UnboundedSender<Outbound>,
+    tx: Sender<Outbound>,
+    /// Wakes this connection's read loop to close. Mirrors the `Notify` a
+    /// [`Registry::claim_login`] claim holds, but lives in the session entry so
+    /// the direct-reply path ([`Registry::send_to`]) can close a session whose
+    /// outbound queue is saturated (audit A1) without walking the login table.
+    close: Arc<Notify>,
 }
 
 /// One accepted friendship, stored per owner session. The field set the 6210
@@ -205,7 +225,7 @@ pub struct Registry {
 /// One account's live login claim: the holder's session key, the signal that
 /// closes it when a duplicate arrives, and its outbound queue, so the kick can
 /// hand the holder its `GAMEMSG_RESPONSE_ANOTHERAUTH` notice before it closes.
-type LoginClaim = (SessionKey, Arc<Notify>, UnboundedSender<Outbound>);
+type LoginClaim = (SessionKey, Arc<Notify>, Sender<Outbound>);
 
 impl Default for Registry {
     fn default() -> Self {
@@ -275,7 +295,7 @@ impl Registry {
         account_id: i32,
         key: SessionKey,
         close: Arc<Notify>,
-        tx: UnboundedSender<Outbound>,
+        tx: Sender<Outbound>,
         notice: Outbound,
     ) -> Option<SessionKey> {
         let mut logins = self.logins.lock().unwrap_or_else(PoisonError::into_inner);
@@ -290,7 +310,7 @@ impl Registry {
             // Queued before the wake, so the frame is already in the channel when
             // the holder's loop sees `close` and drains it below. `send` fails
             // only once the holder's loop is gone, where there is nobody to tell.
-            let _ = holder_tx.send(notice);
+            let _ = holder_tx.try_send(notice);
             drop(logins);
             holder_close.notify_one();
             return Some(owner);
@@ -306,7 +326,16 @@ impl Registry {
     /// tears the old avatar down (`ServerDB-Person.cpp:1770`), so the new
     /// character starts with no stored head chat — hence `head_chat: None`
     /// rather than carrying the old one over.
-    pub fn register(&self, key: SessionKey, tx: UnboundedSender<Outbound>, info: SessionInfo) {
+    /// `close` is the connection's close signal. A second `register` under the
+    /// same key (the character-switch path) leaves the old `Notify` in place,
+    /// so the read loop keeps the one it armed at startup.
+    pub fn register(
+        &self,
+        key: SessionKey,
+        tx: Sender<Outbound>,
+        close: Arc<Notify>,
+        info: SessionInfo,
+    ) {
         self.lock().insert(
             key,
             OnlineSession {
@@ -316,6 +345,7 @@ impl Registry {
                 friends: Vec::new(),
                 last_activity_ms: None,
                 tx,
+                close,
             },
         );
     }
@@ -349,7 +379,7 @@ impl Registry {
                 // Broadcast to near block (excluding self, which is already going away)
                 for (other_key, other) in sessions.iter() {
                     if *other_key != key && is_near(&info, &other.info) {
-                        let _ = other.tx.send(Outbound {
+                        let _ = other.tx.try_send(Outbound {
                             cmd: GameMsg::ResponseLogout as u16,
                             payload: payload.clone(),
                         });
@@ -610,11 +640,30 @@ impl Registry {
     /// A send to a connection that just disconnected is not an error: the frame
     /// is dropped, exactly as the legacy's `SendNetMsg` on a sessionless
     /// character would.
+    ///
+    /// A **full** queue is different: this is a direct reply the peer is
+    /// waiting on, so a session too lagging to take it is closed rather than
+    /// left half-answered (audit A1). The close is cooperative — the entry is
+    /// removed by the connection's own `Registered` drop, so the registry is
+    /// never left holding a session whose reader has already gone.
     pub fn send_to(&self, key: SessionKey, cmd: u16, payload: Vec<u8>) -> bool {
-        match self.lock().get(&key) {
-            Some(session) => session.tx.send(Outbound { cmd, payload }).is_ok(),
-            None => false,
-        }
+        let close = {
+            let sessions = self.lock();
+            let Some(session) = sessions.get(&key) else {
+                return false;
+            };
+            match session.tx.try_send(Outbound { cmd, payload }) {
+                Ok(()) => return true,
+                Err(TrySendError::Closed(_)) => return false,
+                Err(TrySendError::Full(_)) => session.close.clone(),
+            }
+        };
+        logln_err!(
+            "game: session {key}: outbound queue saturated on a direct reply; closing the \
+             lagging session"
+        );
+        close.notify_one();
+        false
     }
 
     /// Queues one frame for **every** connected character, the speaker
@@ -633,7 +682,7 @@ impl Registry {
         for session in sessions.values() {
             if session
                 .tx
-                .send(Outbound {
+                .try_send(Outbound {
                     cmd,
                     payload: payload.clone(),
                 })
@@ -787,6 +836,10 @@ impl Registry {
     }
 
     /// The shared fan. `skip` is the one key to leave out.
+    ///
+    /// A lagging subscriber (a full outbound queue) silently misses this frame
+    /// — see [`Registry::broadcast_all`] on why dropping beats growing (audit
+    /// A1).
     fn fan(
         &self,
         origin: &SessionInfo,
@@ -802,7 +855,7 @@ impl Registry {
             }
             if session
                 .tx
-                .send(Outbound {
+                .try_send(Outbound {
                     cmd,
                     payload: payload.clone(),
                 })
@@ -838,7 +891,7 @@ impl Registry {
             }
             if session
                 .tx
-                .send(Outbound {
+                .try_send(Outbound {
                     cmd,
                     payload: payload.clone(),
                 })
@@ -931,7 +984,7 @@ impl Registry {
             }
             if session
                 .tx
-                .send(Outbound {
+                .try_send(Outbound {
                     cmd,
                     payload: payload.clone(),
                 })
@@ -1025,7 +1078,7 @@ fn counts_as_activity(cmd: u16) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::sync::mpsc::{UnboundedReceiver, error::TryRecvError};
+    use tokio::sync::mpsc::{Receiver, error::TryRecvError};
 
     /// A character with the defaults a chat test cares about: one map, one
     /// cell, one home village.
@@ -1047,15 +1100,15 @@ mod tests {
     }
 
     /// Registers a connection and hands back its key and its inbox.
-    fn join(registry: &Registry, info: SessionInfo) -> (SessionKey, UnboundedReceiver<Outbound>) {
+    fn join(registry: &Registry, info: SessionInfo) -> (SessionKey, Receiver<Outbound>) {
         let key = Registry::next_key();
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        registry.register(key, tx, info);
+        let (tx, rx) = tokio::sync::mpsc::channel(OUTBOUND_CAP);
+        registry.register(key, tx, Arc::new(Notify::new()), info);
         (key, rx)
     }
 
     /// Nothing queued, as distinct from "the sender is gone".
-    fn assert_silent(rx: &mut UnboundedReceiver<Outbound>, what: &str) {
+    fn assert_silent(rx: &mut Receiver<Outbound>, what: &str) {
         assert!(
             matches!(rx.try_recv(), Err(TryRecvError::Empty)),
             "{what}: expected no frame"
@@ -1124,7 +1177,7 @@ mod tests {
             cmd,
             payload: vec![cmd as u8],
         };
-        let (first_tx, mut first_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (first_tx, mut first_rx) = tokio::sync::mpsc::channel(OUTBOUND_CAP);
 
         assert_eq!(
             registry.claim_login(7, first, first_close.clone(), first_tx.clone(), notice(0)),
@@ -1136,7 +1189,7 @@ mod tests {
                 7,
                 second,
                 Arc::new(Notify::new()),
-                tokio::sync::mpsc::unbounded_channel().0,
+                tokio::sync::mpsc::channel(OUTBOUND_CAP).0,
                 notice(GameMsg::ResponseAnotherauth as u16),
             ),
             Some(first),
@@ -1168,7 +1221,7 @@ mod tests {
                 8,
                 second,
                 Arc::new(Notify::new()),
-                tokio::sync::mpsc::unbounded_channel().0,
+                tokio::sync::mpsc::channel(OUTBOUND_CAP).0,
                 notice(0),
             ),
             None,
@@ -1184,7 +1237,7 @@ mod tests {
                 7,
                 second,
                 Arc::new(Notify::new()),
-                tokio::sync::mpsc::unbounded_channel().0,
+                tokio::sync::mpsc::channel(OUTBOUND_CAP).0,
                 notice(0),
             ),
             None,
@@ -1199,11 +1252,12 @@ mod tests {
     fn re_registering_a_connection_replaces_the_row_and_clears_head_chat() {
         let registry = Registry::new();
         let key = Registry::next_key();
-        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        registry.register(key, tx.clone(), info(11, "First", 1, 1));
+        let (tx, _rx) = tokio::sync::mpsc::channel(OUTBOUND_CAP);
+        let close = Arc::new(Notify::new());
+        registry.register(key, tx.clone(), close.clone(), info(11, "First", 1, 1));
         registry.set_head_chat(key, Some("look at me".into()));
 
-        registry.register(key, tx, info(12, "Second", 2, 2));
+        registry.register(key, tx, close, info(12, "Second", 2, 2));
         assert_eq!(registry.info(key).unwrap().name, "Second");
         assert_eq!(registry.head_chat(key), None, "the switch was reset");
     }

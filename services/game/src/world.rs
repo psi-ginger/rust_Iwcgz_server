@@ -785,12 +785,13 @@ mod tests {
         char_unique: i16,
         x: i32,
         y: i32,
-    ) -> (SessionKey, tokio::sync::mpsc::UnboundedReceiver<Outbound>) {
+    ) -> (SessionKey, tokio::sync::mpsc::Receiver<Outbound>) {
         let key = Registry::next_key();
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, rx) = tokio::sync::mpsc::channel(crate::registry::OUTBOUND_CAP);
         registry.register(
             key,
             tx,
+            std::sync::Arc::new(tokio::sync::Notify::new()),
             SessionInfo {
                 char_unique,
                 name: "Tester".to_owned(),

@@ -365,6 +365,7 @@ dependencies = [
  "gz-net",
  "gz-proto",
  "gz-sim",
+ "socket2",
  "sqlx",
  "tokio",
 ]

@@ -1562,10 +1562,11 @@ mod tests {
 
         let registry = Registry::new();
         let key = Registry::next_key();
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Outbound>();
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<Outbound>(crate::registry::OUTBOUND_CAP);
         registry.register(
             key,
             tx,
+            std::sync::Arc::new(tokio::sync::Notify::new()),
             SessionInfo {
                 char_unique: 1000,
                 name: "Watcher".to_owned(),
@@ -2084,10 +2085,11 @@ mod tests {
 
         let registry = Registry::new();
         let key = Registry::next_key();
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Outbound>();
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<Outbound>(crate::registry::OUTBOUND_CAP);
         registry.register(
             key,
             tx,
+            std::sync::Arc::new(tokio::sync::Notify::new()),
             SessionInfo {
                 char_unique: 1000,
                 name: "Killer".to_owned(),
@@ -2147,7 +2149,7 @@ mod tests {
             "the body leaves the world at once, so nothing can walk into or target it"
         );
 
-        let logouts = |rx: &mut tokio::sync::mpsc::UnboundedReceiver<Outbound>| {
+        let logouts = |rx: &mut tokio::sync::mpsc::Receiver<Outbound>| {
             let mut found = Vec::new();
             while let Ok(out) = rx.try_recv() {
                 if out.cmd == GameMsg::ResponseLogout as u16 {
@@ -2230,10 +2232,11 @@ mod tests {
 
         let registry = Registry::new();
         let key = Registry::next_key();
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Outbound>();
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<Outbound>(crate::registry::OUTBOUND_CAP);
         registry.register(
             key,
             tx,
+            std::sync::Arc::new(tokio::sync::Notify::new()),
             SessionInfo {
                 char_unique: 1000,
                 name: "Victim".to_owned(),
@@ -2341,11 +2344,12 @@ mod tests {
             registry: &Registry,
             char_unique: i16,
             name: &str,
-        ) -> tokio::sync::mpsc::UnboundedReceiver<Outbound> {
-            let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Outbound>();
+        ) -> tokio::sync::mpsc::Receiver<Outbound> {
+            let (tx, rx) = tokio::sync::mpsc::channel::<Outbound>(crate::registry::OUTBOUND_CAP);
             registry.register(
                 Registry::next_key(),
                 tx,
+                std::sync::Arc::new(tokio::sync::Notify::new()),
                 SessionInfo {
                     char_unique,
                     name: name.to_owned(),
@@ -2454,10 +2458,11 @@ mod tests {
 
         let registry = Registry::new();
         let key = Registry::next_key();
-        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<Outbound>();
+        let (tx, _rx) = tokio::sync::mpsc::channel::<Outbound>(crate::registry::OUTBOUND_CAP);
         registry.register(
             key,
             tx,
+            std::sync::Arc::new(tokio::sync::Notify::new()),
             SessionInfo {
                 char_unique: 1000,
                 name: "Victim".to_owned(),
@@ -2572,10 +2577,11 @@ mod tests {
         for seed in 1..=SEEDS {
             let registry = Registry::new();
             let key = Registry::next_key();
-            let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<Outbound>();
+            let (tx, _rx) = tokio::sync::mpsc::channel::<Outbound>(crate::registry::OUTBOUND_CAP);
             registry.register(
                 key,
                 tx,
+                std::sync::Arc::new(tokio::sync::Notify::new()),
                 SessionInfo {
                     char_unique: 1000,
                     name: "Victim".to_owned(),
@@ -2836,10 +2842,11 @@ mod tests {
         // wall-clock time, which a tight loop never grants.
         world.monsters[0].walk = None;
         let key = Registry::next_key();
-        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<Outbound>();
+        let (tx, _rx) = tokio::sync::mpsc::channel::<Outbound>(crate::registry::OUTBOUND_CAP);
         registry.register(
             key,
             tx,
+            std::sync::Arc::new(tokio::sync::Notify::new()),
             SessionInfo {
                 char_unique: 1000,
                 name: "Returner".to_owned(),

@@ -15,6 +15,9 @@ gz-proto = { path = "../../crates/gz-proto" }
 # idle clock in `registry.rs` feeds.
 gz-sim = { path = "../../crates/gz-sim" }
 tokio = { version = "1", features = ["full"] }
+# TCP keepalive on accepted sockets, set without leaving tokio's type:
+# `SockRef::from(&TcpStream)` reaches the OS socket on both platforms.
+socket2 = "0.6"
 # `SlotOccupancy` (the one item question a quest condition asks) and the
 # repository seams the quest handlers take are `async_trait` objects, like the
 # ones in `gz-db`.
@@ -26,3 +29,6 @@ async-trait = "0.1"
 # The movement tests build a `LiveFrames`, which carries an item repository but
 # never reads it on the step path; a lazy pool keeps them off a database.
 sqlx = { version = "0.8", features = ["postgres", "runtime-tokio"] }
+# Paused-clock tests (`#[tokio::test(start_paused)]`) for the handshake
+# deadline and the write timeout.
+tokio = { version = "1", features = ["full", "test-util"] }
