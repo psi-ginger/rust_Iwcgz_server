@@ -3,11 +3,15 @@
 **Player band (strict) + Tier 1 / Tier 2 / Tier 3 monster pools, with mutual safe
 buffering between Tier 1 ↔ Tier 2 only.**
 
-> **Status: v3 — P0 evidence applied; P1 implementation authorized.**
-> Date: 2026-10-19. §8 items 1–4 **and** the `MonsterEntityId` enum are APPROVED by
-> Cat (PsiGinger); Gate 0/0b have been executed and re-anchor the client walls
-> (§2.3–§2.4 — the v2 byte-scan conclusion is retracted). This commit = docs only
-> (P0); code lands as the following P1 commit.
+> **Status: v4 — R-G0 RESOLVED (Approach 1, Cat 2026-10-20): the big player band
+> lands with the client rebuild; P1 shipped and stays as-is until then.**
+> Date: 2026-10-20. §8.7 records the decision — the horizon partition is players
+> `1..=20_000`, town/static NPCs `20_001..=29_999`, monsters `30_000+` (all three
+> tiers); the interim keeps P1's `1..=8_499`, which the stock client renders
+> cleanly at today's population (active test players well under 3,000). §8 items
+> 1–4 **and** the `MonsterEntityId` enum were APPROVED by Cat (PsiGinger)
+> 2026-10-19; Gate 0/0b re-anchor the client walls (§2.3–§2.4 — the v2 byte-scan
+> conclusion is retracted). P0 = `f39a186`, P1 = `03f25f9`; this commit = docs only.
 >
 > This document **supersedes the two-tier draft** (`DESIGN_TWO_TIER_HYBRID_ID_ARCHITECTURE.md`,
 > removed — never committed) and incorporates Cat's finalized structural design.
@@ -130,15 +134,17 @@ item-unique tables).**
   aliased entity, exactly as the source tree predicts. Every wall in §2.4 is re-anchored
   to this measurement; Gate 0b additionally surfaced **R-G0** (§8.7): the batch-2
   player band `3000..=8499` sits inside the client's *instance-NPC* classification and
-  fails every `IsPC` gate once the login wrap crosses 2999.
+  fails every `IsPC` gate once the login wrap crosses 2999 — **resolved §8.7**: the
+  horizon client patch raises `IsPC` to `≤ 20_000`.
 
 ### 2.4 The ceilings, mapped to Cat's tiers (Gate 0 re-anchored)
 
 | Ceiling | Basis | Tier impact |
 |---|---|---|
 | **19,999** | client tables + `IsNPC` upper (`MAX_CHAR_NUMBER − 1`, Gate 0 §2.3) | **live wall for every char id**: Tier 1 + live Tier 2 slice `19_000..=19_999` |
-| **29,999** | Cat's structural boundary; requires client rebuild `MAX_CHAR_NUMBER ≥ 30_000` | Tier 2 structural top — the `20_000..=29_999` slice is **P2-gated on that rebuild** (§4) |
-| **2,999** | client `IsPC` upper (Gate 0b, ×217 sites) | player band currently `1..=8_499` overshoots client PC classification → **decision §8.7** |
+| **29,999** | Cat's structural boundary; requires client rebuild `MAX_CHAR_NUMBER ≥ 30_000` | interim Tier 2 structural top; **under Approach 1 (§8.7) that slice becomes the town/static-NPC band** after the rebuild and monsters move to `30_000+` |
+| **20,000** | rebuilt client's `IsPC` upper and player-band top (Approach 1, §8.7) | horizon player band `1..=20_000` — 20,000 concurrent; the patch makes id `20_000` itself a valid PC index |
+| **2,999** | stock client's `IsPC` upper (Gate 0b, ×217 sites) | interim: player band `1..=8_499` overshoots it → **R-G0 resolved §8.7** — kept deliberately until the horizon patch |
 | **32,767** | SI16 frames (§2.2) — interactive entities | **Tier 3 interim top** (P3) |
 | 65,535 | UI16 spawn key | Tier 3 max `59_999` fits; full reach needs P4 widening |
 
@@ -181,6 +187,32 @@ item-unique tables).**
 
 Static NPC placements stay pinned at `8_500 + index` — a reserved slice *inside* Tier 1,
 never pooled; their legacy `IsNPC` test (`npc.rs:347`) is unaffected.
+
+**Horizon partition — Approach 1 (Cat, 2026-10-20, client-patch gated; §8.7):** the
+table above is the *interim* partition the stock client renders today. The roadmap's
+client rebuild re-slices the namespace flat:
+
+```
+1        20,000 20,001        29,999 30,000 ..
+|          PLAYER          |  TOWN & STATIC NPCS  |    MONSTERS (T1/T2/T3)    |
+|          20,000          |       ~10,000        |  expanded past the 30k     |
+|                           |                      |  legacy barrier            |
+```
+
+- **Player band `1..=20_000`** — 20,000 concurrent players; the patched client's
+  `IsPC` covers `≤ 20_000` (growing the client's char tables so id `20_000` itself
+  indexes a PC entry is rebuild scope).
+- **Town & static NPCs `20_001..=29_999`** — ~10,000 slots; static placements
+  relocate from `8_500 + index` to this band as a rebuild-phase step.
+- **Monsters `30_000+`** — all three tiers relocate here; the T1↔T2 mutual buffer and
+  Tier-3 isolation (§3.2) are unchanged, only their windows move. Exact tier
+  boundaries above `30_000` are settled in the rebuild phase; the SI16 rules (§2.2)
+  still cap interactive frames at `32_767` until the P4 widening.
+
+The interim → horizon switch is **atomic with the client patch**: the stock client
+cannot render the horizon partition (ids ≥ 20,000 are dead/aliased, §2.3), and the
+server's band constants (`PLAYER_BAND_TOP`, the NPC base, the pool floors) flip in
+the same release as the patch — one client build, one constants flip.
 
 ### 3.2 Buffer spilling & protection policy (the matrix)
 
@@ -263,7 +295,11 @@ pub enum MonsterEntityId {
   `T2_TOP = 19_999` (= `CLIENT_TABLE_TOP − 1`, the live wall; the **P2** phase rewrites
   this one constant to `29_999` only after the §4 client rebuild),
   `T3_FLOOR = 30_000`, `T3_TOP = 59_999`, `WIRE_SI16_TOP = 32_767`,
-  `CLIENT_TABLE_TOP = 20_000` (Gate 0, §2.3).
+  `CLIENT_TABLE_TOP = 20_000` (Gate 0, §2.3). These are the *interim* (P1) values; the
+  horizon release (§8.7) flips them to the big-partition constants — players
+  `1..=20_000`, NPCs `20_001..=29_999`, monster windows above `30_000` — as a
+  constants-only change riding the client patch (`T2_TOP` already derives from
+  `CLIENT_TABLE_TOP`).
 
 ### 3.5 Allocator design — Cat deliverable 2
 
@@ -311,10 +347,10 @@ impl IdAllocator {
 
 | Tier band | Needs | Status |
 |---|---|---|
-| Player `1..=8_499` | nothing beyond today | live (batch 2) — **⚠ client `IsPC` covers only `1..=2999` → R-G0, §8.7** |
+| Player `1..=8_499` (interim) | nothing beyond today | live since batch 2 — the `IsPC` overshoot is **R-G0 resolved (§8.7)**: kept deliberately; active players < 3,000 keep the stock client clean today, and the horizon patch raises `IsPC` to `≤ 20_000` |
 | Tier 1 `8_500..=18_999` | nothing beyond today | live (batch 2); re-sliced at P1 |
 | Tier 2 up to `19_999` | nothing beyond today (= `CLIENT_TABLE_TOP − 1`, Gate 0) | live (batch 2) |
-| Tier 2 `20_000..=29_999` | **client rebuild** `MAX_CHAR_NUMBER ≥ 30_000` (Gate 0/0b **executed**: wall measured 19,999; ids ≥ 20,000 are dead/aliased on the current client, §2.3) | **P2** |
+| **Horizon release** (Approach 1 §8.7): player `1..=20_000` + NPC `20_001..=29_999` + monster windows `30_000+` | **client rebuild** — `IsPC ≤ 20_000`, char tables grown past `MAX_CHAR_NUMBER = 20_000` (Gate 0/0b **executed**: ids ≥ 20,000 are dead/aliased on the current client, §2.3), static/town NPCs relocated; server band constants flip atomically with the patch | **P2 (redefined, §8.7)** |
 | Tier 3 `30_000..=32_767` | client rebuild: `MAX_CHAR_NUMBER ≥ 32_768` (recommend 60_000+; one macro + rebuild, Cat's fork) | **P3** |
 | Tier 3 `32_768..=59_999` | above **and** SI16 → UI16 widening on the monster-carrying frames (hit 268, JIM 263, order-target `siPara2` — server parse/encode **and** the same frames in the client fork, plus a fork-side sweep of other `CharUniqueInfo`-style index sites) | **P4** |
 
@@ -322,6 +358,9 @@ Until its gate passes, Tier 3 does not issue (`tier3_level_floor = None` default
 §3.3): high-level monsters keep spawning through the standard pools within today's
 wire-safe ranges — **no crash path, no capability regression.** Same logic covers
 `20_000..=29_999` pre-rebuild: `T2_TOP = 19_999` simply never issues there (§3.4).
+Under Approach 1 (§8.7) that pre-rebuild restraint also covers the whole horizon:
+nothing above `19_999` is issued until the rebuild lands; after it, P3's tier-3
+activation happens inside the relocated `30_000+` monster space (§6).
 
 **Gate 0 result (run 2026-10-19, §2.3):** verdict `MAX_CHAR_NUMBER = 20000` via
 Capstone instruction sweep (REA providers unconfigured on the host) — the prior
@@ -473,12 +512,13 @@ pure in-memory namespacing); session allocation wrap (batch 2, `main.rs:226-241`
 |---|---|---|---|
 | **P0 — evidence (DONE 2026-10-19)** | Gate 0 disasm run (§2.3: verdict `MAX_CHAR_NUMBER = 20000`, prior byte scan retracted); Gate 0b classification pass (IsPC/IsInstanceNPC/IsNPC measured, R-G0 raised); SI16 monster-carrying frame inventory (hit 268 / JIM 263 / order-target confirmed; person frames excluded as PC-only) | none | — |
 | **P1 — structure at today's wire behavior** | `ids.rs` types + `IdAllocator` (standard `DualTierPool` + isolated Tier-3 `WindowPool`; player wrap untouched §3.5) wired through main/registry/monsters; **T2 top capped at `19_999`** so no id beyond the measured wall (§2.3) is ever issued; tier-assignment present but `tier3_level_floor = None`; T7 reworked, T9–T12 added; `MAX_CHAR_NUMBER` retired | none | same id *ranges* as today (`8_500..=19_999`); id *sequence* shifts once T1 fills (opaque to clients) |
-| **P2 — Tier 2 opens** | `T2_TOP` `19_999 → 29_999` after the client rebuild below | **client rebuild `MAX_CHAR_NUMBER ≥ 30_000`** (was "evidence sign-off" — Gate 0 converted it into a build dependency) | standard pools **21,500** (−N) ≈ 1.9× today's 11,500 — the x2/x3 world density + crowded-dungeon headroom, shared by mutual buffering |
-| **P3 — Tier 3 activation** | `tier3_level_floor` default `Some(100)` (tunable to `Some(80)` under Tier-2 pressure); `spawn_tier3` / endgame consumers; **T3 issuance capped `30_000..=32_767`** (SI16-interactive) | client rebuild `MAX_CHAR_NUMBER ≥ 60_000` | +2,768 isolated endgame ids |
+| **P2 — horizon release (redefined by Approach 1, §8.7)** | one client rebuild + one server constants flip, atomically: client `IsPC` `≤ 2_999 → ≤ 20_000` and char tables grown past `MAX_CHAR_NUMBER = 20_000`; server `PLAYER_BAND_TOP → 20_000`, static/town NPCs relocate to `20_001..=29_999`, every monster tier relocates to `30_000+` (exact windows settled here) | **client rebuild** (the build dependency Gate 0 exposed, now carrying the player-band patch too) | players **20,000** · town/static NPCs ~10,000 · monsters = the ≥30,000 windows |
+| **P3 — Tier 3 activation** (inside the relocated ≥30,000 monster space) | `tier3_level_floor` default `Some(100)` (tunable to `Some(80)` under Tier-2 pressure); `spawn_tier3` / endgame consumers; **T3 issuance capped `30_000..=32_767`** (SI16-interactive) | client tables reaching `≥ 60_000` on top of the P2 rebuild | +2,768 isolated endgame ids |
 | **P4 — full Tier 3** | SI16 → UI16 widening on hit 268 / JIM 263 / order-target (server parse/encode + client-fork frames; fork sweep of other `CharUniqueInfo` index sites); `T3_TOP 59_999` fully reachable; `try_si16` retired at migrated sites | client fork frame widening | full **30,000** Tier-3 ids |
 
-Capacity summary: player 8,499 (unchanged, strict) · standard 11,500 → **21,500** (P2)
-· Tier 3 → 2,768 (P3) → **30,000** (P4). Total namespace 59,999.
+Capacity summary (interim, as shipped P1): player 8,499 (strict) · standard 11,500
+· Tier 3 → 2,768 (P3) → 30,000 (P4). Horizon (Approach 1 §8.7): player **20,000**
+· town/static NPCs ~10,000 · all monster tiers `30_000+` — windows settled at P2.
 
 ---
 
@@ -551,18 +591,25 @@ Capacity summary: player 8,499 (unchanged, strict) · standard 11,500 → **21,5
 
 **Still open:**
 
-6. **Client-fork scheduling (yours):** P2 = `MAX_CHAR_NUMBER ≥ 30_000` rebuild
-   (Gate 0 converted this from an evidence gate into a build dependency), P3 = ≥ 60_000,
+6. **Client-fork scheduling (yours):** P2 = the §8.7 horizon rebuild (`IsPC ≤ 20_000`,
+   char tables grown past `MAX_CHAR_NUMBER = 20_000` — Gate 0 converted this from an
+   evidence gate into a build dependency), P3 = tables reaching `≥ 60_000`,
    P4 = SI16→UI16 on hit 268 / JIM 263 / order-target + fork-side sweep of other
    char-unique index sites.
-7. **R-G0 — player band vs client `IsPC` (new, from Gate 0b).** Measured `IsPC =
-   1..=2999` (217 zero-check sites, §2.3); batch-2's wrap issues ids `3000..=8499`
-   after ~3k cumulative logins, and the client classifies that range as **instance NPC**
-   (`IsInstanceNPC`), so person paths gated on `IsPC` (draw / chat / mouse / auto-hunt)
-   may mishandle such a *player*. P1 keeps `1..=8_499` exactly as specified. **My
-   recommendation:** narrow `PLAYER_CHAR_UNIQUE_TOP` `8499 → 2999` (legacy-exact: wrap,
-   register gate, `PlayerCharUnique` invariant, T6 — one-constant follow-up batch).
-   Needs your call; not folded into P1.
+7. **R-G0 — player band vs client `IsPC`: RESOLVED — Approach 1, big player band
+   (Cat, 2026-10-20).** Measured `IsPC = 1..=2999` (217 zero-check sites, §2.3);
+   batch-2's wrap issues ids `3000..=8499` after ~3k cumulative logins, and the stock
+   client classifies that range as **instance NPC** (`IsInstanceNPC`), so person paths
+   gated on `IsPC` (draw / chat / mouse / auto-hunt) may mishandle such a *player*.
+   **Decision (Cat): do not narrow to `2_999`** — adopt the big player band, with the
+   client rebuild already on the roadmap doing the work. Horizon partition (§3.1):
+   players `1..=20_000` (`IsPC` patched `≤ 2_999 → ≤ 20_000`; 20,000 concurrent),
+   town & static NPCs `20_001..=29_999` (~10,000 slots), monsters `30_000+` (all three
+   tiers, past the legacy 30k barrier). **Interim:** P1 stays exactly as shipped —
+   `1..=8_499`, and with active test players well under 3,000 the stock client runs
+   cleanly with no visual glitches. The interim → horizon switch is atomic with the
+   client patch (§3.1 horizon block, §4, §6-P2); no server code changes this batch —
+   the constants flip rides P2.
 8. **Audit bookkeeping:** assign H-item numbers/batches for P1–P4 in
    `AUDIT_WHOLE_SYSTEM_HARDENING.md` §8 (or track this design as a separate track).
 9. **Method note:** REA's deep providers were unconfigured on this host (no Ghidra
