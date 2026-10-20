@@ -190,8 +190,9 @@ struct Monster {
     ///
     /// Independent of [`Monster::target`] and far more stubborn: the first
     /// player to hit takes it and it is **not** released when combat ends —
-    /// only death or another player displacing it clears it, and
-    /// `SetBeJimed` refuses a second host outright (`Char-Common.cpp:6226`).
+    /// only death, the host switching its own bar to another monster, or
+    /// another player displacing it clears it, and `SetBeJimed` refuses a
+    /// second host outright (`Char-Common.cpp:6226`).
     /// It is also the only thing that can raise an ordinary mob's overhead
     /// health bar, which is the whole reason it is worth carrying here — see
     /// [`crate::game::encode_jim`].
@@ -350,6 +351,11 @@ pub(crate) struct MonsterWorld {
     /// corpse cannot be walked into, targeted, or announced to someone who
     /// walks in late.
     corpses: Vec<(Monster, u64)>,
+    /// `attacker char_unique -> the monster it last jIMMed` — who has an
+    /// overhead bar up, per attacker, so a swing that switches monsters can
+    /// take the old bar down again (the un-jim in [`Self::hit_by_player`]).
+    /// At most one entry per attacker; a new jim replaces the old one.
+    jim_by: HashMap<i16, MonsterEntityId>,
     /// Map 0 itself, so the ground can be judged for a *player* and not only for
     /// a spawning monster. `None` in [`MonsterWorld::empty`], which has no ground
     /// either — nothing can be approached from an unloaded world.
@@ -519,6 +525,7 @@ impl MonsterWorld {
             ids: IdAllocator::new(),
             respawn: Vec::new(),
             corpses: Vec::new(),
+            jim_by: HashMap::new(),
             map: Some(map),
             block_by_kind,
             dormancy: MapDormancyManager::new(),
@@ -904,6 +911,14 @@ impl MonsterWorld {
             // removes the avatar goes out when [`Self::despawn_corpses`] runs
             // the deadline down.
             self.corpses.push((monster, now_ms + CORPSE_MS));
+            // The bar this monster carried dies with it: drop the host's
+            // pointer so an id the pool reissues later is not un-jimmed as
+            // if the corpse's fight were still on.
+            if let Some(host) = monster.jim_host
+                && self.jim_by.get(&host) == Some(&monster.unique)
+            {
+                self.jim_by.remove(&host);
+            }
             // A boss group's `Interval` (seconds in the file, ms at load —
             // `NPC.cpp:223`) is its respawn delay: the legacy holds the whole
             // group dark for the window and only then drip-refills it
@@ -953,17 +968,47 @@ impl MonsterWorld {
                 }
                 Some(host) => host == attacker,
             };
-            // Pre-P4 a Tier-3 id above the SI16 cap has no 263 frame to carry
-            // (§4); no pool mints one until P3, so this is the frame-skip rule
-            // rather than a live path.
-            if jimed && let Some(jimed_unique) = monster.unique.si16() {
-                registry.broadcast_near_point(
-                    FIELD_MAP,
-                    monster.x,
-                    monster.y,
-                    GameMsg::ResponseJim as u16,
-                    encode_jim(jimed_unique, attacker),
-                );
+            if jimed {
+                // The legacy never takes a jim back — `SetBeJimed` refuses a
+                // second host outright (`Char-Common.cpp:6226`) — so a player
+                // who switches targets inside a stacked cluster leaves every
+                // old monster's overhead bar up at once, and stacked sprites
+                // draw those bars at one screen position (the live report:
+                // one bar jumping between raccoons' life values). The 263 is
+                // the bar's only trigger, so it is also its only undo: the
+                // client's handler runs `clJim.Init()` *before* `SetBeJimed`
+                // (`Client-Person.cpp:508-512`) and the draw gate re-reads
+                // `siJimHostCharUnique` every frame (`Char-Draw.cpp:1174`,
+                // `:2775`), so the same frame addressed to the old monster
+                // with the host field cleared (0) takes its stale bar down.
+                if let Some(previous) = self.jim_by.insert(attacker, monster.unique)
+                    && previous != monster.unique
+                    && let Some(stale) = self.monsters.iter().position(|m| m.unique == previous)
+                    && self.monsters[stale].jim_host == Some(attacker)
+                    && let Some(stale_unique) = self.monsters[stale].unique.si16()
+                {
+                    let (x, y) = (self.monsters[stale].x, self.monsters[stale].y);
+                    self.monsters[stale].jim_host = None;
+                    registry.broadcast_near_point(
+                        FIELD_MAP,
+                        x,
+                        y,
+                        GameMsg::ResponseJim as u16,
+                        encode_jim(stale_unique, 0),
+                    );
+                }
+                // Pre-P4 a Tier-3 id above the SI16 cap has no 263 frame to
+                // carry (§4); no pool mints one until P3, so this is the
+                // frame-skip rule rather than a live path.
+                if let Some(jimed_unique) = monster.unique.si16() {
+                    registry.broadcast_near_point(
+                        FIELD_MAP,
+                        monster.x,
+                        monster.y,
+                        GameMsg::ResponseJim as u16,
+                        encode_jim(jimed_unique, attacker),
+                    );
+                }
             }
         }
 
@@ -2690,6 +2735,135 @@ mod tests {
             world.monsters[0].jim_host,
             Some(1000),
             "and it stays the first attacker's"
+        );
+    }
+
+    /// A player who switches targets inside a stack takes the old monster's
+    /// bar down: the port sends the previously jimmned monster a 263 with the
+    /// host field cleared — the only frame that can undo a bar, since the
+    /// client's handler `clJim.Init()`s before `SetBeJimed` and the draw gate
+    /// re-reads the host every frame.
+    #[test]
+    fn switching_targets_un_jims_the_previous_monster() {
+        use crate::registry::{Outbound, SessionInfo};
+
+        fn register(
+            registry: &Registry,
+            char_unique: i16,
+            name: &str,
+        ) -> tokio::sync::mpsc::Receiver<Outbound> {
+            let (tx, rx) = tokio::sync::mpsc::channel::<Outbound>(crate::registry::OUTBOUND_CAP);
+            registry.register(
+                Registry::next_key(),
+                tx,
+                std::sync::Arc::new(tokio::sync::Notify::new()),
+                SessionInfo {
+                    char_unique: pc(char_unique),
+                    name: name.to_owned(),
+                    level: 1,
+                    map_id: FIELD_MAP,
+                    x: 0,
+                    y: 0,
+                    school_id: 0,
+                    class_kind: 1,
+                    life: 40,
+                    move_speed: 12,
+                    sex: 1,
+                    gm_level: 0,
+                },
+            );
+            rx
+        }
+
+        let registry = Registry::new();
+        let mut rx = register(&registry, 1000, "Attacker");
+
+        let mut world = MonsterWorld::empty();
+        world.groups.push(FieldGroup {
+            anchor: SpawnGroup {
+                map_index: FIELD_MAP,
+                center_x: 0,
+                center_y: 0,
+                radius: 1,
+            },
+            capacity: 2,
+            boss: false,
+            respawn_ms: RESPAWN_MS,
+            units: vec![SpawnUnit {
+                wire_kind: 15,
+                level: 1,
+                max_num: 2,
+                move_speed: 12,
+                life: 20,
+                tiles: vec![(0, 0), (1, 0)],
+                min_atk: 1,
+                max_atk: 1,
+                ac: 0,
+                exp: 0,
+                aggressive: 0,
+                range: 1,
+                attack_interval: 2_000,
+                critical_rate: 0,
+                drops: &[],
+            }],
+        });
+        world.spawn_all(&Registry::new());
+        assert_eq!(world.monsters.len(), 2, "the group spawns both racers");
+        let first = world.monsters[0].unique;
+        let second = world.monsters[1].unique;
+        let first_wire = first.si16().expect("a standard id fits the 263 frame");
+        let second_wire = second.si16().expect("a standard id fits the 263 frame");
+        let mut rng = Rng::new(1);
+
+        world
+            .hit_by_player(&registry, first.u16(), 1000, 5, 1_000, &mut rng)
+            .expect("the hit lands");
+        let mut frames = Vec::new();
+        while let Ok(out) = rx.try_recv() {
+            frames.push(out);
+        }
+        assert_eq!(
+            frames
+                .iter()
+                .filter(|f| f.cmd == GameMsg::ResponseJim as u16)
+                .count(),
+            1,
+            "the first hit jims the first monster and nothing else"
+        );
+
+        world
+            .hit_by_player(&registry, second.u16(), 1000, 5, 1_000, &mut rng)
+            .expect("the hit lands");
+        let mut frames = Vec::new();
+        while let Ok(out) = rx.try_recv() {
+            frames.push(out);
+        }
+        let jims: Vec<_> = frames
+            .iter()
+            .filter(|f| f.cmd == GameMsg::ResponseJim as u16)
+            .collect();
+        assert_eq!(
+            jims.len(),
+            2,
+            "switching targets sends the un-jim and the new jim"
+        );
+        assert!(
+            jims.iter().any(|f| f.payload == encode_jim(first_wire, 0)),
+            "the previous monster is jimmned with the host field cleared"
+        );
+        assert!(
+            jims.iter()
+                .any(|f| f.payload == encode_jim(second_wire, 1000)),
+            "and the new monster gets the bar"
+        );
+        assert_eq!(
+            world.monsters[0].jim_host, None,
+            "the previous bar is released"
+        );
+        assert_eq!(
+            world.monsters[1].jim_host,
+            Some(1000),
+            "and the new one holds it"
         );
     }
 
