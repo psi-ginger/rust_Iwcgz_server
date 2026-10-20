@@ -140,7 +140,7 @@ fn seeded_tester() -> CharacterFull {
         class_kind: 1,
         gender: 1,
         level: 13,
-        max_life: 161,
+        max_life: 173,
         max_mana: 40,
         move_speed: 8,
         exp: 0,
@@ -676,10 +676,31 @@ fn a_login_many_batch_never_exceeds_the_frame_ceiling() {
 /// mag 5 -> 20) and the repaired row's stored values at level 13.
 #[test]
 fn the_derived_maxima_reproduce_the_ddl_defaults_and_the_repaired_seed() {
+    // Level 1 is the continuity pin: vit 5 -> 40 is the `0001` DDL default,
+    // unchanged by §4.3.4 (its level term is 0 at level 1).
     assert_eq!(derived_max_life(5, 1), 40);
     assert_eq!(derived_max_mana(5, 1), 20);
-    assert_eq!(derived_max_life(20, 13), 161);
+    // §4.3.4 retunes the level term tenfold (0.005 -> 0.05 per level): the
+    // level-13 seed row derives 173 under the reformed curve.
+    assert_eq!(derived_max_life(20, 13), 173);
     assert_eq!(derived_max_mana(10, 13), 40);
+}
+
+/// Cat's §4.3.8 weight capacity (approved 2026-10-20), overriding both the
+/// legacy STR-only `(STR * 200) + (Level * 800)` and the baseline doc's own
+/// base-3k variant: `10_000 + Level * 2_000 + max(STR, INT) * 50`.
+#[test]
+fn weight_capacity_walks_the_directives_l1_and_l100_pins() {
+    // Level 1 baseline: 10_000 + 2_000 + 5*50 = 12_250 — the ~12k start.
+    assert_eq!(weight_capacity(1, 5, 5), 12_250);
+    // Level 100, a full STR build: 10_000 + 200_000 + 25_000 = 235_000 — the
+    // top of the directive's ~210k-235k band.
+    assert_eq!(weight_capacity(100, 500, 50), 235_000);
+    // A full INT build carries the same — the stronger of the two governs,
+    // so a caster is not locked out of loot the way the legacy keyed it.
+    assert_eq!(weight_capacity(100, 5, 500), 235_000);
+    // The stat term is flat once it stops governing.
+    assert_eq!(weight_capacity(100, 500, 10), 235_000);
 }
 
 /// The DDL invariant `abilities + bonus == level*5 + 35` rides the level-up:
@@ -725,7 +746,7 @@ fn allocating_spends_bonus_and_raises_the_stat() {
     assert_eq!(out.bonus, 0);
     assert_eq!(out.str_, 25);
     // Vit/mag are untouched, so the derived maxima do not move.
-    assert_eq!((out.max_life, out.max_mana), (161, 40));
+    assert_eq!((out.max_life, out.max_mana), (173, 40));
     // The total is invariant under an allocation: 95 + 5 both ways.
 }
 
@@ -733,7 +754,8 @@ fn allocating_spends_bonus_and_raises_the_stat() {
 fn allocating_vit_recomputes_max_life_from_the_formula() {
     let out = allocate_stat(&seeded_tester(), &UseBonus { pos: 3, amount: 5 }).unwrap();
     assert_eq!(out.vit, 25);
-    assert_eq!(out.max_life, 25 * (8000 + 13 * 5) / 1000); // 201
+    // §4.3.4: vit * (8000 + level*50) / 1000 — 25 * 8650 / 1000 = 216.
+    assert_eq!(out.max_life, 25 * (8000 + 13 * 50) / 1000);
     assert_eq!(out.bonus, 0);
 }
 

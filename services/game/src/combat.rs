@@ -76,30 +76,21 @@ pub(crate) fn level_ac(level: i32) -> i32 {
     level_tier_sum(level) / 2
 }
 
-/// `siStrPHysicalAttackDmg` (`Parametabox.cpp:490-505`) — the STR term, which
-/// is the same number added to an attacker's minimum *and* maximum.
+/// The STR term added to an attacker's minimum *and* maximum — Cat's §4.3.5
+/// reformation (approved 2026-10-20), replacing the legacy
+/// `siStrPHysicalAttackDmg` branch soup (`Parametabox.cpp:490-505`).
 ///
-/// The two arms differ only in the divisor and a trailing `* 6`, which is why a
-/// bow user's STR buys much less than a sword user's at the same interval.
+/// `StrDamage = ⌊STR × (0.20 + 0.01×(Level−1))⌋ + 5×⌊Level/10⌋`, in integer
+/// math: the ratio is `(19 + level)/100`. One formula for every physical
+/// weapon type — the old sword/spear/axe `/20000`, bow `/150000*6` and
+/// staff-zero arms are gone by directive (this also retires the recorded
+/// port-vs-legacy divergence where staff and bare-handed swung for zero).
 ///
-/// `interval` is the weapon's `dwAttackInterval`; the kind table carries it
-/// ([`CharAttackRow::attack_interval`]).
-fn str_damage(attack_type: &str, str_: i32, interval: i32, level: i32) -> i32 {
-    let scaled = str_ * ((interval * 10) + (level * 50));
-    if attack_type.starts_with("ATTACKTYPE_SWORD")
-        || attack_type.starts_with("ATTACKTYPE_SPEAR")
-        || attack_type.starts_with("ATTACKTYPE_AXE")
-    {
-        scaled / 20_000
-    } else if attack_type.starts_with("ATTACKTYPE_BOW") || attack_type.starts_with("ATTACKTYPE_GUN")
-    {
-        // The division truncates before the `* 6`, as in the legacy.
-        scaled / 150_000 * 6
-    } else {
-        // `ATTACKTYPE_STAFF` and the rest of the switch are skills-driven
-        // (`Parametabox.cpp:505-`), which this port has no model for.
-        0
-    }
+/// Spec pins (reproduced exactly by this integer form): L1, 10 STR = +2;
+/// L10, 35 STR = +15; L30, 120 STR = +73; L50, 220 STR = +176;
+/// L100, 550 STR = +704.
+fn str_damage(str_: i32, level: i32) -> i32 {
+    str_ * (19 + level) / 100 + 5 * (level / 10)
 }
 
 /// One hit's variance — `CalcApower`'s `siTotalPHysicalMinAttackDmg +
@@ -136,21 +127,161 @@ pub(crate) fn reduced_by_ac(power: i32, ac: i32) -> i32 {
     if valid <= 0 { 1 } else { valid }
 }
 
-/// One hit's critical. The legacy's gate is the attacker's `siCriticalRate` —
-/// a percent (`kindinfo-Manager.cpp:705`) — and a critical doubles the applied
-/// power.
+/// One hit's critical, by Cat's §4.3.3 reformation (approved 2026-10-20):
+/// **150% base** damage, scaled up by LUK at +0.05%/point to a +50% hard cap
+/// (1000 LUK = ×2.25). The legacy flat doubling (`damage * 2`, roll gate
+/// `rand()%1000` at `Server-Attack.cpp:801`) is replaced wholesale — the base
+/// drops 200%→150% per the approved spec, with LUK buying it back and beyond.
+///
+/// `bonus` is basis-10000: `min(LUK * 5, 5000)` → 0..=5000, so the multiplier
+/// is `3 * (10_000 + bonus) / 20_000` = 1.5..=2.25. Monster swings pass
+/// `0` — the kind table's `siCriticalRate` gates the roll, and no LUK term
+/// exists on the monster side of §4.3.3.
 ///
 /// The *double* damage roll that follows a critical in the shipped client
 /// (`SpecialAttackSwitch == 2`, `Client-Person.cpp:1258`) is **not** ported: it
 /// sits inside the `GetDamage` tail the design doc (`§11`) marks as a
-/// mechanical-port-only item. So a critical doubles, and nothing else does.
+/// mechanical-port-only item.
 #[must_use]
-pub(crate) fn apply_critical(damage: i32, critical_rate: i32, roll: i32) -> i32 {
+pub(crate) fn apply_critical(damage: i32, critical_rate: i32, luk: i32, roll: i32) -> i32 {
     if critical_rate > 0 && roll % 100 < critical_rate {
-        damage * 2
+        let bonus = (luk * 5).clamp(0, 5000);
+        (i64::from(damage) * 3 * (10_000 + i64::from(bonus)) / 20_000) as i32
     } else {
         damage
     }
+}
+
+/// The §4.3.2 hit term, basis-10000: **7000 base + 18 per AGI point**. The
+/// 7000 is the legacy's own base (`7000 + rank*6` in `GetHitRate`,
+/// `STAT_MECHANICS.md` §2) and 18 is that formula's `rank*6` per stat point
+/// (`(AGI*3)*6`); the legacy's `(mine − theirs) * 50` level-difference term is
+/// dropped by §4.7, which abolishes level-gap miss. AGI is the `dex` column
+/// (the legacy dodge stat's home); `hnd` is crafting-only from now on
+/// (§4.3.1).
+pub(crate) const BASE_HIT_RATE_BP: i32 = 7000;
+pub(crate) const AGI_HIT_RATE_BP: i32 = 18;
+
+/// §4.3.2 dodge, basis-10000 — the same 18-per-point ladder the attacker's
+/// hit climbs, so one AGI point is worth +hit and +dodge at once.
+pub(crate) const AGI_DODGE_RATE_BP: i32 = 18;
+
+/// Cat's Ghost Dodge fix (2026-10-20): `Actual Hit Rate = Attacker Hit Rate −
+/// Defender Dodge Rate`, clamped to the 10%..=95% band. The legacy added the
+/// defender's dodge *on top of* the attacker's hit as a failure band of
+/// `dodge/2` (`Server-Attack.cpp:608-634`, the subtraction commented out at
+/// `:596-599`) — dodge never actually subtracted from anyone's hit, hence
+/// "Ghost Dodge". This is the subtraction the commented-out line intended,
+/// for both `player_swing` and a monster's counter-swing.
+///
+/// Returns basis-10000 (1000..=9500); roll with [`Rng::below`]`(10_000)`.
+#[must_use]
+pub(crate) fn hit_chance(attacker_agi: i32, defender_agi: i32) -> i32 {
+    let hit = BASE_HIT_RATE_BP + attacker_agi * AGI_HIT_RATE_BP;
+    let dodge = defender_agi * AGI_DODGE_RATE_BP;
+    (hit - dodge).clamp(1000, 9500)
+}
+
+/// What one swing's roll resolved to, so the 268 can carry the legacy's
+/// dodge-vs-miss distinction with the corrected band widths.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SwingOutcome {
+    /// The roll landed inside the actual hit rate.
+    Hit,
+    /// The roll failed inside `[actual hit, attacker hit)` — the slice of
+    /// success the defender's AGI carved out (`b_dodge_hit`).
+    Dodge,
+    /// The roll failed beyond the attacker's own hit rate — the attacker
+    /// whiffed regardless of any dodge (`b_miss_hit`).
+    Miss,
+}
+
+/// Resolves one swing against `roll` (basis-10000, [`Rng::below`]`10_000`).
+///
+/// The dodge band keeps the legacy's two-label display (`b_dodge_hit` vs
+/// `b_miss_hit`) but with correct geometry: exactly the slice
+/// `[actual hit, actual hit + defender dodge)` is a dodge — the success the
+/// defender's AGI carved out — and everything past the attacker's own hit
+/// rate is a plain miss. The band is empty for a defender with no dodge and
+/// for a swing whose actual rate was pinned by the 95% ceiling, so those
+/// failures are misses, as they should be.
+#[must_use]
+pub(crate) fn swing_outcome(attacker_agi: i32, defender_agi: i32, roll: i32) -> SwingOutcome {
+    let actual = hit_chance(attacker_agi, defender_agi);
+    let dodge = defender_agi * AGI_DODGE_RATE_BP;
+    let dodge_end = (actual + dodge)
+        .min(BASE_HIT_RATE_BP + attacker_agi * AGI_HIT_RATE_BP)
+        .min(10_000);
+    if roll < actual {
+        SwingOutcome::Hit
+    } else if roll < dodge_end {
+        SwingOutcome::Dodge
+    } else {
+        SwingOutcome::Miss
+    }
+}
+
+/// §4.3.4 natural flat defence from VIT: `⌊VIT × (0.15 + 0.01×(Level−1))⌋ +
+/// 5×⌊Level/10⌋`, integer form `(14 + level)/100`. The VIT half of a
+/// player's `GetTotalAC()` this port models (the legacy `(hnd+level)*60/100`
+/// arm is retired per §4.3.1 — hnd is crafting-only). Added to
+/// [`level_ac`] on the monster→player path.
+///
+/// Spec pins: L10, 35 VIT = +13; L100, 550 VIT = +677.
+#[must_use]
+pub(crate) fn natural_flat_def(vit: i32, level: i32) -> i32 {
+    vit * (14 + level) / 100 + 5 * (level / 10)
+}
+
+/// §4.3.6 MagDamage: `⌊MAG × (0.28 + 0.01×(Level−1))⌋ + 5×⌊Level/10⌋`,
+/// integer form `(27 + level)/100` — the Arcane Boost curve replacing the
+/// legacy flat `MAG / 4`.
+///
+/// No consumer yet: the skill/spell pipeline is a later milestone, so this
+/// carries `dead_code` until then. The curve is written and pinned now per
+/// the §4.3 directive.
+///
+/// Spec pins: L1, 28 MAG = +7; L10, 37 MAG = +18; L50, 220 MAG = +194;
+/// L100, 550 MAG = +748.
+#[allow(dead_code)] // consumed when the spell pipeline lands
+#[must_use]
+pub(crate) fn mag_damage(mag: i32, level: i32) -> i32 {
+    mag * (27 + level) / 100 + 5 * (level / 10)
+}
+
+/// §4.3.7 magical hit rank: `(WIS*2) + Level` — WIS is the AGI of casters,
+///100% effective for magic. No consumer until the spell pipeline lands.
+#[allow(dead_code)] // consumed when the spell pipeline lands
+#[must_use]
+pub(crate) fn wis_hit_rank(wis: i32, level: i32) -> i32 {
+    wis * 2 + level
+}
+
+/// §4.3.7 magical dodge rank — the same WIS ladder, corrected from the
+/// legacy's DEX-sourced dodge so casters actually evade boss magic. No
+/// consumer until the spell pipeline lands.
+#[allow(dead_code)] // consumed when the spell pipeline lands
+#[must_use]
+pub(crate) fn wis_dodge_rank(wis: i32, level: i32) -> i32 {
+    wis * 2 + level
+}
+
+/// §4.3.7 natural magic defence: `(WIS + Level) * 0.90`, integer form
+/// `* 9 / 10`. No consumer until the spell pipeline lands.
+#[allow(dead_code)] // consumed when the spell pipeline lands
+#[must_use]
+pub(crate) fn wis_magic_def(wis: i32, level: i32) -> i32 {
+    (wis + level) * 9 / 10
+}
+
+/// §4.3.3 LUK drop bonus as the `add_rate` percent [`gz_data::drops::roll_drop`]
+/// takes: +0.05% per LUK (`luk * 5 / 100`), capped +50% at 1000 LUK. The
+/// existing `add_rate` mechanism lifts every entry's weight by that percent,
+/// which raises the chance a drop resolves at all on kinds whose weights sum
+/// below 10000.
+#[must_use]
+pub(crate) fn drop_add_rate(luk: i32) -> i32 {
+    (luk * 5 / 100).clamp(0, 50)
 }
 
 /// The weak-monster EXP ratio cut — **off by owner directive** (Cat,
@@ -318,12 +449,9 @@ impl PlayerAttacks {
     /// (`SessionInfo::class_kind`).
     #[must_use]
     pub(crate) fn raw_power(&self, class_kind: u16, str_: i32, level: i32) -> (i32, i32) {
-        let term = level_damage(level);
+        let term = level_damage(level) + str_damage(str_, level);
         match self.by_kind.get(&class_kind) {
-            Some(row) => (
-                row.min_dmg + str_damage(&row.attack_type, str_, row.attack_interval, level) + term,
-                row.max_dmg + str_damage(&row.attack_type, str_, row.attack_interval, level) + term,
-            ),
+            Some(row) => (row.min_dmg + term, row.max_dmg + term),
             None => (term, term),
         }
     }
@@ -434,7 +562,9 @@ pub(crate) const HIT_THROTTLE_MS: u64 = 200;
 /// better moment" from "there is nobody there".
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Swing {
-    /// Damage went out and the target took it.
+    /// The swing was made and resolved against a live in-range target: it
+    /// landed its damage, or the target dodged or missed it (§4.3.2). Either
+    /// way the engagement holds and the client keeps swinging.
     Landed,
     /// The target is a monster, just not close enough yet.
     OutOfRange,
@@ -555,6 +685,7 @@ pub(crate) async fn player_swing(
         attacker_dex,
         attacker_mag,
         attacker_vit,
+        attacker_luk,
     )) = live.character.as_ref().map(|character| {
         (
             character.character_id,
@@ -564,6 +695,7 @@ pub(crate) async fn player_swing(
             character.dex,
             character.mag,
             character.vit,
+            character.luk,
         )
     })
     else {
@@ -575,6 +707,7 @@ pub(crate) async fn player_swing(
     let crit = apply_critical(
         raw,
         player_attacks.critical_rate(class_kind),
+        attacker_luk,
         combat_rng.up_to(99),
     );
 
@@ -593,11 +726,28 @@ pub(crate) async fn player_swing(
         if (tx - ax).abs() > range || (ty - ay).abs() > range {
             return Ok(Swing::OutOfRange);
         }
+        // Cat's §4.3.2 Ghost Dodge fix, player→monster half: roll the swing
+        // against this kind's AGI (`unit_agi` — the `dex` column). The
+        // client-supplied `si_hit_rate` / `si_dodge_rate` in the 267 are
+        // ignored: the shipped client computes them from the retired HND
+        // formulas, so reading them would leave the whole reformation
+        // decorative. A dodge or a miss still reaches `hit_by_player` so the
+        // monster turns on the attacker the way it does on any swing — the
+        // legacy's `SetBeAttackedSwitch` runs before the dodge check
+        // (`Server-Attack.cpp:585-591`) — but it lands no damage, rolls no
+        // drop and owes no EXP.
+        let outcome = swing_outcome(
+            attacker_dex,
+            world.unit_agi(target_unique).unwrap_or(0),
+            combat_rng.below(10_000) as i32,
+        );
         world.hit_by_player(
             registry,
             target_unique,
             me.char_unique.si16(),
             crit,
+            outcome,
+            drop_add_rate(attacker_luk),
             now_tick(),
             combat_rng,
         )
@@ -610,7 +760,15 @@ pub(crate) async fn player_swing(
     };
 
     // The 268 answers the *target*, so everyone near the monster sees the same
-    // frame (`Server-Attack.cpp:2775`).
+    // frame (`Server-Attack.cpp:2775`). A dodge or a miss sends the same
+    // zeroed body with its flag that the legacy did
+    // (`Server-Attack.cpp:608-634`): the client reads the flag and plays the
+    // text without applying any life.
+    let (damage, life) = if hit.outcome == SwingOutcome::Hit {
+        (hit.damage, hit.life as i32)
+    } else {
+        (0, 0)
+    };
     registry.broadcast_near_point(
         monsters::FIELD_MAP,
         hit.x,
@@ -618,19 +776,26 @@ pub(crate) async fn player_swing(
         GameMsg::ResponseHit as u16,
         HitResponse {
             char_unique: hit.unique as i16,
-            damage: hit.damage,
+            damage,
             double_damage: 0,
-            life: hit.life as i32,
+            life,
             mode: 0,
             special_attack_switch: 0,
             b_indure: false,
-            b_miss_hit: false,
-            b_dodge_hit: false,
+            b_miss_hit: hit.outcome == SwingOutcome::Miss,
+            b_dodge_hit: hit.outcome == SwingOutcome::Dodge,
             ui_type: HIT_TARGET_MONSTER,
         }
         .encode()
         .to_vec(),
     );
+    if hit.outcome != SwingOutcome::Hit {
+        // A dodge or miss owes nothing: no EXP, no death frame, no life
+        // movement — the legacy's handler returns right after the flagged
+        // frame (`Server-Attack.cpp:610-634`). The swing itself was made, so
+        // the engagement holds and the client keeps swinging.
+        return Ok(Swing::Landed);
+    }
 
     // What this hit is worth, decided before any frame goes out so both arms
     // of the legacy's `IsAlive(enemyid)` (`Server-Attack.cpp:4131`) share one
@@ -868,17 +1033,19 @@ mod tests {
     }
 
     #[test]
-    fn the_str_term_follows_the_melee_and_ranged_branches() {
-        // Melee: `str * ((interval*10) + (level*50)) / 20000`.
-        assert_eq!(str_damage("ATTACKTYPE_SWORD", 30, 1000, 10), 15);
-        assert_eq!(str_damage("ATTACKTYPE_AXE", 30, 1000, 10), 15);
-        // Ranged: the same numerator over 150000, then * 6 — the truncation
-        // happens before the multiply, which is what makes a bow's STR so much
-        // weaker.
-        assert_eq!(str_damage("ATTACKTYPE_BOW", 30, 1000, 10), 12);
-        // A type outside the two arms contributes nothing.
-        assert_eq!(str_damage("ATTACKTYPE_STAFF", 30, 1000, 10), 0);
-        assert_eq!(str_damage("ATTACKTYPE_UNKNOWN", 30, 1000, 10), 0);
+    fn the_str_term_walks_the_4_3_curve() {
+        // Cat's §4.3.5: `⌊STR × (0.20 + 0.01×(Level−1))⌋ + 5×⌊Level/10⌋`,
+        // integer form `STR × (19 + level) / 100 + 5 × (level / 10)` — one
+        // curve for every physical weapon; the legacy's sword/bow/staff arms
+        // are retired by the directive.
+        assert_eq!(str_damage(10, 1), 2, "L1: 10 STR = +2");
+        assert_eq!(str_damage(35, 10), 15, "L10: 35 STR = +15");
+        assert_eq!(str_damage(120, 30), 73, "L30: 120 STR = +73");
+        assert_eq!(str_damage(220, 50), 176, "L50: 220 STR = +176");
+        assert_eq!(str_damage(550, 100), 704, "L100: 550 STR = +704");
+        // The level term is the milestone bonus alone at L1–L9.
+        assert_eq!(str_damage(0, 1), 0);
+        assert_eq!(str_damage(0, 10), 5, "the L10 milestone, no STR under it");
     }
 
     #[test]
@@ -910,12 +1077,22 @@ mod tests {
     }
 
     #[test]
-    fn a_critical_doubles_and_rate_zero_never_crits() {
-        assert_eq!(apply_critical(40, 30, 0), 80);
-        assert_eq!(apply_critical(40, 30, 29), 80);
-        assert_eq!(apply_critical(40, 30, 30), 40);
-        assert_eq!(apply_critical(40, 30, 99), 40);
-        assert_eq!(apply_critical(40, 0, 0), 40);
+    fn a_critical_pays_150_percent_and_luk_buys_up_to_225() {
+        // Cat's §4.3.3: 150% base (the legacy's flat doubling is retired with
+        // the directive), `×3 × (10_000 + min(LUK×5, 5000)) / 20_000`.
+        assert_eq!(apply_critical(40, 30, 0, 0), 60, "150% base");
+        assert_eq!(apply_critical(40, 30, 0, 29), 60, "roll 29 < rate 30");
+        assert_eq!(apply_critical(40, 30, 0, 30), 40, "roll 30 >= rate 30");
+        assert_eq!(apply_critical(40, 30, 0, 99), 40);
+        assert_eq!(apply_critical(40, 0, 0, 0), 40, "rate 0 never crits");
+        // LUK scales the multiplier: +0.05%/point → 1000 LUK = ×2.25.
+        assert_eq!(apply_critical(40, 30, 1000, 0), 90, "225% at cap");
+        // Past the cap is flat — 2000 LUK buys no more than 1000.
+        assert_eq!(apply_critical(40, 30, 2000, 0), 90, "the +50% cap");
+        // Mid curve: 100 LUK = +5% → ×1.575.
+        assert_eq!(apply_critical(200, 30, 100, 0), 315);
+        // The rate gate still holds with LUK under it.
+        assert_eq!(apply_critical(40, 30, 1000, 50), 40, "no crit, no scaling");
     }
 
     #[test]
@@ -1091,5 +1268,121 @@ mod tests {
             60_000,
             "and the ceiling is a minute"
         );
+    }
+
+    /// Cat's §4.3.2 Ghost Dodge fix (2026-10-20): the actual hit rate is the
+    /// attacker's minus the defender's, clamped 10%..=95% — the subtraction
+    /// the legacy left commented out (`Server-Attack.cpp:596-599`). One AGI
+    /// point is 18 basis points both ways.
+    #[test]
+    fn the_actual_hit_rate_is_attacker_minus_defender_in_a_10_to_95_band() {
+        // Parity cancels: 7000 + AGI*18 − AGI*18 = the 70% legacy base.
+        assert_eq!(hit_chance(5, 5), 7000, "level-1 parity is the legacy base");
+        assert_eq!(hit_chance(200, 200), 7000, "parity at any AGI");
+        // One point of AGI is worth 18 bp of hit — and 18 bp of dodge.
+        assert_eq!(hit_chance(10, 0), 7180);
+        assert_eq!(hit_chance(0, 10), 6820);
+        // The floor: a swing far behind on AGI still lands 10% of the time.
+        assert_eq!(hit_chance(0, 1_000), 1000);
+        // The ceiling: no swing ever becomes certain, not even maxed out.
+        assert_eq!(hit_chance(1_000, 0), 9500);
+        // The floor beats the ceiling when both AGIs are extreme.
+        assert_eq!(hit_chance(1_000, 1_000), 7000, "parity even at the cap");
+    }
+
+    /// The Ghost Dodge regression itself: over the whole roll space, raising
+    /// the defender's AGI strictly lowers the number of hits — the legacy bug
+    /// was that dodge relabelled misses without moving this count at all.
+    /// Enumerating all 10 000 rolls makes the mitigation exact, not
+    /// statistical.
+    #[test]
+    fn defender_agi_genuinely_causes_misses_over_the_whole_roll_space() {
+        let hit_count = |att: i32, def: i32| {
+            (0..10_000)
+                .filter(|&roll| swing_outcome(att, def, roll) == SwingOutcome::Hit)
+                .count() as i32
+        };
+        // The hit count IS the actual rate — the clamp and the bands cannot
+        // drift apart from it.
+        assert_eq!(hit_count(50, 0), hit_chance(50, 0));
+        // Mitigation: a defender's AGI moves the count down, every step.
+        assert_eq!(hit_count(50, 0), 7900);
+        assert_eq!(hit_count(50, 100), 6100);
+        assert_eq!(hit_count(50, 200), 4300);
+        assert!(hit_count(50, 200) < hit_count(50, 100));
+        assert!(hit_count(50, 100) < hit_count(50, 0));
+        // And the attacker's AGI moves it back up, both ways.
+        assert_eq!(hit_count(200, 50), 9500, "the 95% ceiling");
+        assert_eq!(hit_count(0, 50), 6100, "an unskilled attacker vs 50 AGI");
+    }
+
+    /// The two failure labels keep the legacy's display semantics with the
+    /// corrected geometry: a dodge is exactly the slice the defender's AGI
+    /// carved out of success, and everything else a swing fails is a miss.
+    #[test]
+    fn the_dodge_band_is_exactly_the_slice_the_defender_carved_out() {
+        let band = |att: i32, def: i32| {
+            let mut dodge = 0;
+            let mut miss = 0;
+            for roll in 0..10_000 {
+                match swing_outcome(att, def, roll) {
+                    SwingOutcome::Hit => {}
+                    SwingOutcome::Dodge => dodge += 1,
+                    SwingOutcome::Miss => miss += 1,
+                }
+            }
+            (dodge, miss)
+        };
+        // No dodge under it: the failure band is all miss (parity at 1 AGI —
+        // the 18 bp carved out is truncation-visible only in the rate).
+        assert_eq!(band(50, 0), (0, 2100), "no dodge, no dodge label");
+        // 100 AGI of defence at 50 AGI of attack: the carved slice is the
+        // defender's full dodge (1800 bp), the rest is miss.
+        assert_eq!(band(50, 100), (1800, 2100));
+        // A ceiling-pinned swing with nothing to dodge is still 5% miss — the
+        // 95% cap keeps every swing fallible.
+        assert_eq!(band(500, 0), (0, 500));
+    }
+
+    /// Cat's §4.3.4 natural flat defence: the VIT half of a player's AC that
+    /// joins the level term on the monster→player path.
+    #[test]
+    fn natural_flat_def_walks_the_4_3_curve() {
+        assert_eq!(natural_flat_def(10, 1), 1, "L1: 10 VIT = +1");
+        assert_eq!(natural_flat_def(35, 10), 13, "L10: 35 VIT = +13");
+        assert_eq!(natural_flat_def(120, 30), 67, "L30: 120 VIT = +67");
+        assert_eq!(natural_flat_def(220, 50), 165, "L50: 220 VIT = +165");
+        assert_eq!(natural_flat_def(550, 100), 677, "L100: 550 VIT = +677");
+    }
+
+    /// Cat's §4.3.6 MagDamage curve (Arcane Boost). No combat consumer until
+    /// the spell pipeline lands; pinned now per the directive.
+    #[test]
+    fn mag_damage_walks_the_4_3_curve() {
+        assert_eq!(mag_damage(28, 1), 7, "L1: 28 MAG = +7");
+        assert_eq!(mag_damage(37, 10), 18, "L10: 37 MAG = +18");
+        assert_eq!(mag_damage(220, 50), 194, "L50: 220 MAG = +194");
+        assert_eq!(mag_damage(550, 100), 748, "L100: 550 MAG = +748");
+    }
+
+    /// Cat's §4.3.7 WIS ranks — the caster's half of the AGI reformation.
+    /// No consumer until the spell pipeline lands; pinned now per the
+    /// directive.
+    #[test]
+    fn wis_carries_the_magic_hit_dodge_and_defense_ranks() {
+        assert_eq!(wis_hit_rank(50, 10), 110, "(WIS*2) + Level");
+        assert_eq!(wis_dodge_rank(50, 10), 110, "the same ladder, corrected");
+        assert_eq!(wis_magic_def(50, 10), 54, "(WIS + Level) * 0.90");
+        assert_eq!(wis_magic_def(100, 100), 180);
+    }
+
+    /// Cat's §4.3.3 LUK drop bonus: +0.05% per point, capped +50%.
+    #[test]
+    fn luk_drop_rate_walks_to_the_50_percent_cap() {
+        assert_eq!(drop_add_rate(0), 0);
+        assert_eq!(drop_add_rate(20), 1, "20 LUK = +1%");
+        assert_eq!(drop_add_rate(100), 5, "+0.05%/point");
+        assert_eq!(drop_add_rate(1000), 50, "the cap");
+        assert_eq!(drop_add_rate(2000), 50, "past the cap is flat");
     }
 }

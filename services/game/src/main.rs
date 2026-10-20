@@ -144,7 +144,7 @@ pub(crate) use movement::{
 #[allow(unused_imports)]
 pub(crate) use stats::{
     Allocation, BasicInfo, UseBonus, allocate_stat, basic_info_for, derived_max_life,
-    derived_max_mana, handle_change_status_info, handle_use_bonus,
+    derived_max_mana, handle_change_status_info, handle_use_bonus, weight_capacity,
 };
 
 // The item family lives in `items.rs`. The dispatcher calls the 303/305/306/307/
@@ -374,6 +374,17 @@ async fn serve(cfg: &GameConfig) -> Result<(), AnyError> {
                 for hit in hits {
                     // The 268 answers the *target*, so everyone near the struck
                     // player sees the same frame (`Server-Attack.cpp:2775`).
+                    // A dodge or a miss sends the same zeroed body with its
+                    // flag that the legacy did (`Server-Attack.cpp:610-634`):
+                    // the client reads the flag and plays the text without
+                    // applying any life — and the death branch below cannot
+                    // see a zero here, because a miss carries the unchanged
+                    // life.
+                    let (damage, life) = if hit.outcome == combat::SwingOutcome::Hit {
+                        (hit.damage, hit.life as i32)
+                    } else {
+                        (0, 0)
+                    };
                     registry.broadcast_near_point(
                         monsters::FIELD_MAP,
                         hit.x,
@@ -381,14 +392,14 @@ async fn serve(cfg: &GameConfig) -> Result<(), AnyError> {
                         GameMsg::ResponseHit as u16,
                         HitResponse {
                             char_unique: hit.char_unique,
-                            damage: hit.damage,
+                            damage,
                             double_damage: 0,
-                            life: hit.life as i32,
+                            life,
                             mode: 0,
                             special_attack_switch: 0,
                             b_indure: false,
-                            b_miss_hit: false,
-                            b_dodge_hit: false,
+                            b_miss_hit: hit.outcome == combat::SwingOutcome::Miss,
+                            b_dodge_hit: hit.outcome == combat::SwingOutcome::Dodge,
                             ui_type: HIT_TARGET_PLAYER,
                         }
                         .encode()

@@ -133,6 +133,11 @@ struct SpawnUnit {
     attack_interval: u64,
     /// `siCriticalRate`, percent (`CharAttackRow::critical_rate`).
     critical_rate: i32,
+    /// This kind's AGI — the `dex` column of its [`MonsterStats`] (the ON
+    /// branch passes the raw `clBA` value through). Drives hit and dodge both
+    /// ways under Cat's §4.3.2 reformation: it is the dodge a player's swing
+    /// is tested against and the accuracy of this monster's own swings.
+    dex: i32,
     /// `(Str+Dex+Mag+Vit)/2` over this unit's [`MonsterStats`]
     /// (`GetBattlePower`, `Parametabox.cpp:4162`) — the enemy half of
     /// `GetExp`'s weak-monster gate (`Server-Attack.cpp:4003`).
@@ -233,6 +238,10 @@ pub(crate) struct PlayerHit {
     pub(crate) damage: i32,
     /// The swinging monster's unique, so the caller can echo the 241 order.
     pub(crate) attacker_unique: u16,
+    /// Hit, dodge or miss — Cat's §4.3.2 AGI roll. A dodge or miss carries
+    /// zero damage and the unchanged life; the caller maps it onto the
+    /// 268's `b_dodge_hit` / `b_miss_hit` flags.
+    pub(crate) outcome: combat::SwingOutcome,
 }
 
 /// What a player's swing did to a monster: the 268 body's fields, plus what a
@@ -257,6 +266,9 @@ pub(crate) struct MonsterHit {
     pub(crate) battle_power: i32,
     /// `(item_unique, count)` pairs rolled at death, empty on a survivor.
     pub(crate) drops: Vec<(i32, i32)>,
+    /// Hit, dodge or miss — Cat's §4.3.2 AGI roll, resolved in
+    /// [`crate::combat::player_swing`] against this kind's [`SpawnUnit::dex`].
+    pub(crate) outcome: combat::SwingOutcome,
 }
 
 /// How long a map with nobody on it stays ticked before it hibernates, in
@@ -496,6 +508,8 @@ impl MonsterWorld {
                     range: attack_row.range.max(1),
                     attack_interval: combat::attack_interval_ms(attack_row.attack_interval),
                     critical_rate: attack_row.critical_rate,
+                    // §4.3.2: this kind's AGI — hit and dodge, both ways.
+                    dex: stats.dex,
                     // The enemy half of `GetExp`'s weak-monster gate, from the
                     // same stats the unit fights with.
                     battle_power: stats.battle_power(),
@@ -819,6 +833,16 @@ impl MonsterWorld {
             .map(|m| (m.x, m.y))
     }
 
+    /// This kind's AGI — the dodge a player's swing is tested against under
+    /// Cat's §4.3.2 reformation. `None` for a monster the world does not hold;
+    /// the caller then treats the target as having no dodge.
+    pub(crate) fn unit_agi(&self, monster_unique: u16) -> Option<i32> {
+        self.monsters
+            .iter()
+            .find(|m| m.unique.u16() == monster_unique)
+            .map(|m| self.groups[m.group].units[m.unit].dex)
+    }
+
     /// The tile an attacking player should walk to when `range` does not reach
     /// `monster_unique`: the closest tile the weapon range covers that this
     /// player may stand on and that a walk can actually arrive on.
@@ -873,12 +897,24 @@ impl MonsterWorld {
     /// the overhead health bar (`CharServer-Attack.cpp:44-74`) — the bar's only
     /// trigger for an ordinary mob. Hence `registry`: the bar is a broadcast,
     /// not a local state change.
+    /// Applies one player swing to a monster.
+    ///
+    /// `outcome` is Cat's §4.3.2 AGI roll, resolved by the caller against
+    /// this kind's AGI (a dodge or miss still runs the retaliation/jim path
+    /// with zero damage — the legacy set `SetBeAttackedSwitch` *before* the
+    /// dodge check, `Server-Attack.cpp:585-591`). `drop_add_rate` is the LUK
+    /// bonus percent (§4.3.3) for the death roll.
+    // The scalar arg list mirrors the legacy call it ports; grouping the two
+    // §4.3 additions into a struct would outlive their only caller.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn hit_by_player(
         &mut self,
         registry: &Registry,
         monster_unique: u16,
         attacker: i16,
         raw_power: i32,
+        outcome: combat::SwingOutcome,
+        drop_add_rate: i32,
         now_ms: u64,
         rng: &mut Rng,
     ) -> Option<MonsterHit> {
@@ -894,18 +930,21 @@ impl MonsterWorld {
             let u = &self.groups[group].units[unit];
             (u.life, u.exp, u.level, u.ac, u.drops, u.battle_power)
         };
-        let damage = combat::reduced_by_ac(raw_power, ac);
+        let damage = if outcome == combat::SwingOutcome::Hit {
+            combat::reduced_by_ac(raw_power, ac)
+        } else {
+            0
+        };
         let new_life = monster.life.saturating_sub(damage.max(0) as u32);
         let died = new_life == 0;
 
         let drops = if died {
             // `GetRandDropItem` rolls **once** per kill
             // (`kindinfo-Manager.cpp:68-107`), so a kind drops at most one item
-            // type per death. `AddRate` is a bonus percent the port has no
-            // table for.
+            // type per death. `AddRate` is the LUK bonus percent (§4.3.3).
             roll_drop(
                 table,
-                0,
+                drop_add_rate,
                 rng.below(i32::MAX as u32) as i32,
                 rng.below(i32::MAX as u32) as i32,
             )
@@ -1034,6 +1073,7 @@ impl MonsterWorld {
             max_life,
             battle_power,
             drops,
+            outcome,
         })
     }
 
@@ -1162,7 +1202,7 @@ impl MonsterWorld {
         index: usize,
     ) -> Option<PlayerHit> {
         let (group, unit) = (self.monsters[index].group, self.monsters[index].unit);
-        let (aggressive, range, attack_interval, min_atk, max_atk, crit) = {
+        let (aggressive, range, attack_interval, min_atk, max_atk, crit, monster_agi) = {
             let u = &self.groups[group].units[unit];
             (
                 u.aggressive,
@@ -1171,6 +1211,8 @@ impl MonsterWorld {
                 u.min_atk,
                 u.max_atk,
                 u.critical_rate,
+                // §4.3.2: this monster's AGI — the accuracy of its own swing.
+                u.dex,
             )
         };
 
@@ -1255,10 +1297,39 @@ impl MonsterWorld {
                 .encode()
                 .to_vec(),
         );
+        // Cat's §4.3.2 Ghost Dodge fix, monster→player half: the roll is
+        // tested against the target's own AGI (its `dex` column — the client's
+        // legacy-formula `siDodgeRate` in the 267 is ignored). A dodge or a
+        // miss sends the same zeroed 268 with the flag set the legacy did
+        // (`Server-Attack.cpp:610-634`) — life unchanged, nothing spent.
+        // Missing a session with no `BasicInfo` (only possible off the world-
+        // entry path) reads as zero dodge, which is the pre-reformation rate.
+        let basic = registry.basic_info(target_key);
+        let (player_agi, player_vit) = (
+            basic.as_ref().map_or(0, |info| info.dex),
+            basic.as_ref().map_or(0, |info| info.vit),
+        );
+        let outcome = combat::swing_outcome(monster_agi, player_agi, rng.below(10_000) as i32);
+        if outcome != combat::SwingOutcome::Hit {
+            return Some(PlayerHit {
+                key: target_key,
+                char_unique: target_unique,
+                x: target.x,
+                y: target.y,
+                life: target.life,
+                damage: 0,
+                attacker_unique: self.monsters[index].unique.u16(),
+                outcome,
+            });
+        }
         let raw = combat::roll_power(min_atk, max_atk, rng.up_to(max_atk - min_atk));
         let damage = combat::reduced_by_ac(
-            combat::apply_critical(raw, crit, rng.up_to(99)),
-            combat::level_ac(target.level),
+            // §4.3.3: monster crits keep the kind rate and carry no LUK term —
+            // LUK scaling belongs to the player's swing.
+            combat::apply_critical(raw, crit, 0, rng.up_to(99)),
+            // §4.3.4: the player's defence is its level AC plus the natural
+            // flat defence its VIT buys.
+            combat::level_ac(target.level) + combat::natural_flat_def(player_vit, target.level),
         );
         let life = registry.set_life(target_key, damage)?;
         Some(PlayerHit {
@@ -1269,6 +1340,7 @@ impl MonsterWorld {
             life,
             damage,
             attacker_unique: self.monsters[index].unique.u16(),
+            outcome,
         })
     }
 
@@ -2065,6 +2137,7 @@ mod tests {
                 range: 1,
                 attack_interval: 2_000,
                 critical_rate: 0,
+                dex: 0,
                 battle_power: 0,
                 drops: &[],
             }],
@@ -2075,7 +2148,16 @@ mod tests {
         let mut rng = Rng::new(7);
 
         let hit = world
-            .hit_by_player(&Registry::new(), unique.u16(), 1000, 5, 1_000, &mut rng)
+            .hit_by_player(
+                &Registry::new(),
+                unique.u16(),
+                1000,
+                5,
+                combat::SwingOutcome::Hit,
+                0,
+                1_000,
+                &mut rng,
+            )
             .expect("the monster is there");
         assert_eq!(hit.life, 15);
         assert_eq!(hit.damage, 5, "ac 0 takes nothing off");
@@ -2091,7 +2173,16 @@ mod tests {
         );
 
         let hit = world
-            .hit_by_player(&Registry::new(), unique.u16(), 1000, 50, 1_000, &mut rng)
+            .hit_by_player(
+                &Registry::new(),
+                unique.u16(),
+                1000,
+                50,
+                combat::SwingOutcome::Hit,
+                0,
+                1_000,
+                &mut rng,
+            )
             .expect("the monster is still there");
         assert_eq!(hit.life, 0);
         assert!(hit.died);
@@ -2140,6 +2231,7 @@ mod tests {
                 range: 1,
                 attack_interval: 2_000,
                 critical_rate: 0,
+                dex: 0,
                 battle_power: 0,
                 drops: &[],
             }],
@@ -2156,7 +2248,16 @@ mod tests {
         // The kill: the id leaves `monsters` but stays held by the corpse —
         // the client is still drawing the death animation under that id.
         let hit = world
-            .hit_by_player(&registry, unique.u16(), 1000, 50, 1_000, &mut rng)
+            .hit_by_player(
+                &registry,
+                unique.u16(),
+                1000,
+                50,
+                combat::SwingOutcome::Hit,
+                0,
+                1_000,
+                &mut rng,
+            )
             .expect("the monster is there");
         assert!(hit.died);
         assert!(
@@ -2225,6 +2326,7 @@ mod tests {
                     range: 1,
                     attack_interval: 2_000,
                     critical_rate: 0,
+                    dex: 0,
                     battle_power: 0,
                     drops: &[],
                 })
@@ -2251,7 +2353,16 @@ mod tests {
 
             for id in live {
                 let hit = world
-                    .hit_by_player(&registry, id, 1000, 100, now, &mut rng)
+                    .hit_by_player(
+                        &registry,
+                        id,
+                        1000,
+                        100,
+                        combat::SwingOutcome::Hit,
+                        0,
+                        now,
+                        &mut rng,
+                    )
                     .expect("the monster is there");
                 assert!(hit.died, "one hit clears the 20 life");
             }
@@ -2305,6 +2416,7 @@ mod tests {
                     range: 1,
                     attack_interval: 2_000,
                     critical_rate: 0,
+                    dex: 0,
                     battle_power: 0,
                     drops: &[],
                 }],
@@ -2323,7 +2435,16 @@ mod tests {
         // order is (group 0, group 1).
         for unique in [world.monsters[0].unique, world.monsters[1].unique] {
             let hit = world
-                .hit_by_player(&registry, unique.u16(), 1000, 9_999, 50_000, &mut rng)
+                .hit_by_player(
+                    &registry,
+                    unique.u16(),
+                    1000,
+                    9_999,
+                    combat::SwingOutcome::Hit,
+                    0,
+                    50_000,
+                    &mut rng,
+                )
                 .expect("the monster is there");
             assert!(hit.died);
         }
@@ -2368,6 +2489,7 @@ mod tests {
                 range: 1,
                 attack_interval: 2_000,
                 critical_rate: 0,
+                dex: 0,
                 battle_power: 0,
                 drops: &[],
             }],
@@ -2377,7 +2499,16 @@ mod tests {
 
         let unique = world.monsters[0].unique;
         world
-            .hit_by_player(&registry, unique.u16(), 1000, 9_999, 1_000, &mut rng)
+            .hit_by_player(
+                &registry,
+                unique.u16(),
+                1000,
+                9_999,
+                combat::SwingOutcome::Hit,
+                0,
+                1_000,
+                &mut rng,
+            )
             .expect("the monster is there")
             .died
             .then_some(())
@@ -2443,6 +2574,7 @@ mod tests {
                 range: 1,
                 attack_interval: 2_000,
                 critical_rate: 0,
+                dex: 0,
                 battle_power: 0,
                 drops: &[],
             }],
@@ -2452,7 +2584,16 @@ mod tests {
         let mut rng = Rng::new(7);
 
         let hit = world
-            .hit_by_player(&Registry::new(), unique.u16(), 1000, 50, 1_000, &mut rng)
+            .hit_by_player(
+                &Registry::new(),
+                unique.u16(),
+                1000,
+                50,
+                combat::SwingOutcome::Hit,
+                0,
+                1_000,
+                &mut rng,
+            )
             .expect("the monster is there");
         assert!(hit.died);
         assert_eq!(
@@ -2521,6 +2662,7 @@ mod tests {
                 range: 1,
                 attack_interval: 2_000,
                 critical_rate: 0,
+                dex: 0,
                 battle_power: 0,
                 drops: &[],
             }],
@@ -2592,6 +2734,7 @@ mod tests {
                 range: 1,
                 attack_interval: 2_000,
                 critical_rate: 0,
+                dex: 0,
                 battle_power: 0,
                 drops: &[],
             }],
@@ -2711,6 +2854,7 @@ mod tests {
                 range: 1,
                 attack_interval: 2_000,
                 critical_rate: 0,
+                dex: 0,
                 battle_power: 0,
                 drops: &[],
             }],
@@ -2720,7 +2864,16 @@ mod tests {
         let mut rng = Rng::new(1);
 
         world
-            .hit_by_player(&registry, unique.u16(), 1000, 5, 1_000, &mut rng)
+            .hit_by_player(
+                &registry,
+                unique.u16(),
+                1000,
+                5,
+                combat::SwingOutcome::Hit,
+                0,
+                1_000,
+                &mut rng,
+            )
             .expect("the hit lands");
 
         let mut frames = Vec::new();
@@ -2745,7 +2898,16 @@ mod tests {
         // to whoever hit it first, so only one person ever gets the bar.
         let mut rx2 = register(&registry, 2000, "Other");
         world
-            .hit_by_player(&registry, unique.u16(), 2000, 5, 1_000, &mut rng)
+            .hit_by_player(
+                &registry,
+                unique.u16(),
+                2000,
+                5,
+                combat::SwingOutcome::Hit,
+                0,
+                1_000,
+                &mut rng,
+            )
             .expect("the hit lands");
         assert!(
             rx2.try_recv().is_err(),
@@ -2824,6 +2986,7 @@ mod tests {
                 range: 1,
                 attack_interval: 2_000,
                 critical_rate: 0,
+                dex: 0,
                 battle_power: 0,
                 drops: &[],
             }],
@@ -2837,7 +3000,16 @@ mod tests {
         let mut rng = Rng::new(1);
 
         world
-            .hit_by_player(&registry, first.u16(), 1000, 5, 1_000, &mut rng)
+            .hit_by_player(
+                &registry,
+                first.u16(),
+                1000,
+                5,
+                combat::SwingOutcome::Hit,
+                0,
+                1_000,
+                &mut rng,
+            )
             .expect("the hit lands");
         let mut frames = Vec::new();
         while let Ok(out) = rx.try_recv() {
@@ -2853,7 +3025,16 @@ mod tests {
         );
 
         world
-            .hit_by_player(&registry, second.u16(), 1000, 5, 1_000, &mut rng)
+            .hit_by_player(
+                &registry,
+                second.u16(),
+                1000,
+                5,
+                combat::SwingOutcome::Hit,
+                0,
+                1_000,
+                &mut rng,
+            )
             .expect("the hit lands");
         let mut frames = Vec::new();
         while let Ok(out) = rx.try_recv() {
@@ -2955,6 +3136,7 @@ mod tests {
                 range: 1,
                 attack_interval: 2_000,
                 critical_rate: 0,
+                dex: 0,
                 battle_power: 0,
                 drops: &[],
             }],
@@ -3072,6 +3254,7 @@ mod tests {
                     range: 1,
                     attack_interval: 2_000,
                     critical_rate: 0,
+                    dex: 0,
                     battle_power: 0,
                     drops: &[],
                 }],
@@ -3236,6 +3419,7 @@ mod tests {
                 range: 1,
                 attack_interval: 2_000,
                 critical_rate: 0,
+                dex: 0,
                 battle_power: 0,
                 drops: &[],
             }],
@@ -3358,6 +3542,7 @@ mod tests {
                 range: 1,
                 attack_interval: 2_000,
                 critical_rate: 0,
+                dex: 0,
                 battle_power: 0,
                 drops: &[],
             }],

@@ -100,11 +100,16 @@ pub(crate) struct Allocation {
     pub(crate) max_mana: i32,
 }
 
-/// `max_life = vit * (8000 + level*5) / 1000` — the base term of `SetHitPoint`
-/// (`Parametabox.cpp:3374`), and the formula the DDL defaults reproduce exactly
-/// at level 1 (vit 5 -> 40), which is what makes it the recalc source.
+/// `max_life = vit * (8000 + level*50) / 1000` — Cat's §4.3.4 reformation
+/// (approved 2026-10-20), retuning the legacy `SetHitPoint` base
+/// (`Parametabox.cpp:3374`, `(8000 + level*5) / 1000`) by multiplying the
+/// level term tenfold: VIT now grants `8.0 + 0.05×Level` HP per point
+/// (legacy: `8.0 + 0.005×Level`). Level 1 is untouched — vit 5 still derives
+/// 40, the DDL default — so existing rows stay valid and only growth changes.
+///
+/// Spec pins: L1, 5 VIT = 40; L50, 100 VIT = 1050; L100, 100 VIT = 1300.
 pub(crate) fn derived_max_life(vit: i32, level: i16) -> i32 {
-    (i64::from(vit) * (8000 + i64::from(level) * 5) / 1000) as i32
+    (i64::from(vit) * (8000 + i64::from(level) * 50) / 1000) as i32
 }
 
 /// `max_mana = mag * (4000 + level*5) / 1000` — the base term of
@@ -112,6 +117,27 @@ pub(crate) fn derived_max_life(vit: i32, level: i16) -> i32 {
 /// level 1 (mag 5 -> 20).
 pub(crate) fn derived_max_mana(mag: i32, level: i16) -> i32 {
     (i64::from(mag) * (4000 + i64::from(level) * 5) / 1000) as i32
+}
+
+/// Cat's §4.3.8 weight capacity (approved 2026-10-20), overriding both the
+/// legacy `(STR * 200) + (Level * 800)` (`Parametabox.cpp:3641`) and the
+/// baseline doc's own milestone variant:
+/// `TotalWeight = 10_000 + Level * 2_000 + max(STR, INT) * 50`.
+/// The stronger of STR and the `mag` column (the glossary's INT) buys
+/// capacity, so a pure caster is not locked out of loot the way the
+/// STR-only legacy keyed it.
+///
+/// Spec pins: L1, stats 5 = 12_250; L100, 500 in the governing stat =
+/// 235_000 (the directive's ~210k-235k band).
+///
+/// No wire consumer yet: the shipped client computes its own display total
+/// from the item array (`GetTotalWeight`, `Char-Common.cpp:2791`), so this
+/// formula governs server-side capacity checks — the P3 equip/loot gates —
+/// whenever those land.
+#[allow(dead_code)] // consumed when the server-side capacity gates land
+#[must_use]
+pub(crate) fn weight_capacity(level: i16, str_: i32, mag: i32) -> i32 {
+    (i64::from(level) * 2_000 + i64::from(str_.max(mag)) * 50 + 10_000) as i32
 }
 
 /// Validates a `GAMEMSG_REQUEST_USEBONUS` (250) against the server's own row and
