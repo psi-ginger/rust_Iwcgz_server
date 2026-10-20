@@ -471,7 +471,7 @@ impl MonsterWorld {
                 units.push(SpawnUnit {
                     wire_kind,
                     level: unit.level,
-                    max_num: unit.max_num,
+                    max_num: unit.max_num.saturating_mul(DENSITY_MULTIPLIER),
                     move_speed: stats.move_speed.clamp(0, 63) as u8,
                     life,
                     tiles,
@@ -494,7 +494,7 @@ impl MonsterWorld {
             if !units.is_empty() {
                 out.push(FieldGroup {
                     anchor,
-                    capacity: group.max_npc_num,
+                    capacity: group.max_npc_num.saturating_mul(DENSITY_MULTIPLIER),
                     boss: group.boss,
                     // The file carries seconds; the legacy converts once at
                     // load (`NPC.cpp:223`). A malformed negative is 0.
@@ -550,10 +550,13 @@ impl MonsterWorld {
                 let want = unit.max_num.max(0) as usize;
                 // shortcut: a deterministic stride across the sorted safe tiles,
                 // not the legacy's random `FindEmptyAreaForCharLocate`. The same
-                // index is reused on respawn, which is also deterministic.
+                // index is reused on respawn, which is also deterministic. The
+                // stride wraps once a target outruns the tile list (a density-
+                // amplified fill can); clamping would pile every extra monster
+                // on the last tile.
                 let step = (unit.tiles.len() / want.max(1)).max(1);
                 let places: Vec<(i32, i32)> = (0..want)
-                    .map(|k| unit.tiles[(k * step).min(unit.tiles.len() - 1)])
+                    .map(|k| unit.tiles[(k * step) % unit.tiles.len()])
                     .collect();
                 // The leash, enforced where it can be: `spawn_points` only
                 // returns the group's square, and this states the invariant
@@ -1321,7 +1324,10 @@ impl MonsterWorld {
 /// non-boss `Interval` is a group top-up cadence, not a per-monster delay), and
 /// a boss group whose file carries `Interval = 0`. A boss group with an
 /// interval honours it instead — see [`FieldGroup::respawn_ms`].
-const RESPAWN_MS: u64 = 30_000;
+///
+/// Tuned 30 s -> 10 s (Cat, 2026-10-20); still above [`CORPSE_MS`], so a
+/// corpse frees its id before its respawn draws one.
+const RESPAWN_MS: u64 = 10_000;
 
 /// How long a corpse stays on the map before the 11 that removes its avatar
 /// goes out.
@@ -1335,6 +1341,16 @@ const RESPAWN_MS: u64 = 30_000;
 /// 7 s sits inside the 5-10 s the live game showed and clears every shipped
 /// death animation with room to spare.
 const CORPSE_MS: u64 = 7_000;
+
+/// World-map spawn density (Cat, 2026-10-20 — 3x the shipped population):
+/// `load` multiplies every file-derived unit target *and* group cap by this.
+/// Both scale together, so a group's `MaxNPCNum` can never re-clamp its own
+/// amplified targets — the field lands on exactly 3x, not 3x-then-clamped.
+const DENSITY_MULTIPLIER: i32 = 3;
+
+/// A corpse must free its id before its respawn draws one; the ordering above
+/// (respawn 10 s > corpse 7 s) is what bounds ids in flight to live monsters.
+const _: () = assert!(RESPAWN_MS > CORPSE_MS);
 
 /// Whether the straight line [`Movement`] would walk from `from` to `to` stays
 /// on `tiles` at every committed step.
@@ -1553,11 +1569,13 @@ mod tests {
         // skips those too (`NPC.cpp:961`). 157 - 5 - 4 = 148.
         assert_eq!(groups, 148, "one placeable group per shipped map-0 file");
         // The sum of the placeable groups' unit targets (`MinNum`) — the boot
-        // tick fills each unit to its target, so this is the shipped population.
+        // tick fills each unit to its target, so this is the shipped population
+        // at `DENSITY_MULTIPLIER`: targets and group caps scale by the same
+        // factor, so every group triples exactly (1_536 x 3).
         assert_eq!(
             world.monster_count(),
-            1_536,
-            "the shipped map-0 unit targets"
+            4_608,
+            "the shipped map-0 unit targets x DENSITY_MULTIPLIER"
         );
 
         let npc_top =
@@ -2116,6 +2134,85 @@ mod tests {
         assert!(!world.spawn_one(&registry, 0, 0, (0, 0)));
         assert!(!free_holds_any(&world), "the foreign id was discarded");
         assert_eq!(world.monsters.len(), 1);
+    }
+
+    /// Churn at the amplified field's size: every monster killed and respawned,
+    /// generation after generation, comes back to the exact population — no id
+    /// issued twice (live uniques stay unique), none stranded (the free lists
+    /// drain empty), none refused (the population never falls short). This is
+    /// the 10 s [`RESPAWN_MS`] against the 7 s [`CORPSE_MS`] at full load.
+    #[test]
+    fn field_scale_churn_respawns_without_id_leaks_or_exhaustion() {
+        let registry = Registry::new();
+        let mut world = MonsterWorld::empty();
+        world.groups.push(FieldGroup {
+            anchor: SpawnGroup {
+                map_index: FIELD_MAP,
+                center_x: 0,
+                center_y: 0,
+                radius: 10,
+            },
+            capacity: 10_000,
+            boss: false,
+            respawn_ms: RESPAWN_MS,
+            units: (0..8)
+                .map(|_| SpawnUnit {
+                    wire_kind: 15,
+                    level: 1,
+                    max_num: 576,
+                    move_speed: 12,
+                    life: 20,
+                    tiles: (0..100).map(|i| (i % 10, i / 10)).collect(),
+                    min_atk: 1,
+                    max_atk: 2,
+                    ac: 0,
+                    exp: 90,
+                    aggressive: 0,
+                    range: 1,
+                    attack_interval: 2_000,
+                    critical_rate: 0,
+                    drops: &[],
+                })
+                .collect(),
+        });
+        world.spawn_all(&registry);
+        // 8 units x 576 = the tuned field's exact 4_608 (1_536 x 3), each unit
+        // filling over 100 shared tiles — the stride-wrap path, at population
+        // scale, inside the 11,500-id standard pool.
+        let population: usize = 8 * 576;
+        assert_eq!(world.monsters.len(), population, "the boot fill");
+        let mut rng = Rng::new(7);
+        let mut now = 1_000_u64;
+
+        for generation in 0..3 {
+            assert_eq!(
+                world.monsters.len(),
+                population,
+                "generation {generation} starts at full population"
+            );
+            let live: Vec<u16> = world.monsters.iter().map(|m| m.unique.u16()).collect();
+            let uniques: std::collections::HashSet<u16> = live.iter().copied().collect();
+            assert_eq!(uniques.len(), population, "no id serves two monsters");
+
+            for id in live {
+                let hit = world
+                    .hit_by_player(&registry, id, 1000, 100, now, &mut rng)
+                    .expect("the monster is there");
+                assert!(hit.died, "one hit clears the 20 life");
+            }
+            assert_eq!(world.monsters.len(), 0, "every corpse left `monsters`");
+
+            // Corpses free first, the respawns draw second: in-flight ids never
+            // exceed the population, and the free lists end empty.
+            world.tick(&registry, now + CORPSE_MS + 1, &mut rng);
+            world.tick(&registry, now + RESPAWN_MS + 1, &mut rng);
+            assert_eq!(world.monsters.len(), population, "no spawn was refused");
+            assert!(
+                !free_holds_any(&world),
+                "generation {generation} left an id stranded"
+            );
+            now += RESPAWN_MS + 100;
+        }
     }
 
     /// A boss group's `Interval` is its respawn delay; an ordinary group's is
