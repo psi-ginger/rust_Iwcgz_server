@@ -296,9 +296,12 @@ so no grant could ever raise a level.
 ### Fix
 
 Grant before the death check on every landed swing: pool = kind `Exp` +
-`(enemy level − 1)`, cut by the weak-monster bands (`Server-Attack.cpp:4003-4058`;
-hunger/tiredness CUT), scaled by `damage/maxHP/3` while the enemy lives, whole
-when it dies. A grant crossing `next_threshold` runs the `level_up` UPDATE,
+`(enemy level − 1)`, scaled by `damage/maxHP/3` while the enemy lives, whole
+when it dies. The weak-monster ratio bands (`Server-Attack.cpp:4003-4058`;
+hunger/tiredness CUT) are ported but **disabled** behind
+`WEAK_MONSTER_PENALTY = false` (owner directive, 2026-10-20: full EXP and
+normal drops regardless of level difference — legacy drops never carried a
+level term either). A grant crossing `next_threshold` runs the `level_up` UPDATE,
 mirrors the row into the session copy, restores life to the new maximum, and
 answers 215 + 7221 to the 3×3 cell (self included) instead of the 270 — one
 level per grant, capped at 120, exactly the legacy's order (frames, then grant

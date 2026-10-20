@@ -153,14 +153,23 @@ pub(crate) fn apply_critical(damage: i32, critical_rate: i32, roll: i32) -> i32 
     }
 }
 
+/// The weak-monster EXP ratio cut — **off by owner directive** (Cat,
+/// 2026-10-20): full EXP regardless of level or battle-power difference. Flip
+/// to `true` to re-enable the legacy bands in [`weak_monster_percent`]; the
+/// ladder behind the switch is kept exact and tested, so nothing else needs to
+/// change. Drops were never cut by level: legacy `GetRandDropItem` ignores its
+/// `level` argument entirely (`kindinfo-Manager.cpp:68-107`) and the port's
+/// [`gz_data::drops::roll_drop`] has no level input either.
+const WEAK_MONSTER_PENALTY: bool = false;
+
 /// `GetMyExp` + `GetExp`'s weak-monster share — the pool one hit is worth
 /// before the damage split (`Server-Attack.cpp:4138`'s `exp`, seeded at
-/// `Char-Common.cpp:1362` and possibly cut down at `:4003-4058`).
+/// `Char-Common.cpp:1362`, optionally cut down at `:4003-4058`).
 ///
-/// The seed is the enemy's kind `Exp` column plus `level - 1`, then the
-/// [`weak_monster_percent`] share. No region, event or village multiplier is
-/// applied: all external bonus sources are cut for P1 (owner decision,
-/// 2026-10-19).
+/// The seed is the enemy's kind `Exp` column plus `level - 1`, then — while
+/// [`WEAK_MONSTER_PENALTY`] stands `false` — nothing else: the whole pool,
+/// every time. No region, event or village multiplier is applied either: all
+/// external bonus sources are cut for P1 (owner decision, 2026-10-19).
 #[must_use]
 pub(crate) fn exp_seed(
     kind_exp: i64,
@@ -170,6 +179,11 @@ pub(crate) fn exp_seed(
     enemy_battle: i32,
 ) -> i64 {
     let pool = kind_exp + i64::from(enemy_level - 1);
+    if !WEAK_MONSTER_PENALTY {
+        // No weak-monster penalty: a level-120 farmer takes the same pool
+        // from a level-1 kill as the level-1 who farmed it.
+        return pool;
+    }
     pool * i64::from(weak_monster_percent(
         killer_level,
         attacker_battle,
@@ -177,9 +191,12 @@ pub(crate) fn exp_seed(
     )) / 100
 }
 
-/// The weak-monster gate `GetExp` applies when the killer is a PC past level
-/// 20 (`Server-Attack.cpp:4003-4058`): the enemy's battle power as a share of
-/// the killer's, cut into the legacy's bands — 0/30/40/60/80/100 percent.
+/// The legacy weak-monster gate `GetExp` applies when the killer is a PC past
+/// level 20 (`Server-Attack.cpp:4003-4058`): the enemy's battle power as a
+/// share of the killer's, cut into the legacy's bands — 0/30/40/60/80/100
+/// percent. Behind [`WEAK_MONSTER_PENALTY`] (`false`), so [`exp_seed`] never
+/// consults it — kept exact and tested so flipping the switch restores the
+/// legacy behaviour with no further edit.
 ///
 /// A killer at level 20 or under is never cut (the gate is `level > 20`), an
 /// enemy with no battle power falls on the legacy's `else percent = 0` arm and
@@ -902,23 +919,32 @@ mod tests {
     }
 
     #[test]
-    fn experience_pool_is_kind_exp_plus_level_then_the_weak_share() {
-        // `GetMyExp()` = kind exp + (level - 1), whole while the killer is at
-        // or under the gate's level 20.
+    fn experience_pool_is_whole_while_the_weak_monster_penalty_is_off() {
+        // `GetMyExp()` = kind exp + (level - 1) — and nothing else, per the
+        // owner directive behind `WEAK_MONSTER_PENALTY`: every ratio that the
+        // legacy band ladder would have cut down still pays the whole pool.
         assert_eq!(exp_seed(90, 1, 1, 100, 100), 90);
         assert_eq!(exp_seed(90, 10, 20, 100, 100), 99, "kind exp + (level - 1)");
-        // Past the gate the weak band takes its cut *before* any scaling.
+        assert_eq!(exp_seed(90, 10, 21, 100, 40), 99, "40% ratio: no 30% band");
+        assert_eq!(exp_seed(90, 10, 21, 100, 90), 99, "90% ratio stays whole");
+        assert_eq!(exp_seed(90, 10, 21, 100, 20), 99, "20% ratio: not zeroed");
         assert_eq!(
-            exp_seed(90, 10, 21, 100, 40),
-            29,
-            "40% share -> band 30: 99*30/100"
+            exp_seed(90, 10, 21, 100, 0),
+            99,
+            "an enemy with no battle power still pays — the legacy's `else 0` is off"
         );
-        assert_eq!(exp_seed(90, 10, 21, 100, 90), 99, "90% share is whole");
-        assert_eq!(exp_seed(90, 10, 21, 100, 20), 0, "20% share -> band 0");
+        assert_eq!(
+            exp_seed(90, 10, 120, i32::MAX, 0),
+            99,
+            "the level-120 farmer case the directive is about"
+        );
     }
 
+    /// The ladder **behind** `WEAK_MONSTER_PENALTY` — `exp_seed` no longer
+    /// consults it, but it stays exact so flipping the switch back on needs
+    /// no re-verification.
     #[test]
-    fn the_weak_monster_gate_walks_the_legacy_bands() {
+    fn the_disabled_weak_monster_ladder_still_walks_the_legacy_bands() {
         // The enemy's battle power as a share of the killer's, past the gate.
         assert_eq!(weak_monster_percent(21, 100, 39), 0, "below 40%");
         assert_eq!(weak_monster_percent(21, 100, 40), 30);
