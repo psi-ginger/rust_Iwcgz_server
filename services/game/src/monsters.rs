@@ -1205,10 +1205,6 @@ impl MonsterWorld {
             combat::level_ac(target.level),
         );
         let life = registry.set_life(target_key, damage)?;
-        logln!(
-            "game: monster {} hit character {target_unique} for {damage}, {life} life left",
-            self.monsters[index].unique
-        );
         Some(PlayerHit {
             key: target_key,
             char_unique: target_unique,

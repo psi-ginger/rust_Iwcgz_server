@@ -465,17 +465,6 @@ pub(crate) async fn player_swing(
             return Ok(Swing::NoTarget);
         };
         if (tx - ax).abs() > range || (ty - ay).abs() > range {
-            // Both sides of this comparison come from stores that are updated on
-            // separate paths, and a player has a third copy in the registry — so
-            // a failure is only actionable with every copy of "where I am" in
-            // view next to the target's.
-            let seen = registry
-                .info(session_key)
-                .map_or_else(|| "unknown".to_string(), |i| format!("({}, {})", i.x, i.y));
-            logln!(
-                "game: swing {target_unique} out of range: gate uses ({ax}, {ay}), registry \
-                 says {seen}, monster at ({tx}, {ty}), range {range}, class {class_kind}"
-            );
             return Ok(Swing::OutOfRange);
         }
         world.hit_by_player(

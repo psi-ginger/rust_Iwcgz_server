@@ -77,11 +77,6 @@ pub(crate) async fn handle_change_status_info(
         &body,
     )
     .await?;
-    logln!(
-        "game: changestatusinfo AUTOFOOD switch={} for char_unique {own_unique} ({} bytes)",
-        change.change_switch,
-        body.len()
-    );
     Ok(())
 }
 

@@ -834,9 +834,11 @@ async fn handle_client(
                                 )
                                 .await?;
                                 // A landing swing is self-evident — the client
-                                // prints the number — so only the two ways it
-                                // fails are worth a line.
-                                if outcome != Swing::Landed {
+                                // prints the number — and an out-of-range miss
+                                // is the approach loop's routine tick (muted,
+                                // lean logging): only a swing with nobody to
+                                // swing at is worth a line.
+                                if outcome == Swing::NoTarget {
                                     logln!(
                                         "game: {peer}: swing at {target} did not land: \
                                          {outcome:?}"
@@ -992,7 +994,13 @@ async fn handle_client(
                     return Ok(());
                 }
             };
-            logln!("game: {peer}: recv opcode {cmd} ({} bytes)", payload.len());
+            // 100 (heartbeat) and 230 (statusinfo) ride the client's keepalive
+            // timer: muted, they dominated the recv log for no signal.
+            if cmd != GameMsg::RequestHeartbeat as u16
+                && cmd != GameMsg::RequestChangestatusinfo as u16
+            {
+                logln!("game: {peer}: recv opcode {cmd} ({} bytes)", payload.len());
+            }
             // The AFK clock reads here, before dispatch, so no arm's
             // `continue` can skip it; which frames reset it is
             // `Registry::note_activity`'s table.
@@ -1704,8 +1712,8 @@ async fn handle_client(
                 c if c == GameMsg::RequestHeartbeat as u16 => {
                     // `DoMsg_GAMEMSG_REQUEST_HEARTBEAT` is an empty no-op
                     // (`Server-System.cpp:520-524`): the client says "still
-                    // here" and the server answers nothing.
-                    logln!("game: {peer}: heartbeat -> no reply (legacy no-op)");
+                    // here" and the server answers nothing. Its log line is
+                    // muted — the arm runs on every keepalive timer.
                 }
                 // The reference server sends nothing for 246; the data the client
                 // wants arrives after 230.

@@ -584,7 +584,7 @@ pub(crate) async fn step_movement(
     let was = registry.info(session_key);
     let was_cell = was.as_ref().map(|i| cell_of(i.x, i.y, i.map_id));
     registry.update_pos(session_key, x, y);
-    let observers = {
+    {
         let character = live
             .character
             .as_ref()
@@ -597,8 +597,8 @@ pub(crate) async fn step_movement(
             x,
             y,
             false,
-        )?
-    };
+        )?;
+    }
     let now = registry.info(session_key);
     if let (Some(was), Some(now)) = (was.as_ref(), now.as_ref())
         && was_cell.is_some_and(|was| was != cell_of(x, y, now.map_id))
@@ -636,9 +636,6 @@ pub(crate) async fn step_movement(
     }
 
     send_char_update(stream, outbound, live, x, y, false).await?;
-    if observers > 0 {
-        logln!("game: char {session_key} fanned 200 to {observers} observer(s) at ({x}, {y})");
-    }
     Ok(())
 }
 
@@ -763,19 +760,12 @@ pub(crate) async fn handle_userorder(
     //
     // Build a temporary SessionInfo for the mover to fan the 241.
     let mover_session_info = session_info_for(live)?;
-    let fanned_241 = registry.broadcast_near_others(
+    registry.broadcast_near_others(
         &mover_session_info,
         session_key,
         GameMsg::ResponseUserorder as u16,
         order_241_body.clone(),
     );
-    if fanned_241 > 0 {
-        logln!(
-            "game: char {session_key} fanned 241 to {fanned_241} observer(s) at ({}, {})",
-            start.0,
-            start.1
-        );
-    }
     // The reference server broadcasts the cell the move starts from, then one
     // 200 per committed tile (the captured run was 241, 200, 200). The start-cell
     // 200 is fanned too (slice 6 B1): the legacy's `SendCharUpdate` is one call for
