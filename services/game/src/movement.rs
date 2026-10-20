@@ -1630,6 +1630,25 @@ mod tests {
         async fn add_exp(&self, _character_id: i32, delta: i64) -> Result<i64, RepositoryError> {
             Ok(delta)
         }
+
+        /// No test levels a character up — the legacy-shaped increments are
+        /// the Pg implementation's business. The post-state is echoed back
+        /// plausible (the requested maxima, one level on) so a caller reading
+        /// the row still gets one.
+        async fn level_up(
+            &self,
+            _character_id: i32,
+            max_life: i32,
+            max_mana: i32,
+        ) -> Result<gz_db::LevelUpRow, RepositoryError> {
+            Ok(gz_db::LevelUpRow {
+                level: 2,
+                exp: 0,
+                bonus_points: 5,
+                max_life,
+                max_mana,
+            })
+        }
     }
 
     /// A row standing on Hanyang's east gate, as the character loader would hand

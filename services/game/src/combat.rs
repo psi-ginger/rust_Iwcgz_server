@@ -25,11 +25,13 @@ use std::path::Path;
 use std::sync::Mutex;
 use std::time::Instant;
 
-use gz_data::kindinfo::{CharAttackRow, canonical_char_attack, load_kind_unique};
+use gz_data::kindinfo::{CharAttackRow, battle_power, canonical_char_attack, load_kind_unique};
+use gz_data::levelup::LevelUpTable;
 use gz_db::{
     CharacterFull, CharacterRepository, ItemRepository, PgCharacterRepository, PgItemRepository,
 };
-use gz_proto::combat::{GetExpResponse, HIT_TARGET_MONSTER, HitResponse};
+use gz_proto::combat::{GetExpResponse, HIT_TARGET_MONSTER, HitResponse, LevelUpResponse};
+use gz_proto::game::encode_person_ip;
 use gz_proto::item::{Item, encode_person_item_gained};
 use gz_proto::opcodes_game::GameMsg;
 use gz_proto::order::OrderData;
@@ -37,7 +39,9 @@ use gz_proto::order::OrderData;
 use crate::monsters;
 use crate::movement::{Movement, next_move_deadline};
 use crate::registry::{Registry, SessionKey};
-use crate::{AnyError, GameSession, logln, logln_err, now_tick};
+use crate::stats::{basic_info_for, derived_max_life, derived_max_mana};
+use crate::world::LiveFrames;
+use crate::{AnyError, logln, logln_err, now_tick};
 
 /// The tier ladder `CalcLevelDamage` (`Parametabox.cpp:56-89`) and `CalcLevelAC`
 /// (`:7325-7338`) share. Each arm takes what is above its threshold, divides by
@@ -149,20 +153,99 @@ pub(crate) fn apply_critical(damage: i32, critical_rate: i32, roll: i32) -> i32 
     }
 }
 
-/// One hit's experience — `GetExp`'s core (`Server-Attack.cpp:4138`):
-/// `exp = (exp * damage) / enemymaxdamage / 3`, where `exp` is the enemy's
-/// `GetMyExp()` (`Char-Common.cpp:1362`), i.e. its kind's `Exp` column plus
-/// `level - 1`.
+/// `GetMyExp` + `GetExp`'s weak-monster share — the pool one hit is worth
+/// before the damage split (`Server-Attack.cpp:4138`'s `exp`, seeded at
+/// `Char-Common.cpp:1362` and possibly cut down at `:4003-4058`).
+///
+/// The seed is the enemy's kind `Exp` column plus `level - 1`, then the
+/// [`weak_monster_percent`] share. No region, event or village multiplier is
+/// applied: all external bonus sources are cut for P1 (owner decision,
+/// 2026-10-19).
+#[must_use]
+pub(crate) fn exp_seed(
+    kind_exp: i64,
+    enemy_level: i32,
+    killer_level: i16,
+    attacker_battle: i32,
+    enemy_battle: i32,
+) -> i64 {
+    let pool = kind_exp + i64::from(enemy_level - 1);
+    pool * i64::from(weak_monster_percent(
+        killer_level,
+        attacker_battle,
+        enemy_battle,
+    )) / 100
+}
+
+/// The weak-monster gate `GetExp` applies when the killer is a PC past level
+/// 20 (`Server-Attack.cpp:4003-4058`): the enemy's battle power as a share of
+/// the killer's, cut into the legacy's bands — 0/30/40/60/80/100 percent.
+///
+/// A killer at level 20 or under is never cut (the gate is `level > 20`), an
+/// enemy with no battle power falls on the legacy's `else percent = 0` arm and
+/// earns nothing, and a negative killer power — impossible on a real row —
+/// keeps the full grant behind the same `attackerbattle >= 0` that skips the
+/// whole block.
+#[must_use]
+pub(crate) fn weak_monster_percent(
+    killer_level: i16,
+    attacker_battle: i32,
+    enemy_battle: i32,
+) -> i32 {
+    if killer_level <= 20 || attacker_battle < 0 {
+        return 100;
+    }
+    let percent = if attacker_battle > 0 {
+        enemy_battle * 100 / attacker_battle
+    } else {
+        0
+    };
+    // The legacy's band ladder (`:4015-4055`). The `addHunger` steps riding
+    // the same bands belong to tiredness, which is on the cut list with the
+    // rest of the health system.
+    if percent < 40 {
+        0
+    } else if percent < 50 {
+        30
+    } else if percent < 60 {
+        40
+    } else if percent < 70 {
+        60
+    } else if percent < 80 {
+        80
+    } else {
+        100
+    }
+}
+
+/// The living-target share of a pool: `exp = (exp * damage) / enemymaxdamage
+/// / 3` (`Server-Attack.cpp:4131-4145`). A killing blow skips this — the same
+/// `IsAlive(enemyid)` check is what makes it — and takes the whole pool, so
+/// the caller's `hit.died` is the switch.
 ///
 /// Both divisions truncate, in that order, so a chip hit on a huge monster
-/// yields 0 — which is the legacy's behaviour, not a bug.
+/// yields 0 — which is the legacy's behaviour, not a bug. A non-positive
+/// result reaches the caller's `exp <= 0` gate (`:4209`) and is not granted.
 #[must_use]
-pub(crate) fn exp_for_hit(kind_exp: i64, enemy_level: i32, damage: i32, enemy_max_hp: i32) -> i64 {
-    let my_exp = kind_exp + i64::from(enemy_level - 1);
-    if enemy_max_hp <= 0 || damage <= 0 {
+pub(crate) fn exp_for_hit(pool: i64, damage: i32, enemy_max_hp: i32) -> i64 {
+    if enemy_max_hp <= 0 {
         return 0;
     }
-    (my_exp * i64::from(damage)) / i64::from(enemy_max_hp) / 3
+    (pool * i64::from(damage)) / i64::from(enemy_max_hp) / 3
+}
+
+/// `IncreaseExp`'s threshold check (`Parametabox.cpp:43-53`): the grant took
+/// the total to or past the next level's requirement, and the level it lands
+/// on is `level + 1` — the legacy's `IncreaseLevel(1)` raises exactly one per
+/// grant, however far the overshoot reaches, and re-checks only on the next
+/// grant. `None` at the cap, where [`LevelUpTable::next_threshold`] has no row
+/// and `GetLevel() < MAX_CHARACTER_LEVEL` (`:49`) refuses at the same point.
+#[must_use]
+pub(crate) fn leveled_to(table: &LevelUpTable, level: i16, exp_after_grant: i64) -> Option<i16> {
+    table
+        .next_threshold(level)
+        .filter(|need| exp_after_grant >= *need)
+        .map(|_| level + 1)
 }
 
 /// A player's default-weapon attack rows, resolved once at boot by joining the
@@ -409,8 +492,11 @@ pub(crate) fn start_approach(
 }
 
 /// Resolves one player swing against a field monster, end to end: the range
-/// gate, the power and crit rolls, the 268 that carries the new life, and — on
-/// a kill — the death frames, the EXP grant and the drop roll.
+/// gate, the power and crit rolls, the 268 that carries the new life, the EXP
+/// grant every landed hit earns, and — on a kill — the death frames and the
+/// drop roll. A grant that crosses the next threshold levels the character
+/// (215 + 7221 to the neighbourhood, and no 270) instead of answering with
+/// the plain grant frame.
 ///
 /// One body serves both wire shapes that reach it. `REQUEST_HIT` (267) is what
 /// the design doc assumed, but the shipped client only ever built it inside a
@@ -427,8 +513,8 @@ pub(crate) async fn player_swing(
     characters: &PgCharacterRepository,
     items: &PgItemRepository,
     session_key: SessionKey,
-    login: &Option<GameSession>,
-    character: &CharacterFull,
+    level_table: &LevelUpTable,
+    live: &mut LiveFrames<'_>,
     (ax, ay): (i32, i32),
     target_unique: u16,
 ) -> Result<Swing, AnyError> {
@@ -441,10 +527,33 @@ pub(crate) async fn player_swing(
     if me.life == 0 {
         return Ok(Swing::NoTarget);
     }
-    let class_kind = u16::try_from(character.class_kind).unwrap_or(1);
+    // Everything this swing reads out of the session row, taken before the
+    // level-up below writes back through `&mut live`: one borrow, done with,
+    // and no character in the world means nothing to swing at.
+    let Some((
+        character_id,
+        class_kind,
+        attacker_level,
+        attacker_str,
+        attacker_dex,
+        attacker_mag,
+        attacker_vit,
+    )) = live.character.as_ref().map(|character| {
+        (
+            character.character_id,
+            u16::try_from(character.class_kind).unwrap_or(1),
+            character.level,
+            character.str,
+            character.dex,
+            character.mag,
+            character.vit,
+        )
+    })
+    else {
+        return Ok(Swing::NoTarget);
+    };
     let range = player_attacks.range(class_kind);
-    let (min, max) =
-        player_attacks.raw_power(class_kind, character.str, i32::from(character.level));
+    let (min, max) = player_attacks.raw_power(class_kind, attacker_str, i32::from(attacker_level));
     let raw = roll_power(min, max, combat_rng.up_to((max - min).max(0)));
     let crit = apply_critical(
         raw,
@@ -506,53 +615,145 @@ pub(crate) async fn player_swing(
         .to_vec(),
     );
 
+    // What this hit is worth, decided before any frame goes out so both arms
+    // of the legacy's `IsAlive(enemyid)` (`Server-Attack.cpp:4131`) share one
+    // grant point. `ExpOperate` runs at `Hit`'s tail (`:2921-2928`), i.e.
+    // after the damage frames — which the single grant below honours.
+    let gained = {
+        let pool = exp_seed(
+            hit.exp,
+            hit.level,
+            attacker_level,
+            battle_power(attacker_str, attacker_dex, attacker_mag, attacker_vit),
+            hit.battle_power,
+        );
+        if hit.died {
+            // Not alive, so the scaling is skipped and the killing blow takes
+            // the pool whole.
+            pool
+        } else {
+            // Alive: share by the damage actually dealt — `clinfo.siDamage =
+            // realdamage` (`:2926`), which is `hit.damage`, not the
+            // pre-defence roll the 268 reports.
+            exp_for_hit(
+                pool,
+                hit.damage,
+                i32::try_from(hit.max_life).unwrap_or(i32::MAX),
+            )
+        }
+    };
+
+    if hit.died {
+        // Death: no dedicated opcode. `Life = 0` in the 268 is the first half and
+        // `ORDER_DIE` in a 241 is the animation, which is what this frame is. The
+        // 11 that removes the avatar is deliberately *not* sent here — a client
+        // that receives both in one pass deletes the avatar before the animation
+        // can draw, so the world holds the corpse and `despawn_corpses` sends the
+        // removal once [`monsters::CORPSE_MS`] has run. The legacy reaches the same
+        // place by holding the dead char until its action loop finds it invalid
+        // (`CharManager.cpp:257-277`).
+        registry.broadcast_near_point(
+            monsters::FIELD_MAP,
+            hit.x,
+            hit.y,
+            GameMsg::ResponseUserorder as u16,
+            OrderData::die_order(i32::from(hit.unique))
+                .encode()
+                .to_vec(),
+        );
+    }
+
+    // The grant (`ExpOperate`, `Server-Attack.cpp:4172`): persist first, then
+    // either level up — 215 to self, 7221 to the neighbourhood including the
+    // leveler (`char.cpp:5943`), and no 270 because `IncreaseExp` returned
+    // TRUE instead of the grant frame — or answer with the plain 270.
+    if gained > 0 {
+        let new_exp = characters.add_exp(character_id, gained).await?;
+        if let Some(new_level) = leveled_to(level_table, attacker_level, new_exp) {
+            let row = characters
+                .level_up(
+                    character_id,
+                    derived_max_life(attacker_vit, new_level),
+                    derived_max_mana(attacker_mag, new_level),
+                )
+                .await?;
+            // Mirror into the session row — the `handle_use_bonus` pattern
+            // (`stats.rs`): the next 215/248, this swing's own power roll and
+            // the next 250 allowance all read it.
+            if let Some(character) = live.character.as_mut() {
+                character.level = row.level;
+                character.exp = row.exp;
+                character.bonus_points = row.bonus_points;
+                character.max_life = row.max_life;
+                character.max_mana = row.max_mana;
+            }
+            // The full-heal half of `LevelUpAction` (`SetLife(GetMaxLife())`,
+            // `char.cpp:5794`) — session life is a session value with no DB
+            // write (`registry::restore_life`) — plus the session's cached
+            // level that the 119 chat delivery echoes
+            // (`Server-System.cpp:591`).
+            registry.update_level(session_key, i32::from(row.level));
+            registry.restore_life(session_key, u32::try_from(row.max_life).unwrap_or(0));
+            // The `UPDATE_IP` flush (`char.cpp:5968`) as a 215, built the way
+            // `handle_use_bonus` builds it so the two frames cannot disagree.
+            let body = {
+                let character = live
+                    .character
+                    .as_ref()
+                    .ok_or("level-up row disappeared after the write")?;
+                let basic = basic_info_for(live.account_id, &live.account_name, character)?;
+                // Re-capture the block the 214 inspect reads.
+                registry.set_basic_info(session_key, basic.clone());
+                encode_person_ip(me.char_unique.si16(), &basic)
+            };
+            registry.send_to(session_key, GameMsg::ResponsePersonIp as u16, body);
+            // `cltGameMsgResponse_LevelUp` to the 3×3 cell block around the
+            // kill, self included — `SendNeighbourMsg(&clMsg, true)` fans from
+            // the leveler's own position (`char.cpp:5945`).
+            registry.broadcast_near_point(
+                monsters::FIELD_MAP,
+                hit.x,
+                hit.y,
+                GameMsg::ResponseLevelup as u16,
+                LevelUpResponse {
+                    si_char_unique: me.char_unique.si16(),
+                    si_level: i8::try_from(row.level).map_err(|_| {
+                        format!("level {} does not fit the SI08 siLevel", row.level)
+                    })?,
+                    si_fame_level: 0,
+                }
+                .encode()
+                .to_vec(),
+            );
+            let name = live
+                .character
+                .as_ref()
+                .map(|character| character.name.clone())
+                .unwrap_or_default();
+            logln!(
+                "game: level up: {name} reached level {} (exp {}, bonus {}) — 215 + 7221",
+                row.level,
+                row.exp,
+                row.bonus_points
+            );
+        } else {
+            registry.send_to(
+                session_key,
+                GameMsg::ResponseGetexp as u16,
+                GetExpResponse {
+                    si_char_unique: me.char_unique.si16(),
+                    si_reason: 0,
+                    si_exp: gained.min(i32::MAX as i64) as i32,
+                    si_fame_exp: 0,
+                }
+                .encode()
+                .to_vec(),
+            );
+        }
+    }
+
     if !hit.died {
         return Ok(Swing::Landed);
-    }
-    // Death: no dedicated opcode. `Life = 0` in the 268 is the first half and
-    // `ORDER_DIE` in a 241 is the animation, which is what this frame is. The
-    // 11 that removes the avatar is deliberately *not* sent here — a client
-    // that receives both in one pass deletes the avatar before the animation
-    // can draw, so the world holds the corpse and `despawn_corpses` sends the
-    // removal once [`monsters::CORPSE_MS`] has run. The legacy reaches the same
-    // place by holding the dead char until its action loop finds it invalid
-    // (`CharManager.cpp:257-277`).
-    registry.broadcast_near_point(
-        monsters::FIELD_MAP,
-        hit.x,
-        hit.y,
-        GameMsg::ResponseUserorder as u16,
-        OrderData::die_order(i32::from(hit.unique))
-            .encode()
-            .to_vec(),
-    );
-
-    let Some(character_id) = login.as_ref().and_then(|s| s.character_id) else {
-        // `GetExp`'s share, per hit and not per kill
-        // (`Server-Attack.cpp:4138`) needs an owning row; without one the kill
-        // still stands and only the reward is lost.
-        return Ok(Swing::Landed);
-    };
-    let gained = exp_for_hit(
-        hit.exp,
-        hit.level,
-        crit,
-        i32::try_from(hit.max_life).unwrap_or(i32::MAX),
-    );
-    if gained > 0 {
-        characters.add_exp(character_id, gained).await?;
-        registry.send_to(
-            session_key,
-            GameMsg::ResponseGetexp as u16,
-            GetExpResponse {
-                si_char_unique: me.char_unique.si16(),
-                si_reason: 0,
-                si_exp: gained.min(i32::MAX as i64) as i32,
-                si_fame_exp: 0,
-            }
-            .encode()
-            .to_vec(),
-        );
     }
     // `GetRandDropItem` rolled at most one entry at death
     // (`kindinfo-Manager.cpp:68-107`); grant it into the bag.
@@ -701,20 +902,102 @@ mod tests {
     }
 
     #[test]
-    fn experience_is_the_legacy_share_of_a_kill() {
-        // `GetMyExp()` = kind exp + (level - 1); the share is
-        // `(exp * damage) / maxhp / 3`.
-        // kind exp 90, level 1 -> 90; damage 60 of 60 max -> 90*60/60/3 = 30.
-        assert_eq!(exp_for_hit(90, 1, 60, 60), 30);
+    fn experience_pool_is_kind_exp_plus_level_then_the_weak_share() {
+        // `GetMyExp()` = kind exp + (level - 1), whole while the killer is at
+        // or under the gate's level 20.
+        assert_eq!(exp_seed(90, 1, 1, 100, 100), 90);
+        assert_eq!(exp_seed(90, 10, 20, 100, 100), 99, "kind exp + (level - 1)");
+        // Past the gate the weak band takes its cut *before* any scaling.
+        assert_eq!(
+            exp_seed(90, 10, 21, 100, 40),
+            29,
+            "40% share -> band 30: 99*30/100"
+        );
+        assert_eq!(exp_seed(90, 10, 21, 100, 90), 99, "90% share is whole");
+        assert_eq!(exp_seed(90, 10, 21, 100, 20), 0, "20% share -> band 0");
+    }
+
+    #[test]
+    fn the_weak_monster_gate_walks_the_legacy_bands() {
+        // The enemy's battle power as a share of the killer's, past the gate.
+        assert_eq!(weak_monster_percent(21, 100, 39), 0, "below 40%");
+        assert_eq!(weak_monster_percent(21, 100, 40), 30);
+        assert_eq!(weak_monster_percent(21, 100, 49), 30, "the band is 40..50");
+        assert_eq!(weak_monster_percent(21, 100, 50), 40);
+        assert_eq!(weak_monster_percent(21, 100, 59), 40);
+        assert_eq!(weak_monster_percent(21, 100, 60), 60);
+        assert_eq!(weak_monster_percent(21, 100, 69), 60);
+        assert_eq!(weak_monster_percent(21, 100, 70), 80);
+        assert_eq!(weak_monster_percent(21, 100, 79), 80);
+        assert_eq!(
+            weak_monster_percent(21, 100, 80),
+            100,
+            "80% and up is whole"
+        );
+        assert_eq!(weak_monster_percent(21, 100, 500), 100, "stronger than us");
+        // The gate: a killer at or under level 20 is never cut...
+        assert_eq!(weak_monster_percent(20, 100, 0), 100);
+        assert_eq!(weak_monster_percent(1, 100, 0), 100);
+        // ...while an enemy with no battle power earns nothing on the legacy's
+        // `else percent = 0` arm, and the share truncates like its `* 100 /`.
+        assert_eq!(weak_monster_percent(21, 100, 0), 0);
+        assert_eq!(weak_monster_percent(21, 3, 1), 0, "1*100/3 -> 33");
+        // A negative killer power is left alone by `attackerbattle >= 0`.
+        assert_eq!(weak_monster_percent(21, -1, 500), 100);
+    }
+
+    #[test]
+    fn experience_is_the_legacy_share_of_a_living_hit() {
+        // The pool from `exp_seed`, split by `(pool * damage) / maxhp / 3`
+        // (`Server-Attack.cpp:4138`).
+        // pool 90, damage 60 of 60 max -> 90*60/60/3 = 30.
+        assert_eq!(exp_for_hit(90, 60, 60), 30);
         // A chip hit on the same monster: 90 * 3 / 60 / 3 = 1 (truncated).
-        assert_eq!(exp_for_hit(90, 1, 3, 60), 1);
-        // Level 10 raises the pool by 9.
-        assert_eq!(exp_for_hit(90, 10, 60, 60), 33);
-        // A hit that kills a much larger monster still shares by the same rule.
-        assert_eq!(exp_for_hit(300, 20, 10, 1000), 1);
+        assert_eq!(exp_for_hit(90, 3, 60), 1);
+        // The level-10 pool of 99: 99 * 60 / 60 / 3 = 33.
+        assert_eq!(exp_for_hit(99, 60, 60), 33);
+        // A hit on a much larger monster shares by the same rule.
+        assert_eq!(exp_for_hit(319, 10, 1000), 1);
         // Degenerate inputs cannot divide by zero.
-        assert_eq!(exp_for_hit(90, 1, 0, 60), 0);
-        assert_eq!(exp_for_hit(90, 1, 60, 0), 0);
+        assert_eq!(exp_for_hit(90, 0, 60), 0);
+        assert_eq!(exp_for_hit(90, 60, 0), 0);
+    }
+
+    /// The threshold check `IncreaseExp` runs (`Parametabox.cpp:49`): the
+    /// exact boundary, one level per grant, nothing at the cap.
+    #[test]
+    fn a_grant_levels_once_at_the_threshold_and_never_past_120() {
+        // 120 rows shaped like the shipped file, `NeedExp` = 75 * (level - 1),
+        // so a level-1 character needs 75 for level 2.
+        let mut file = String::new();
+        for level in 1..=120 {
+            file.push_str(&format!(
+                "{level}\t{}\t0\t0\t0\n",
+                75 * i64::from(level - 1)
+            ));
+        }
+        let table = LevelUpTable::parse(file.as_bytes()).expect("120 rows");
+        assert_eq!(
+            leveled_to(&table, 1, 74),
+            None,
+            "one below the 75 threshold"
+        );
+        assert_eq!(leveled_to(&table, 1, 75), Some(2), "exactly at it");
+        // One level per grant — the legacy's `IncreaseLevel(1)`: even a 9.9M
+        // overshoot lands on 2, not 3, and the next grant re-checks from there.
+        assert_eq!(leveled_to(&table, 1, 9_999_999), Some(2));
+        assert_eq!(leveled_to(&table, 2, 149), None, "level 2 needs 150");
+        assert_eq!(leveled_to(&table, 2, 150), Some(3));
+        assert_eq!(
+            leveled_to(&table, 120, i64::MAX),
+            None,
+            "the cap has no next level"
+        );
+        assert_eq!(
+            leveled_to(&LevelUpTable::empty(), 1, i64::MAX),
+            None,
+            "no table, no level-ups"
+        );
     }
 
     /// The join resolves the shipped data end to end: a real PC class kind must

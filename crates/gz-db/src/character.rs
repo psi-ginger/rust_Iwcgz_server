@@ -153,6 +153,21 @@ pub struct StatsUpdate {
     pub max_mana: i32,
 }
 
+/// The `RETURNING` half of [`CharacterRepository::level_up`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LevelUpRow {
+    /// Post-increment `level`.
+    pub level: i16,
+    /// `exp` — the level-up itself moves no experience.
+    pub exp: i64,
+    /// Post-increment `bonus_points`.
+    pub bonus_points: i16,
+    /// The derived maximum recomputed by the caller at the new level.
+    pub max_life: i32,
+    /// As [`Self::max_life`], for mana.
+    pub max_mana: i32,
+}
+
 /// The character storage interface.
 #[async_trait]
 pub trait CharacterRepository: Send + Sync {
@@ -308,6 +323,29 @@ pub trait CharacterRepository: Send + Sync {
     ///
     /// [`RepositoryError::Database`] if the update fails.
     async fn add_exp(&self, character_id: i32, delta: i64) -> Result<i64, RepositoryError>;
+
+    /// Applies one level-up — `LevelUpAction` (`char.cpp:5763-5801`): level
+    /// `+1`, bonus points `+5`, skill bonus `+1`, and the two derived maxima
+    /// recomputed by the caller at the new level. The `+5` moves the DDL's
+    /// `abilities + bonus == level*5 + 35` with it, since the allowance the
+    /// 250 spend checks grows by exactly that (`stats.rs` `allocate_stat`).
+    ///
+    /// The legacy flushes the row immediately (`SendDBLevelInfo(5, 1)`,
+    /// `char.cpp:5801`) — this UPDATE is that flush, carrying both deltas the
+    /// way the legacy sends them.
+    ///
+    /// Returns the post-state row for the caller to mirror into its session
+    /// copy.
+    ///
+    /// # Errors
+    ///
+    /// [`RepositoryError::Database`] if the update fails or names no row.
+    async fn level_up(
+        &self,
+        character_id: i32,
+        max_life: i32,
+        max_mana: i32,
+    ) -> Result<LevelUpRow, RepositoryError>;
 }
 
 /// PostgreSQL implementation. Cheap to clone (shares the pool).
@@ -676,6 +714,36 @@ impl CharacterRepository for PgCharacterRepository {
         .fetch_one(&self.pool)
         .await?;
         Ok(row.0)
+    }
+
+    async fn level_up(
+        &self,
+        character_id: i32,
+        max_life: i32,
+        max_mana: i32,
+    ) -> Result<LevelUpRow, RepositoryError> {
+        // One statement, like `add_exp`: the increments land in the same
+        // transaction as the RETURNING row the caller mirrors, so a crash
+        // between them cannot leave a half-applied level-up.
+        let row: (i16, i64, i16, i32, i32) = sqlx::query_as(
+            "UPDATE character_stats \
+             SET level = level + 1, bonus_points = bonus_points + 5, \
+             skill_bonus = skill_bonus + 1, max_life = $2, max_mana = $3 \
+             WHERE character_id = $1 \
+             RETURNING level, exp, bonus_points, max_life, max_mana",
+        )
+        .bind(character_id)
+        .bind(max_life)
+        .bind(max_mana)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(LevelUpRow {
+            level: row.0,
+            exp: row.1,
+            bonus_points: row.2,
+            max_life: row.3,
+            max_mana: row.4,
+        })
     }
 }
 

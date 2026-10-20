@@ -269,6 +269,21 @@ impl MonsterStats {
             move_speed: create.move_speed,
         }
     }
+
+    /// This kind's [`battle_power`] over the stats it actually fights with.
+    #[must_use]
+    pub fn battle_power(&self) -> i32 {
+        battle_power(self.str, self.dex, self.intl, self.vit)
+    }
+}
+
+/// `cltParametaBox::GetBattlePower` (`Parametabox.cpp:4162-4167`): the four
+/// offensive abilities, halved. Both sides of `GetExp`'s weak-monster gate
+/// (`Server-Attack.cpp:4003`) are this number — a PC's from its character
+/// row's base abilities, a monster's from its [`MonsterStats`].
+#[must_use]
+pub fn battle_power(str: i32, dex: i32, mag: i32, vit: i32) -> i32 {
+    (str + dex + mag + vit) / 2
 }
 
 /// Why a kind-data file could not be read.
@@ -517,6 +532,15 @@ mod tests {
         }
         text.push_str("<End>\t\t\r\nKindType\tszcode\r\n");
         text.encode_utf16().flat_map(|u| u.to_le_bytes()).collect()
+    }
+
+    /// `GetBattlePower` (`Parametabox.cpp:4162-4167`) — the abilities halved,
+    /// truncating like the legacy's integer `/ 2`.
+    #[test]
+    fn battle_power_is_the_four_offensive_abilities_halved() {
+        assert_eq!(battle_power(10, 20, 30, 40), 50);
+        assert_eq!(battle_power(5, 5, 5, 5), 10, "a fresh PC's base row");
+        assert_eq!(battle_power(0, 0, 0, 0), 0);
     }
 
     #[test]

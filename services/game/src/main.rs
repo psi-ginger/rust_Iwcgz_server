@@ -37,6 +37,7 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use gz_cipher::Cipher;
+use gz_data::levelup::LevelUpTable;
 use gz_db::{
     FriendRepository, PgAccountRepository, PgCharacterRepository, PgFriendRepository,
     PgItemRepository, PgQuestRepository, QuestRepository,
@@ -337,6 +338,20 @@ async fn serve(cfg: &GameConfig) -> Result<(), AnyError> {
             PlayerAttacks::default()
         }
     });
+    // The level-up thresholds (`LevelUpExp.dat`, `LoadExpData` at
+    // `Parametabox.cpp:8300`). Same degradation as the attack numbers: a data
+    // tree that will not load costs level-ups, not the server — and unlike the
+    // legacy's empty-table behaviour it never levels anybody by accident.
+    let level_table = Arc::new(match LevelUpTable::load(&cfg.data_root) {
+        Ok(table) => table,
+        Err(e) => {
+            logln_err!(
+                "game: {e}; no level-ups without {}/LevelUpExp.dat",
+                cfg.data_root.display()
+            );
+            LevelUpTable::empty()
+        }
+    });
     // The field-monster AI, plus the ground-item sweep (audit H4). One AI pass
     // every `AI_TICK_MS`, entirely under the world lock and never across an
     // await; the sweep runs outside that lock on a slower deadline of its own.
@@ -480,6 +495,7 @@ async fn serve(cfg: &GameConfig) -> Result<(), AnyError> {
         let registry = registry.clone();
         let monsters = monsters.clone();
         let player_attacks = player_attacks.clone();
+        let level_table = level_table.clone();
         let peer = peer.to_string();
         let cfg = cfg.clone();
         tokio::spawn(async move {
@@ -497,6 +513,7 @@ async fn serve(cfg: &GameConfig) -> Result<(), AnyError> {
                 registry,
                 monsters,
                 player_attacks,
+                level_table,
             )
             .await
             {
@@ -574,6 +591,7 @@ async fn handle_client(
     registry: Arc<Registry>,
     monsters: Arc<Mutex<monsters::MonsterWorld>>,
     player_attacks: Arc<PlayerAttacks>,
+    level_table: Arc<LevelUpTable>,
 ) -> Result<(), AnyError> {
     let mut session_state = Session::new(cfg.timeouts);
     if !session_state.accept(now_tick()) {
@@ -812,13 +830,18 @@ async fn handle_client(
                     if let Some((target, due)) = attack
                         && due <= Instant::now()
                     {
-                        attack = match live.character.as_ref() {
-                            Some(character) => {
-                                let (ax, ay) = match movement.as_ref() {
-                                    Some(mv) => mv.pos,
-                                    None => (character.pos_x, character.pos_y),
-                                };
-                                let class_kind = u16::try_from(character.class_kind).unwrap_or(1);
+                        // The pre-swing reads come first: `player_swing` takes
+                        // `live` mutably to mirror a level-up into the session
+                        // row, so no borrow of it may be live across the call.
+                        let pre = live.character.as_ref().map(|character| {
+                            let (ax, ay) = match movement.as_ref() {
+                                Some(mv) => mv.pos,
+                                None => (character.pos_x, character.pos_y),
+                            };
+                            (u16::try_from(character.class_kind).unwrap_or(1), ax, ay)
+                        });
+                        attack = match pre {
+                            Some((class_kind, ax, ay)) => {
                                 let outcome = player_swing(
                                     &registry,
                                     monsters.as_ref(),
@@ -827,8 +850,8 @@ async fn handle_client(
                                     &characters,
                                     &items,
                                     session_key,
-                                    &login,
-                                    character,
+                                    level_table.as_ref(),
+                                    &mut live,
                                     (ax, ay),
                                     target,
                                 )
@@ -867,14 +890,20 @@ async fn handle_client(
                                 if may_start_approach(outcome, movement.is_some(), approach, target)
                                 {
                                     let range = player_attacks.range(class_kind);
-                                    match start_approach(
-                                        monsters.as_ref(),
-                                        player_attacks.as_ref(),
-                                        &mut movement,
-                                        target,
-                                        (ax, ay),
-                                        character,
-                                    ) {
+                                    // Re-borrowed after the swing: the level-up
+                                    // may have rewritten the session row.
+                                    let dest = match live.character.as_ref() {
+                                        Some(character) => start_approach(
+                                            monsters.as_ref(),
+                                            player_attacks.as_ref(),
+                                            &mut movement,
+                                            target,
+                                            (ax, ay),
+                                            character,
+                                        ),
+                                        None => None,
+                                    };
+                                    match dest {
                                         Some(dest) => {
                                             approach = Some(target);
                                             logln!(
@@ -1591,7 +1620,11 @@ async fn handle_client(
                     }
                     last_attack_ms = now_tick();
 
-                    let Some(character) = live.character.as_ref() else {
+                    let Some((pos_x, pos_y)) = live
+                        .character
+                        .as_ref()
+                        .map(|character| (character.pos_x, character.pos_y))
+                    else {
                         continue; // no character in a world: nothing can swing
                     };
                     let request = RequestHit::decode(payload.as_ref())?;
@@ -1607,7 +1640,7 @@ async fn handle_client(
                     // started (the same re-seat the 240 arm does).
                     let (ax, ay) = match movement.as_ref() {
                         Some(mv) => mv.pos,
-                        None => (character.pos_x, character.pos_y),
+                        None => (pos_x, pos_y),
                     };
                     player_swing(
                         &registry,
@@ -1617,8 +1650,8 @@ async fn handle_client(
                         &characters,
                         &items,
                         session_key,
-                        &login,
-                        character,
+                        level_table.as_ref(),
+                        &mut live,
                         (ax, ay),
                         target_unique,
                     )

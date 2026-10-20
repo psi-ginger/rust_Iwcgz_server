@@ -1,12 +1,13 @@
 //! Server-side master data the runtime needs but the client data does not
 //! provide as-is.
 //!
-//! Five things live here: [`npc`] (static town-NPC placements, generated from
+//! Six things live here: [`npc`] (static town-NPC placements, generated from
 //! `NPCGroup\*.txt` + `KindInfo_Unique.txt`), [`kindinfo`] (the monster
 //! kind-data files and the runtime base-stat math), [`drops`] (the capture and
 //! monster-drop table and its drop-string grammar), [`spawn`] (safe spawn-point
 //! filtering and the roam leash for monster groups, over [`map`]'s collision
-//! grid), and the pileability table below.
+//! grid), [`levelup`] (`LevelUpExp.dat`, the cumulative exp per level), and the
+//! pileability table below.
 //!
 //! [`npcgroup`] is the runtime half of the same `NPCGroup\*.txt` files the
 //! `npc` table is generated from: the *field* groups (radius > 1, several per
@@ -49,6 +50,7 @@
 
 pub mod drops;
 pub mod kindinfo;
+pub mod levelup;
 pub mod map;
 pub mod npc;
 pub mod npcgroup;

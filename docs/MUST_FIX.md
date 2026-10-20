@@ -247,3 +247,74 @@ Full workspace: `cargo fmt --check` and
 **Nice to have.** The pileability table generator is committed
 (`scripts/generate-pileable-table.ps1`, remark 3). The audit's remaining cleanup
 items are not carded here.
+
+---
+
+## #3 — Base experience fired only on the killing hit
+
+**Status: DONE** (2026-10-20) — every landed swing grants now, scaled
+`×damage/maxHP/3` while the target lives and whole on the killing blow, and a
+grant that crosses the `LevelUpExp.dat` threshold levels the character.
+
+### Root cause
+
+The port granted experience inside the death branch of `player_swing`
+(`services/game/src/combat.rs`): a swing whose target survived returned
+`Swing::Landed` before any grant ran, so chipping a monster down earned nothing
+until the final blow — and that one grant still ran through the living-target
+scaling (`×crit/maxHP/3`), paying a fraction of the legacy's whole pool. Legacy
+`GetExp` branches on `IsAlive(enemyid)` (`Server-Attack.cpp:4131`): alive →
+`exp × damage / maxlife / 3`, dead → full pool; `ExpOperate` runs at `Hit`'s
+tail for every hit (`:2921-2928`). The level-up half (`IncreaseExp`,
+`Parametabox.cpp:43`; `LevelUpAction`, `char.cpp:5763`) was not ported at all,
+so no grant could ever raise a level.
+
+### Concrete cases
+
+1. A level-1 player chips a 60-HP monster (kind `Exp` 90) with three
+   20-damage hits: the port granted 0, 0, then `90×20/60/3 = 10` on the kill,
+   where the legacy pays `10`, `10`, then the whole pool `90` on the killing
+   blow.
+2. Reaching level 2 in the field was impossible: `LevelUpExp.dat` was never
+   read, no `UPDATE character_stats` existed for a level, and the client got
+   no 215/7221 and a 270 it could not reconcile against its own level-up
+   expectation.
+
+### Affected files
+
+- `services/game/src/combat.rs` — `exp_seed`, `weak_monster_percent`,
+  `exp_for_hit`, `leveled_to`, and the `player_swing` grant/level-up block.
+- `crates/gz-data/src/levelup.rs` (new) — the `LevelUpExp.dat` loader.
+- `crates/gz-db/src/character.rs` — `level_up` (UPDATE level +1, bonus +5,
+  skill bonus +1, maxima; `RETURNING` the post-state row).
+- `crates/gz-proto/src/combat.rs` — `LevelUpResponse`, the 7221 body.
+- `services/game/src/main.rs` (boot + both swing call sites),
+  `monsters.rs` (`battle_power` on spawned units and `MonsterHit`),
+  `registry.rs` (`update_level` for the 119 sender echo), `movement.rs`
+  (fake-implementation stub), `tests.rs` (fixtures + the invariant test).
+
+### Fix
+
+Grant before the death check on every landed swing: pool = kind `Exp` +
+`(enemy level − 1)`, cut by the weak-monster bands (`Server-Attack.cpp:4003-4058`;
+hunger/tiredness CUT), scaled by `damage/maxHP/3` while the enemy lives, whole
+when it dies. A grant crossing `next_threshold` runs the `level_up` UPDATE,
+mirrors the row into the session copy, restores life to the new maximum, and
+answers 215 + 7221 to the 3×3 cell (self included) instead of the 270 — one
+level per grant, capped at 120, exactly the legacy's order (frames, then grant
+at `Hit`'s tail).
+
+### Validation
+
+- `crates/gz-data/src/levelup.rs::tests` — the shipped banner and rows parse,
+  thresholds 75 (level 2) and 9_713_379_124 (level 120) pinned, short tables
+  rejected, the tail past 120 ignored.
+- `services/game/src/combat.rs::tests` — weak-gate band edges (0/30/40/60/80/100
+  with the level-20 gate and the zero/negative-power arms), seed + scaling
+  truncation, threshold boundary (74 fails, 75 passes), one-level-per-grant,
+  cap 120, empty table never levels.
+- `crates/gz-proto/src/combat.rs::tests::levelup_is_four_bytes_in_declared_field_order`
+  — the 7221 body layout.
+- `services/game/src/tests.rs::a_level_up_keeps_the_ddl_stat_invariant` —
+  `abilities + bonus == level*5 + 35` across a level-up and a post-level spend.
+- `cargo test --workspace` and `scripts/check.ps1` green after the change.

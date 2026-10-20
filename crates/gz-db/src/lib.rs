@@ -12,8 +12,8 @@ pub mod quest;
 pub mod repository;
 
 pub use character::{
-    CharacterFull, CharacterRepository, CharacterSummary, PALACE_MAP_INDEX, PALACE_SPAWN_X,
-    PALACE_SPAWN_Y, PgCharacterRepository, StatsUpdate,
+    CharacterFull, CharacterRepository, CharacterSummary, LevelUpRow, PALACE_MAP_INDEX,
+    PALACE_SPAWN_X, PALACE_SPAWN_Y, PgCharacterRepository, StatsUpdate,
 };
 pub use friend::{FriendRepository, OwnedFriend, PgFriendRepository};
 pub use item::{

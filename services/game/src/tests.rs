@@ -682,6 +682,43 @@ fn the_derived_maxima_reproduce_the_ddl_defaults_and_the_repaired_seed() {
     assert_eq!(derived_max_mana(10, 13), 40);
 }
 
+/// The DDL invariant `abilities + bonus == level*5 + 35` rides the level-up:
+/// the `gz-db` `level_up` UPDATE grants +5 bonus alongside `level + 1`, and
+/// that is exactly how far the 250 allowance (`40 + (level-1)*5`, `stats.rs`)
+/// grows — so a fully-allocated character stays legal to spend at the new
+/// level instead of stranding its fresh bonus.
+#[test]
+fn a_level_up_keeps_the_ddl_stat_invariant() {
+    let total = |character: &CharacterFull| {
+        i64::from(character.bonus_points)
+            + i64::from(character.str + character.dex + character.vit + character.mag)
+            + i64::from(character.hnd + character.luk + character.wis)
+    };
+    let mut up = seeded_tester(); // level 13: 95 allocated + 5 bonus = 100 = 13*5+35
+    assert_eq!(total(&up), i64::from(up.level) * 5 + 35);
+    // What `level_up` applies, minus the derived maxima (those are formulas
+    // over vit/mag/level and do not enter the invariant).
+    up.level += 1;
+    up.bonus_points += 5;
+    assert_eq!(
+        total(&up),
+        i64::from(up.level) * 5 + 35,
+        "the bonus grant moves the total with the level"
+    );
+    // The fresh bonus is spendable: the level-14 allowance is 105 = the new
+    // total, and the check refuses only `total > allowance`.
+    let out = allocate_stat(&up, &UseBonus { pos: 0, amount: 5 })
+        .expect("the post-level-up allowance accepts the new bonus");
+    assert_eq!((out.str_, out.bonus), (25, 5));
+    let spent = i64::from(out.bonus)
+        + i64::from(out.str_ + out.dex + out.vit + out.mag + out.hnd + out.luk + out.wis);
+    assert_eq!(
+        spent,
+        i64::from(up.level) * 5 + 35,
+        "a spend only moves parts"
+    );
+}
+
 #[test]
 fn allocating_spends_bonus_and_raises_the_stat() {
     let out = allocate_stat(&seeded_tester(), &UseBonus { pos: 0, amount: 5 }).unwrap();
@@ -2907,6 +2944,7 @@ async fn a_dribbling_pre_handshake_peer_is_kicked_at_the_absolute_deadline() {
     let registry = Arc::new(Registry::new());
     let monsters = Arc::new(Mutex::new(monsters::MonsterWorld::empty()));
     let player_attacks = Arc::new(PlayerAttacks::default());
+    let level_table = Arc::new(gz_data::levelup::LevelUpTable::empty());
 
     let started = tokio::time::Instant::now();
     let handler = tokio::spawn(async move {
@@ -2922,6 +2960,7 @@ async fn a_dribbling_pre_handshake_peer_is_kicked_at_the_absolute_deadline() {
             registry,
             monsters,
             player_attacks,
+            level_table,
         )
         .await
     });
@@ -3158,6 +3197,7 @@ async fn an_established_session_is_never_idle_kicked_and_a_dead_peer_is_reaped()
     let registry = Arc::new(Registry::new());
     let monsters = Arc::new(Mutex::new(monsters::MonsterWorld::empty()));
     let player_attacks = Arc::new(PlayerAttacks::default());
+    let level_table = Arc::new(gz_data::levelup::LevelUpTable::empty());
 
     let mut handler = tokio::spawn(async move {
         handle_client(
@@ -3172,6 +3212,7 @@ async fn an_established_session_is_never_idle_kicked_and_a_dead_peer_is_reaped()
             registry,
             monsters,
             player_attacks,
+            level_table,
         )
         .await
     });

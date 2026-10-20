@@ -133,6 +133,10 @@ struct SpawnUnit {
     attack_interval: u64,
     /// `siCriticalRate`, percent (`CharAttackRow::critical_rate`).
     critical_rate: i32,
+    /// `(Str+Dex+Mag+Vit)/2` over this unit's [`MonsterStats`]
+    /// (`GetBattlePower`, `Parametabox.cpp:4162`) — the enemy half of
+    /// `GetExp`'s weak-monster gate (`Server-Attack.cpp:4003`).
+    battle_power: i32,
     /// This kind's drop table, resolved once from the committed canonical
     /// master so a death never re-looks the kind up.
     drops: &'static [DropEntry],
@@ -248,6 +252,9 @@ pub(crate) struct MonsterHit {
     pub(crate) exp: i64,
     pub(crate) level: i32,
     pub(crate) max_life: u32,
+    /// The kind's battle power at these stats — the enemy half of `GetExp`'s
+    /// weak-monster gate (`Server-Attack.cpp:4003`).
+    pub(crate) battle_power: i32,
     /// `(item_unique, count)` pairs rolled at death, empty on a survivor.
     pub(crate) drops: Vec<(i32, i32)>,
 }
@@ -489,6 +496,9 @@ impl MonsterWorld {
                     range: attack_row.range.max(1),
                     attack_interval: combat::attack_interval_ms(attack_row.attack_interval),
                     critical_rate: attack_row.critical_rate,
+                    // The enemy half of `GetExp`'s weak-monster gate, from the
+                    // same stats the unit fights with.
+                    battle_power: stats.battle_power(),
                     // A kind with no drop row drops nothing; the parser already
                     // dropped malformed entries, so this is a plain lookup.
                     drops: drops_by_code
@@ -880,9 +890,9 @@ impl MonsterWorld {
         let (group, unit) = (monster.group, monster.unit);
         // Copy the shared numbers out before touching `monsters`, so the two
         // borrows do not overlap.
-        let (max_life, exp, level, ac, table) = {
+        let (max_life, exp, level, ac, table, battle_power) = {
             let u = &self.groups[group].units[unit];
-            (u.life, u.exp, u.level, u.ac, u.drops)
+            (u.life, u.exp, u.level, u.ac, u.drops, u.battle_power)
         };
         let damage = combat::reduced_by_ac(raw_power, ac);
         let new_life = monster.life.saturating_sub(damage.max(0) as u32);
@@ -1022,6 +1032,7 @@ impl MonsterWorld {
             exp,
             level,
             max_life,
+            battle_power,
             drops,
         })
     }
@@ -2054,6 +2065,7 @@ mod tests {
                 range: 1,
                 attack_interval: 2_000,
                 critical_rate: 0,
+                battle_power: 0,
                 drops: &[],
             }],
         });
@@ -2128,6 +2140,7 @@ mod tests {
                 range: 1,
                 attack_interval: 2_000,
                 critical_rate: 0,
+                battle_power: 0,
                 drops: &[],
             }],
         });
@@ -2212,6 +2225,7 @@ mod tests {
                     range: 1,
                     attack_interval: 2_000,
                     critical_rate: 0,
+                    battle_power: 0,
                     drops: &[],
                 })
                 .collect(),
@@ -2291,6 +2305,7 @@ mod tests {
                     range: 1,
                     attack_interval: 2_000,
                     critical_rate: 0,
+                    battle_power: 0,
                     drops: &[],
                 }],
             }
@@ -2353,6 +2368,7 @@ mod tests {
                 range: 1,
                 attack_interval: 2_000,
                 critical_rate: 0,
+                battle_power: 0,
                 drops: &[],
             }],
         });
@@ -2427,6 +2443,7 @@ mod tests {
                 range: 1,
                 attack_interval: 2_000,
                 critical_rate: 0,
+                battle_power: 0,
                 drops: &[],
             }],
         });
@@ -2504,6 +2521,7 @@ mod tests {
                 range: 1,
                 attack_interval: 2_000,
                 critical_rate: 0,
+                battle_power: 0,
                 drops: &[],
             }],
         });
@@ -2574,6 +2592,7 @@ mod tests {
                 range: 1,
                 attack_interval: 2_000,
                 critical_rate: 0,
+                battle_power: 0,
                 drops: &[],
             }],
         });
@@ -2692,6 +2711,7 @@ mod tests {
                 range: 1,
                 attack_interval: 2_000,
                 critical_rate: 0,
+                battle_power: 0,
                 drops: &[],
             }],
         });
@@ -2804,6 +2824,7 @@ mod tests {
                 range: 1,
                 attack_interval: 2_000,
                 critical_rate: 0,
+                battle_power: 0,
                 drops: &[],
             }],
         });
@@ -2934,6 +2955,7 @@ mod tests {
                 range: 1,
                 attack_interval: 2_000,
                 critical_rate: 0,
+                battle_power: 0,
                 drops: &[],
             }],
         });
@@ -3050,6 +3072,7 @@ mod tests {
                     range: 1,
                     attack_interval: 2_000,
                     critical_rate: 0,
+                    battle_power: 0,
                     drops: &[],
                 }],
             });
@@ -3213,6 +3236,7 @@ mod tests {
                 range: 1,
                 attack_interval: 2_000,
                 critical_rate: 0,
+                battle_power: 0,
                 drops: &[],
             }],
         });
@@ -3334,6 +3358,7 @@ mod tests {
                 range: 1,
                 attack_interval: 2_000,
                 critical_rate: 0,
+                battle_power: 0,
                 drops: &[],
             }],
         });

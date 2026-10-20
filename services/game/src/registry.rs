@@ -479,6 +479,18 @@ impl Registry {
         }
     }
 
+    /// Raises a registered character's cached level, or does nothing if it is
+    /// gone.
+    ///
+    /// The session copy is what the 119 chat delivery echoes for the sender's
+    /// `siLevel` (`Server-System.cpp:591`), so it follows a level-up the way
+    /// [`Self::update_pos`] follows a step.
+    pub fn update_level(&self, key: SessionKey, level: i32) {
+        if let Some(session) = self.lock().get_mut(&key) {
+            session.info.level = level;
+        }
+    }
+
     /// Clocks one inbound frame for `key`: returns the idle time (ms) the
     /// session had accumulated *before* this frame, and advances the AFK
     /// clock only when `cmd` is a frame that proves a player is at the

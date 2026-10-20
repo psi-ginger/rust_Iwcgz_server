@@ -58,6 +58,10 @@ pub const HIT_RESPONSE_LEN: usize = 28;
 /// `sizeof(cltGameMsgResponse_GetExp)` — the 270 body length.
 pub const GETEXP_RESPONSE_LEN: usize = 12;
 
+/// `sizeof(cltGameMsgResponse_LevelUp)` — the 7221 body length: `SI16` +
+/// `SI08` + `SI08`, which cannot pad between a 2-byte and two 1-byte fields.
+pub const LEVELUP_RESPONSE_LEN: usize = 4;
+
 /// `sizeof(cltGameMsgResponse_DeathPenalty)` — the 242 body length: 34 bytes
 /// of fields, padded to 40 because the leading `GMONEY` aligns the class to 8
 /// under MSVC's default `/Zp8`.
@@ -281,6 +285,32 @@ impl GetExpResponse {
         out[2..4].copy_from_slice(&self.si_reason.to_le_bytes());
         out[4..8].copy_from_slice(&self.si_exp.to_le_bytes());
         out[8..12].copy_from_slice(&self.si_fame_exp.to_le_bytes());
+        out
+    }
+}
+
+/// `cltGameMsgResponse_LevelUp` (`MsgType.h:3032-3044`) — the 7221 body, the
+/// level-up announcement `LevelUpAction` fans to the neighbourhood including
+/// the leveler (`char.cpp:5943-5945`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LevelUpResponse {
+    /// `siCharUnique` — who leveled.
+    pub si_char_unique: i16,
+    /// `siLevel` — the level reached.
+    pub si_level: i8,
+    /// `siFameLevel` — fame level, not modelled; 0, which is also what the
+    /// legacy constructor passes (`char.cpp:5943`).
+    pub si_fame_level: i8,
+}
+
+impl LevelUpResponse {
+    /// Encodes a `cltGameMsgResponse_LevelUp` body.
+    #[must_use]
+    pub fn encode(&self) -> [u8; LEVELUP_RESPONSE_LEN] {
+        let mut out = [0u8; LEVELUP_RESPONSE_LEN];
+        out[0..2].copy_from_slice(&self.si_char_unique.to_le_bytes());
+        out[2] = self.si_level as u8;
+        out[3] = self.si_fame_level as u8;
         out
     }
 }
@@ -519,6 +549,20 @@ mod tests {
         assert_eq!(i16::from_le_bytes([body[2], body[3]]), 0);
         assert_eq!(i32::from_le_bytes(body[4..8].try_into().unwrap()), 120);
         assert_eq!(i32::from_le_bytes(body[8..12].try_into().unwrap()), 0);
+    }
+
+    #[test]
+    fn levelup_is_four_bytes_in_declared_field_order() {
+        let body = LevelUpResponse {
+            si_char_unique: -3,
+            si_level: 14,
+            si_fame_level: 0,
+        }
+        .encode();
+        assert_eq!(body.len(), LEVELUP_RESPONSE_LEN);
+        assert_eq!(i16::from_le_bytes([body[0], body[1]]), -3);
+        assert_eq!(body[2], 14, "siLevel follows siCharUnique at offset 2");
+        assert_eq!(body[3], 0);
     }
 
     /// `GMONEY` leads the struct, so the class aligns to 8 and `sizeof` is 40:
