@@ -18,13 +18,14 @@ below reconcile with Gate 0 (§2.3 of the design doc) in §10.
 
 1. Work on a copy; keep the original beside the build (sha256 above is the only
    binary this inventory is valid for — any other build must be re-surveyed).
-2. Apply Family A, then B, then C (C's instance rows need §7's decision first).
-3. `new bytes` are the exact replacement for `old bytes`; rows marked `TBD` are
-   held for the §7 semantic call or a missing jcc direction — do not guess them.
-4. Post-patch verification: re-run this survey against the new binary; the
-   expected result is **zero** remaining `0xBB8` and `0x4E20` sites (families
-   A and B — every `0x4E20` row is in one of them), the §7-resolved instance
-   ceiling set, and an untouched `0x7530` count (§8).
+2. Apply Family A, then B, then C — §7 (instance ceiling) is resolved, so every
+   non-`TBD` row applies.
+3. `new bytes` are the exact replacement for `old bytes`; rows marked `TBD` need
+   their branch shape read first — do not guess them.
+4. Post-patch verification: re-run this survey against the patched binary and
+   diff row-by-row against this inventory — every non-`TBD` row must show its
+   `new bytes`; §8 (item guards) and every `TBD` row must be byte-identical to
+   `old bytes`.
 5. Ship atomically with the server constants flip (`PLAYER_BAND_TOP`, NPC base,
    pool floors — design doc §3.4/§6-P2): a patched client against the interim
    server calls every NPC id `8,500..=19,999` a PC, and a stock client against
@@ -37,7 +38,7 @@ below reconcile with Gate 0 (§2.3 of the design doc) in §10.
 |---|---|---|
 | PC (IsPC) | `1..=20_000` | not-PC at ≥ `20_001` (`0x4E21`) |
 | NPC class (IsNPC, static/town + monsters) | `20_001..=59_999` | low `0x4E21`, high ceiling `0xEA60` (60,000 — covers Tier 3 to 59,999 in this one rebuild, clearing the separate P3 table rebuild, design doc §8 item 6) |
-| Instance NPC | see §7 | options A/B with immediates ready |
+| Instance NPC | `20_001..=29_999` (§7, approved) | ceiling `0x7530` (30,000); strict form `0x752F` (29,999) |
 | char tables | 60,000 entries (recommended) | guard `0x4E20 → 0xEA60`; minimal horizon-only alternative `0x7530` (30,000) |
 
 Table-size note: each grown table costs `entries x entry-size` of client heap —
@@ -912,7 +913,7 @@ row that validates the immediate as an index passed 20,000 in stock and passes
 | `006BA504` | `006B9904` | `81 7e 30 20 4e 00 00` | `cmp dword ptr [esi + 0x30], 0x4e20` | `jg 0x6ba568` | `81 7e 30 60 ea 00 00` | ceiling 20,000 -> 60,000 (same instruction, new number) |
 | `006BA7A7` | `006B9BA7` | `81 fb 20 4e 00 00` | `cmp ebx, 0x4e20` | `jg 0x6ba805` | `81 fb 60 ea 00 00` | ceiling 20,000 -> 60,000 (same instruction, new number) |
 
-## 6. Family C — NPC floor (`0x2134` -> 20,001; 46 sites)
+## 6. Family C — NPC floor (`0x2134` -> 20,001; 52 sites)
 
 `cmp ?, 8500` rows that cluster with `20,000` (the IsNPC shape, legacy
 `8500 <= v < 20000`), plus isolated below-form branches — only an NPC-floor read
@@ -964,52 +965,65 @@ full IsNPC pair (Gate 0 counted 54).
 | `003D6647` | `003D5A47` | `3d 34 21 00 00` | `cmp eax, 0x2134` | `jl 0x3d67c7` | `3d 21 4e 00 00` | NPC floor 8,500 -> 20,001 |
 | `003EB8F2` | `003EACF2` | `3d 34 21 00 00` | `cmp eax, 0x2134` | `jl 0x3eb912` | `3d 21 4e 00 00` | NPC floor 8,500 -> 20,001 |
 | `003F1020` | `003F0420` | `3d 34 21 00 00` | `cmp eax, 0x2134` | `jl 0x3f105a` | `3d 21 4e 00 00` | NPC floor 8,500 -> 20,001 |
+| `003FA148` | `003F9548` | `3d 34 21 00 00` | `cmp eax, 0x2134` | `jl 0x3fa55f` | `3d 21 4e 00 00` | NPC floor 8,500 -> 20,001 |
 | `00412847` | `00411C47` | `3d 34 21 00 00` | `cmp eax, 0x2134` | `jl 0x412886` | `3d 21 4e 00 00` | NPC floor 8,500 -> 20,001 |
+| `00412E14` | `00412214` | `3d 34 21 00 00` | `cmp eax, 0x2134` | `jl 0x412e44` | `3d 21 4e 00 00` | NPC floor 8,500 -> 20,001 |
+| `0041319B` | `0041259B` | `3d 34 21 00 00` | `cmp eax, 0x2134` | `jl 0x4131cb` | `3d 21 4e 00 00` | NPC floor 8,500 -> 20,001 |
+| `004134DF` | `004128DF` | `3d 34 21 00 00` | `cmp eax, 0x2134` | `jl 0x41353e` | `3d 21 4e 00 00` | NPC floor 8,500 -> 20,001 |
 | `0041363F` | `00412A3F` | `3d 34 21 00 00` | `cmp eax, 0x2134` | `jl 0x41366c` | `3d 21 4e 00 00` | NPC floor 8,500 -> 20,001 |
 | `0041EA56` | `0041DE56` | `3d 34 21 00 00` | `cmp eax, 0x2134` | `jl 0x41eb5f` | `3d 21 4e 00 00` | NPC floor 8,500 -> 20,001 |
+| `00420069` | `0041F469` | `3d 34 21 00 00` | `cmp eax, 0x2134` | `jl 0x420101` | `3d 21 4e 00 00` | NPC floor 8,500 -> 20,001 |
 | `00426B55` | `00425F55` | `3d 34 21 00 00` | `cmp eax, 0x2134` | `jl 0x426d31` | `3d 21 4e 00 00` | NPC floor 8,500 -> 20,001 |
+| `0042FC4F` | `0042F04F` | `3d 34 21 00 00` | `cmp eax, 0x2134` | `jl 0x42fd77` | `3d 21 4e 00 00` | NPC floor 8,500 -> 20,001 |
 | `00580E8B` | `0058028B` | `3d 34 21 00 00` | `cmp eax, 0x2134` | `jl 0x580ebf` | `3d 21 4e 00 00` | NPC floor 8,500 -> 20,001 |
 
-## 7. Family C — instance-NPC ceiling (`0x2134` + sibling `0xBB8`; 17 sites) — NEEDS CAT'S CALL
+## 7. Family C — instance-NPC ceiling (`0x2134` + sibling `0xBB8`; 28 sites) — APPROVED: Option A
 
-The stock instance classifier is the range `3000..=8499`: floor `0xBB8` (already
-§4 — the horizon reuses it) and ceiling `8500` — there is no literal `8499`
-anywhere in this binary; the upper bound is written against `8500`. Under the
-horizon the instance ceiling has two possible values because instance NPCs
-share `20_001..=29_999` with town/static NPCs:
+**Resolved (Cat, 2026-10-20): Option A.** Instance NPCs are the whole band
+`20_001..=29_999`, so the classifier's ceiling divide moves `8,500 -> 30,000` —
+non-strict rows take `0x7530`, strict rows `0x752F` (29,999). The floor half of
+each pair already sits in §4 (`0xBB8 -> 0x4E21`), unchanged by this choice.
+Within the band the client can no longer range-separate instance from
+town/static NPCs: instance-vs-town behaviour keys off the kind table — the
+merge's one condition, recorded here with the approval.
 
-- **Option A — merge (recommended):** instance NPC = the whole NPC band; the
-  ceiling becomes `30_000` — non-strict rows `0x7530`, strict rows `0x752F`
-  (29,999). Client-side instance-vs-town behaviour must then key off the kind
-  table, not the id range.
-- **Option B — sub-slice:** instance `20_001..=24_999`, town/static
-  `25_001..=29_999`; the ceiling becomes `25_000` — non-strict rows `0x61A8`,
-  strict rows `0x61A7` (24,999); §6's floor rows stay `0x4E21`. No kind-table
-  dependency, but the band's width halves per class.
-
-Rows stay `TBD` until the option is picked. 33 clusters
-pair `3,000`+`8,500`; 16 carry all three immediates
-and sit in §9.
+Row notes: the stock upper bound is written against `8500` — there is no
+literal `8499` anywhere in this binary. Three-immediate chains were placed here
+by branch target (the instance condition shares the floor's fail label); a
+chain whose `8,500` branch lands elsewhere is §9. Option B (sub-slice
+`20_001..=24_999`, ceiling `25_000` = `0x61A8`/`0x61A7`) was considered and
+**not taken**.
 
 | RVA | file off | old bytes | disasm | jcc | new bytes | rule |
 |---|---|---|---|---|---|---|
-| `001058E4` | `00104CE4` | `3d 34 21 00 00` | `cmp eax, 0x2134` | `jge 0x1058f3` | `TBD` | TBD section 7: A 0x7530/0x752F, B 0x61A8/0x61A7 |
-| `001150CE` | `001144CE` | `81 fe 34 21 00 00` | `cmp esi, 0x2134` | `jge 0x1150dd` | `TBD` | TBD section 7: A 0x7530/0x752F, B 0x61A8/0x61A7 |
-| `002D4D55` | `002D4155` | `3d 34 21 00 00` | `cmp eax, 0x2134` | `jge 0x2d4d63` | `TBD` | TBD section 7: A 0x7530/0x752F, B 0x61A8/0x61A7 |
-| `002D4F58` | `002D4358` | `3d 34 21 00 00` | `cmp eax, 0x2134` | `jge 0x2d4f66` | `TBD` | TBD section 7: A 0x7530/0x752F, B 0x61A8/0x61A7 |
-| `002D512E` | `002D452E` | `3d 34 21 00 00` | `cmp eax, 0x2134` | `jge 0x2d513c` | `TBD` | TBD section 7: A 0x7530/0x752F, B 0x61A8/0x61A7 |
-| `002D52A8` | `002D46A8` | `3d 34 21 00 00` | `cmp eax, 0x2134` | `jge 0x2d52b6` | `TBD` | TBD section 7: A 0x7530/0x752F, B 0x61A8/0x61A7 |
-| `002D5455` | `002D4855` | `3d 34 21 00 00` | `cmp eax, 0x2134` | `jge 0x2d5463` | `TBD` | TBD section 7: A 0x7530/0x752F, B 0x61A8/0x61A7 |
-| `0033AC34` | `0033A034` | `3d 34 21 00 00` | `cmp eax, 0x2134` | `jge 0x33ac43` | `TBD` | TBD section 7: A 0x7530/0x752F, B 0x61A8/0x61A7 |
-| `0035E0D0` | `0035D4D0` | `81 ff 34 21 00 00` | `cmp edi, 0x2134` | `jb 0x35e155` | `TBD` | TBD section 7: A 0x7530/0x752F, B 0x61A8/0x61A7 |
-| `003F2E1D` | `003F221D` | `3d 34 21 00 00` | `cmp eax, 0x2134` | `jge 0x3f2e2a` | `TBD` | TBD section 7: A 0x7530/0x752F, B 0x61A8/0x61A7 |
-| `004D40AF` | `004D34AF` | `81 f9 34 21 00 00` | `cmp ecx, 0x2134` | `jge 0x4d410e` | `TBD` | TBD section 7: A 0x7530/0x752F, B 0x61A8/0x61A7 |
-| `004D452F` | `004D392F` | `3d 34 21 00 00` | `cmp eax, 0x2134` | `jge 0x4d4577` | `TBD` | TBD section 7: A 0x7530/0x752F, B 0x61A8/0x61A7 |
-| `004D4C00` | `004D4000` | `3d 34 21 00 00` | `cmp eax, 0x2134` | `jge 0x4d4c42` | `TBD` | TBD section 7: A 0x7530/0x752F, B 0x61A8/0x61A7 |
-| `00591B2B` | `00590F2B` | `3d 34 21 00 00` | `cmp eax, 0x2134` | `jge 0x591b39` | `TBD` | TBD section 7: A 0x7530/0x752F, B 0x61A8/0x61A7 |
-| `0060DB71` | `0060CF71` | `81 fe 34 21 00 00` | `cmp esi, 0x2134` | `jge 0x60db80` | `TBD` | TBD section 7: A 0x7530/0x752F, B 0x61A8/0x61A7 |
-| `0060F42D` | `0060E82D` | `3d 34 21 00 00` | `cmp eax, 0x2134` | `jge 0x60f43b` | `TBD` | TBD section 7: A 0x7530/0x752F, B 0x61A8/0x61A7 |
-| `0061B704` | `0061AB04` | `3d 34 21 00 00` | `cmp eax, 0x2134` | `jge 0x61b714` | `TBD` | TBD section 7: A 0x7530/0x752F, B 0x61A8/0x61A7 |
+| `000E7D2E` | `000E712E` | `3d 34 21 00 00` | `cmp eax, 0x2134` | `jge 0xe7dab` | `3d 30 75 00 00` | approved A: instance ceiling 8,500 -> 30,000 |
+| `001058E4` | `00104CE4` | `3d 34 21 00 00` | `cmp eax, 0x2134` | `jge 0x1058f3` | `3d 30 75 00 00` | approved A: instance ceiling 8,500 -> 30,000 |
+| `001150CE` | `001144CE` | `81 fe 34 21 00 00` | `cmp esi, 0x2134` | `jge 0x1150dd` | `81 fe 30 75 00 00` | approved A: instance ceiling 8,500 -> 30,000 |
+| `002D4D55` | `002D4155` | `3d 34 21 00 00` | `cmp eax, 0x2134` | `jge 0x2d4d63` | `3d 30 75 00 00` | approved A: instance ceiling 8,500 -> 30,000 |
+| `002D4F58` | `002D4358` | `3d 34 21 00 00` | `cmp eax, 0x2134` | `jge 0x2d4f66` | `3d 30 75 00 00` | approved A: instance ceiling 8,500 -> 30,000 |
+| `002D512E` | `002D452E` | `3d 34 21 00 00` | `cmp eax, 0x2134` | `jge 0x2d513c` | `3d 30 75 00 00` | approved A: instance ceiling 8,500 -> 30,000 |
+| `002D52A8` | `002D46A8` | `3d 34 21 00 00` | `cmp eax, 0x2134` | `jge 0x2d52b6` | `3d 30 75 00 00` | approved A: instance ceiling 8,500 -> 30,000 |
+| `002D5455` | `002D4855` | `3d 34 21 00 00` | `cmp eax, 0x2134` | `jge 0x2d5463` | `3d 30 75 00 00` | approved A: instance ceiling 8,500 -> 30,000 |
+| `0033AC34` | `0033A034` | `3d 34 21 00 00` | `cmp eax, 0x2134` | `jge 0x33ac43` | `3d 30 75 00 00` | approved A: instance ceiling 8,500 -> 30,000 |
+| `0035E0D0` | `0035D4D0` | `81 ff 34 21 00 00` | `cmp edi, 0x2134` | `jb 0x35e155` | `81 ff 30 75 00 00` | approved A: instance ceiling 8,500 -> 30,000 |
+| `003D08AE` | `003CFCAE` | `3d 34 21 00 00` | `cmp eax, 0x2134` | `jge 0x3d08e2` | `3d 30 75 00 00` | approved A: instance ceiling 8,500 -> 30,000 |
+| `003D7294` | `003D6694` | `3d 34 21 00 00` | `cmp eax, 0x2134` | `jge 0x3d72a5` | `3d 30 75 00 00` | approved A: instance ceiling 8,500 -> 30,000 |
+| `003D7985` | `003D6D85` | `3d 34 21 00 00` | `cmp eax, 0x2134` | `jge 0x3d7996` | `3d 30 75 00 00` | approved A: instance ceiling 8,500 -> 30,000 |
+| `003D7C68` | `003D7068` | `3d 34 21 00 00` | `cmp eax, 0x2134` | `jge 0x3d7c78` | `3d 30 75 00 00` | approved A: instance ceiling 8,500 -> 30,000 |
+| `003EAB02` | `003E9F02` | `3d 34 21 00 00` | `cmp eax, 0x2134` | `jge 0x3eab13` | `3d 30 75 00 00` | approved A: instance ceiling 8,500 -> 30,000 |
+| `003F2E1D` | `003F221D` | `3d 34 21 00 00` | `cmp eax, 0x2134` | `jge 0x3f2e2a` | `3d 30 75 00 00` | approved A: instance ceiling 8,500 -> 30,000 |
+| `00414035` | `00413435` | `3d 34 21 00 00` | `cmp eax, 0x2134` | `jge 0x4140b6` | `3d 30 75 00 00` | approved A: instance ceiling 8,500 -> 30,000 |
+| `0042A3DE` | `004297DE` | `3d 34 21 00 00` | `cmp eax, 0x2134` | `jge 0x42a4f1` | `3d 30 75 00 00` | approved A: instance ceiling 8,500 -> 30,000 |
+| `0042A41E` | `0042981E` | `3d 34 21 00 00` | `cmp eax, 0x2134` | `jge 0x42a4f1` | `3d 30 75 00 00` | approved A: instance ceiling 8,500 -> 30,000 |
+| `004D40AF` | `004D34AF` | `81 f9 34 21 00 00` | `cmp ecx, 0x2134` | `jge 0x4d410e` | `81 f9 30 75 00 00` | approved A: instance ceiling 8,500 -> 30,000 |
+| `004D452F` | `004D392F` | `3d 34 21 00 00` | `cmp eax, 0x2134` | `jge 0x4d4577` | `3d 30 75 00 00` | approved A: instance ceiling 8,500 -> 30,000 |
+| `004D4C00` | `004D4000` | `3d 34 21 00 00` | `cmp eax, 0x2134` | `jge 0x4d4c42` | `3d 30 75 00 00` | approved A: instance ceiling 8,500 -> 30,000 |
+| `00574AC1` | `00573EC1` | `3d 34 21 00 00` | `cmp eax, 0x2134` | `jge 0x574add` | `3d 30 75 00 00` | approved A: instance ceiling 8,500 -> 30,000 |
+| `005866F3` | `00585AF3` | `3d 34 21 00 00` | `cmp eax, 0x2134` | `jge 0x58670f` | `3d 30 75 00 00` | approved A: instance ceiling 8,500 -> 30,000 |
+| `00591B2B` | `00590F2B` | `3d 34 21 00 00` | `cmp eax, 0x2134` | `jge 0x591b39` | `3d 30 75 00 00` | approved A: instance ceiling 8,500 -> 30,000 |
+| `0060DB71` | `0060CF71` | `81 fe 34 21 00 00` | `cmp esi, 0x2134` | `jge 0x60db80` | `81 fe 30 75 00 00` | approved A: instance ceiling 8,500 -> 30,000 |
+| `0060F42D` | `0060E82D` | `3d 34 21 00 00` | `cmp eax, 0x2134` | `jge 0x60f43b` | `3d 30 75 00 00` | approved A: instance ceiling 8,500 -> 30,000 |
+| `0061B704` | `0061AB04` | `3d 34 21 00 00` | `cmp eax, 0x2134` | `jge 0x61b714` | `3d 30 75 00 00` | approved A: instance ceiling 8,500 -> 30,000 |
 
 ## 8. Excluded — `0x7530` (30,000) sites are item tables, NOT char ids (1 imm16 + 372 dword hits)
 
@@ -1400,12 +1414,15 @@ guards. **Do not patch them.**
 | `003CBBC4` | `003CAFC4` | `66 81 ff 30 75` | `cmp di, 0x7530` |
 (+ 0 more — all MAX_ITEM_UNIQUE-class; excluded.)
 
-## 9. Manual-review rows (47 sites)
+## 9. Manual-review rows (30 sites)
 
 Rows this sweep could not resolve from bytes alone: cmps with no branch to
 read, isolated `>= 8,500` sites where the IsNPC pass and the instance fail are
-indistinguishable, and the 16 three-immediate chains.
-Each needs a human read before the fork build touches it.
+indistinguishable, and branches that land inside a neighbouring cmp (flag-reuse
+trampolines), where no shared fail label picks a role. Each needs its branch
+shape read before the fork build touches it — §6's floor and §7's approved
+ceiling give the two candidate readings, and the jump target between them
+settles it.
 
 | RVA | file off | old bytes | disasm | jcc | new bytes | rule |
 |---|---|---|---|---|---|---|
@@ -1414,41 +1431,24 @@ Each needs a human read before the fork build touches it.
 | `00041BC5` | `00040FC5` | `81 f9 34 21 00 00` | `cmp ecx, 0x2134` | `jg 0x41eea` | `TBD` | manual review - section 9 |
 | `000DF54B` | `000DE94B` | `81 f9 20 4e 00 00` | `cmp ecx, 0x4e20` | `mov` | `TBD` | manual review - section 9 |
 | `000E7CD3` | `000E70D3` | `3d 34 21 00 00` | `cmp eax, 0x2134` | `jl 0xe7cf7` | `TBD` | manual review - section 9 |
-| `000E7D2E` | `000E712E` | `3d 34 21 00 00` | `cmp eax, 0x2134` | `jge 0xe7dab` | `TBD` | manual review - section 9 |
 | `00125E1B` | `0012521B` | `81 ff 34 21 00 00` | `cmp edi, 0x2134` | `jge 0x125e2f` | `TBD` | manual review - section 9 |
 | `00126B3B` | `00125F3B` | `81 fe 34 21 00 00` | `cmp esi, 0x2134` | `jge 0x126b4f` | `TBD` | manual review - section 9 |
 | `002335E0` | `002329E0` | `81 ff 34 21 00 00` | `cmp edi, 0x2134` | `jge 0x2335f4` | `TBD` | manual review - section 9 |
 | `00233C8D` | `0023308D` | `3d 34 21 00 00` | `cmp eax, 0x2134` | `jge 0x233ca5` | `TBD` | manual review - section 9 |
 | `003D0884` | `003CFC84` | `3d 34 21 00 00` | `cmp eax, 0x2134` | `jl 0x3d0899` | `TBD` | manual review - section 9 |
-| `003D08AE` | `003CFCAE` | `3d 34 21 00 00` | `cmp eax, 0x2134` | `jge 0x3d08e2` | `TBD` | manual review - section 9 |
 | `003D726A` | `003D666A` | `3d 34 21 00 00` | `cmp eax, 0x2134` | `jl 0x3d727f` | `TBD` | manual review - section 9 |
-| `003D7294` | `003D6694` | `3d 34 21 00 00` | `cmp eax, 0x2134` | `jge 0x3d72a5` | `TBD` | manual review - section 9 |
 | `003D795B` | `003D6D5B` | `3d 34 21 00 00` | `cmp eax, 0x2134` | `jl 0x3d7970` | `TBD` | manual review - section 9 |
-| `003D7985` | `003D6D85` | `3d 34 21 00 00` | `cmp eax, 0x2134` | `jge 0x3d7996` | `TBD` | manual review - section 9 |
 | `003D7C3E` | `003D703E` | `3d 34 21 00 00` | `cmp eax, 0x2134` | `jl 0x3d7c53` | `TBD` | manual review - section 9 |
-| `003D7C68` | `003D7068` | `3d 34 21 00 00` | `cmp eax, 0x2134` | `jge 0x3d7c78` | `TBD` | manual review - section 9 |
 | `003EAAD8` | `003E9ED8` | `3d 34 21 00 00` | `cmp eax, 0x2134` | `jl 0x3eaaed` | `TBD` | manual review - section 9 |
-| `003EAB02` | `003E9F02` | `3d 34 21 00 00` | `cmp eax, 0x2134` | `jge 0x3eab13` | `TBD` | manual review - section 9 |
 | `003F10B9` | `003F04B9` | `3d 34 21 00 00` | `cmp eax, 0x2134` | `jge 0x3f10c5` | `TBD` | manual review - section 9 |
 | `003FA11A` | `003F951A` | `3d 34 21 00 00` | `cmp eax, 0x2134` | `jl 0x3fa133` | `TBD` | manual review - section 9 |
-| `003FA148` | `003F9548` | `3d 34 21 00 00` | `cmp eax, 0x2134` | `jl 0x3fa55f` | `TBD` | manual review - section 9 |
-| `00412E14` | `00412214` | `3d 34 21 00 00` | `cmp eax, 0x2134` | `jl 0x412e44` | `TBD` | manual review - section 9 |
-| `0041319B` | `0041259B` | `3d 34 21 00 00` | `cmp eax, 0x2134` | `jl 0x4131cb` | `TBD` | manual review - section 9 |
-| `004134DF` | `004128DF` | `3d 34 21 00 00` | `cmp eax, 0x2134` | `jl 0x41353e` | `TBD` | manual review - section 9 |
 | `00414007` | `00413407` | `3d 34 21 00 00` | `cmp eax, 0x2134` | `jl 0x41401c` | `TBD` | manual review - section 9 |
-| `00414035` | `00413435` | `3d 34 21 00 00` | `cmp eax, 0x2134` | `jge 0x4140b6` | `TBD` | manual review - section 9 |
 | `0042003B` | `0041F43B` | `3d 34 21 00 00` | `cmp eax, 0x2134` | `jl 0x420054` | `TBD` | manual review - section 9 |
-| `00420069` | `0041F469` | `3d 34 21 00 00` | `cmp eax, 0x2134` | `jl 0x420101` | `TBD` | manual review - section 9 |
 | `0042A3B0` | `004297B0` | `3d 34 21 00 00` | `cmp eax, 0x2134` | `jl 0x42a3c5` | `TBD` | manual review - section 9 |
-| `0042A3DE` | `004297DE` | `3d 34 21 00 00` | `cmp eax, 0x2134` | `jge 0x42a4f1` | `TBD` | manual review - section 9 |
 | `0042A3F0` | `004297F0` | `3d 34 21 00 00` | `cmp eax, 0x2134` | `jl 0x42a405` | `TBD` | manual review - section 9 |
-| `0042A41E` | `0042981E` | `3d 34 21 00 00` | `cmp eax, 0x2134` | `jge 0x42a4f1` | `TBD` | manual review - section 9 |
 | `0042FC21` | `0042F021` | `3d 34 21 00 00` | `cmp eax, 0x2134` | `jl 0x42fc3a` | `TBD` | manual review - section 9 |
-| `0042FC4F` | `0042F04F` | `3d 34 21 00 00` | `cmp eax, 0x2134` | `jl 0x42fd77` | `TBD` | manual review - section 9 |
 | `00574A76` | `00573E76` | `3d 34 21 00 00` | `cmp eax, 0x2134` | `jl 0x574a96` | `TBD` | manual review - section 9 |
-| `00574AC1` | `00573EC1` | `3d 34 21 00 00` | `cmp eax, 0x2134` | `jge 0x574add` | `TBD` | manual review - section 9 |
 | `005866A8` | `00585AA8` | `3d 34 21 00 00` | `cmp eax, 0x2134` | `jl 0x5866c8` | `TBD` | manual review - section 9 |
-| `005866F3` | `00585AF3` | `3d 34 21 00 00` | `cmp eax, 0x2134` | `jge 0x58670f` | `TBD` | manual review - section 9 |
 | `0060DA68` | `0060CE68` | `81 fe 34 21 00 00` | `cmp esi, 0x2134` | `jge 0x60da7a` | `TBD` | manual review - section 9 |
 | `00648CD0` | `006480D0` | `81 bd d4 eb ff ff 20 4e 00 00` | `cmp dword ptr [ebp - 0x142c], 0x4e20` | `mov` | `TBD` | manual review - section 9 |
 | `00648F07` | `00648307` | `81 bd d4 eb ff ff 20 4e 00 00` | `cmp dword ptr [ebp - 0x142c], 0x4e20` | `mov` | `TBD` | manual review - section 9 |
@@ -1464,14 +1464,14 @@ Each needs a human read before the fork build touches it.
   clusters differently: **370** floor-`3,000` sites (every
   `cmp ?, 3000`, not only the zero-check-adjacent ones — IsPC *and* instance
   floor share the immediate), **456** ceiling-`20,000` sites,
-  **40** IsNPC pairs feeding **46**
+  **40** IsNPC pairs feeding **52**
   floor rows, **33** instance pairs feeding
-  **17** ceiling rows, **1**
+  **28** ceiling rows, **1**
   instruction-confirmed word `0x7530` (Gate 0's 182 were raw 16-bit hits that
-  also hit data), and **47** manual. Gate 0's counts prove where
+  also hit data), and **30** manual. Gate 0's counts prove where
   the walls are; this inventory is the apply-list.
 - Checklist before the fork build ships: (1) every `TBD` row resolved by reading
-  its branch shape; (2) §7 option chosen and its rows applied; (3) post-patch
+  its branch shape; (2) §7's approved Option A rows applied (`0x7530`/`0x752F`); (3) post-patch
   resweep of the new binary shows zero old-immediates in families A/B/C and an
   untouched `0x7530` count; (4) lab boot against a horizon-constants server: a
   PC at id 15,000 renders as a PC, an NPC at 25,000 as an NPC, nothing above
