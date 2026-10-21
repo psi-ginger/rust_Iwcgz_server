@@ -221,6 +221,15 @@ pub(crate) fn swing_outcome(attacker_agi: i32, defender_agi: i32, roll: i32) -> 
     }
 }
 
+/// Cat's QoL (2026-10-21): the +5 flat base every character carries, on both
+/// the physical and the magic side. Without it a level-1 character with 10 STR
+/// deals 2–3 damage to the first monster; with it the opening hit lands in the
+/// 7–8 range.
+///
+/// The physical half is added in [`PlayerAttacks::raw_power`] (players only —
+/// monsters keep their own attack rows), the magic half in [`mag_damage`].
+pub(crate) const BASE_ATTACK_BONUS: i32 = 5;
+
 /// §4.3.4 natural flat defence from VIT: `⌊VIT × (0.15 + 0.01×(Level−1))⌋ +
 /// 5×⌊Level/10⌋`, integer form `(14 + level)/100`. The VIT half of a
 /// player's `GetTotalAC()` this port models (the legacy `(hnd+level)*60/100`
@@ -235,18 +244,19 @@ pub(crate) fn natural_flat_def(vit: i32, level: i32) -> i32 {
 
 /// §4.3.6 MagDamage: `⌊MAG × (0.28 + 0.01×(Level−1))⌋ + 5×⌊Level/10⌋`,
 /// integer form `(27 + level)/100` — the Arcane Boost curve replacing the
-/// legacy flat `MAG / 4`.
+/// legacy flat `MAG / 4` — plus the flat base every character carries
+/// ([`BASE_ATTACK_BONUS`], Cat 2026-10-21: base +5 MATK).
 ///
 /// No consumer yet: the skill/spell pipeline is a later milestone, so this
 /// carries `dead_code` until then. The curve is written and pinned now per
 /// the §4.3 directive.
 ///
-/// Spec pins: L1, 28 MAG = +7; L10, 37 MAG = +18; L50, 220 MAG = +194;
-/// L100, 550 MAG = +748.
+/// Pins: L1, 28 MAG = +12; L10, 37 MAG = +23; L50, 220 MAG = +199;
+/// L100, 550 MAG = +753 (the §4.3.6 curve plus the flat base).
 #[allow(dead_code)] // consumed when the spell pipeline lands
 #[must_use]
 pub(crate) fn mag_damage(mag: i32, level: i32) -> i32 {
-    mag * (27 + level) / 100 + 5 * (level / 10)
+    mag * (27 + level) / 100 + 5 * (level / 10) + BASE_ATTACK_BONUS
 }
 
 /// §4.3.7 magical hit rank: `(WIS*2) + Level` — WIS is the AGI of casters,
@@ -443,13 +453,16 @@ impl PlayerAttacks {
 
     /// The attacker's raw damage before the defender's AC and before the
     /// [`roll_power`] spread is picked: the weapon's minimum and maximum, each
-    /// plus the STR and level terms [`str_damage`] and [`level_damage`] add.
+    /// plus the STR and level terms [`str_damage`] and [`level_damage`] add,
+    /// and the flat base every character carries ([`BASE_ATTACK_BONUS`], Cat
+    /// 2026-10-21: base +5 ATK). Players only — monsters fight from their own
+    /// attack rows.
     ///
     /// `class_kind` is the `KindInfo_Unique` id the character was created with
     /// (`SessionInfo::class_kind`).
     #[must_use]
     pub(crate) fn raw_power(&self, class_kind: u16, str_: i32, level: i32) -> (i32, i32) {
-        let term = level_damage(level) + str_damage(str_, level);
+        let term = level_damage(level) + str_damage(str_, level) + BASE_ATTACK_BONUS;
         match self.by_kind.get(&class_kind) {
             Some(row) => (row.min_dmg + term, row.max_dmg + term),
             None => (term, term),
@@ -572,6 +585,38 @@ pub(crate) enum Swing {
     /// monster stands on that tile. Either way there is nothing to keep
     /// swinging at.
     NoTarget,
+}
+
+/// Whether an `ORDER_ATTACK` naming `incoming` may move the fight off
+/// `current` — false when it must stay.
+///
+/// # Why a same-tile re-click keeps the engaged monster (Cat 2026-10-21)
+///
+/// The ×3 field density stacks several monsters on one tile. Every re-click
+/// on that stack is resolved by the *client* to whichever clone its hit test
+/// picked, so a second click mid-fight can name a different clone standing on
+/// the engaged monster's own tile. The legacy's target switch is faithful
+/// (`clCurOrder.Set(&ReserveOrder)` replaces the order outright), but here it
+/// also un-jims the current monster and jims a fresh one
+/// (`hit_by_player`'s `SetBeAttackedSwitch` mirror) — and the fresh clone's
+/// full life reads as the overhead bar jumping back up mid-fight, the
+/// 26 → 32 → 30 → 28 bounce from the 2026-10-21 playtest.
+///
+/// So the fight stays on the monster already engaged while the new click
+/// names a sibling on its tile. The rule releases itself: a dead or departed
+/// target's `position` is `None` ([`crate::monsters::MonsterWorld::position`]
+/// reads the live vector), so the click that picks the next clone after a
+/// kill goes through, and a click on another tile switches as ever.
+pub(crate) fn may_switch_target(
+    current: Option<u16>,
+    incoming: u16,
+    current_tile: Option<(i32, i32)>,
+    incoming_tile: Option<(i32, i32)>,
+) -> bool {
+    !matches!(
+        (current, current_tile, incoming_tile),
+        (Some(c), Some(a), Some(b)) if c != incoming && a == b
+    )
 }
 
 /// Whether an `OutOfRange` swing may (re)start the approach walk.
@@ -1220,6 +1265,10 @@ mod tests {
         );
         // The spread has to contain the minimum.
         assert!(roll_power(min, max, 0) >= min);
+        // Even an unjoined kind carries the flat base (shared with
+        // `mag_damage`, pinned there).
+        let (min, max) = attacks.raw_power(u16::MAX, 0, 1);
+        assert!(min >= BASE_ATTACK_BONUS && max >= BASE_ATTACK_BONUS);
     }
 
     /// The cadence the read loop arms a next swing with. A kind with no row
@@ -1355,14 +1404,52 @@ mod tests {
         assert_eq!(natural_flat_def(550, 100), 677, "L100: 550 VIT = +677");
     }
 
-    /// Cat's §4.3.6 MagDamage curve (Arcane Boost). No combat consumer until
-    /// the spell pipeline lands; pinned now per the directive.
+    /// Cat's §4.3.6 MagDamage curve (Arcane Boost) plus the flat base every
+    /// character carries (Cat 2026-10-21: base +5 MATK). No combat consumer
+    /// until the spell pipeline lands; pinned now per the directives.
     #[test]
     fn mag_damage_walks_the_4_3_curve() {
-        assert_eq!(mag_damage(28, 1), 7, "L1: 28 MAG = +7");
-        assert_eq!(mag_damage(37, 10), 18, "L10: 37 MAG = +18");
-        assert_eq!(mag_damage(220, 50), 194, "L50: 220 MAG = +194");
-        assert_eq!(mag_damage(550, 100), 748, "L100: 550 MAG = +748");
+        assert_eq!(mag_damage(28, 1), 12, "L1: 28 MAG = +12");
+        assert_eq!(mag_damage(37, 10), 23, "L10: 37 MAG = +23");
+        assert_eq!(mag_damage(220, 50), 199, "L50: 220 MAG = +199");
+        assert_eq!(mag_damage(550, 100), 753, "L100: 550 MAG = +753");
+        assert_eq!(
+            mag_damage(0, 1),
+            BASE_ATTACK_BONUS,
+            "zero MAG still carries the flat base"
+        );
+    }
+
+    /// Cat's 2026-10-21 bar-bounce fix: a re-click on a stacked cluster must
+    /// not move the fight to a sibling clone on the engaged monster's tile,
+    /// and must not block anything else.
+    #[test]
+    fn a_same_tile_clone_re_click_keeps_the_engaged_target() {
+        // Different clone, same tile: stay.
+        assert!(!may_switch_target(
+            Some(9001),
+            9002,
+            Some((10, 20)),
+            Some((10, 20))
+        ));
+        // Same target re-clicked: fine (a plain re-arm).
+        assert!(may_switch_target(
+            Some(9001),
+            9001,
+            Some((10, 20)),
+            Some((10, 20))
+        ));
+        // Another tile: a real switch.
+        assert!(may_switch_target(
+            Some(9001),
+            9002,
+            Some((10, 20)),
+            Some((11, 20))
+        ));
+        // The engaged monster is gone (dead or off-world): the rule releases.
+        assert!(may_switch_target(Some(9001), 9002, None, Some((10, 20))));
+        assert!(may_switch_target(None, 9002, None, Some((10, 20))));
+        assert!(may_switch_target(Some(9001), 9002, Some((10, 20)), None));
     }
 
     /// Cat's §4.3.7 WIS ranks — the caster's half of the AGI reformation.

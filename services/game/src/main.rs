@@ -405,6 +405,25 @@ async fn serve(cfg: &GameConfig) -> Result<(), AnyError> {
                         .encode()
                         .to_vec(),
                     );
+                    // The struck player's own HUD gauge does not read the 268:
+                    // it reads `clIP.Life`, which the client refreshes from a
+                    // `RESPONSE_PERSON_IP` (215) push — the legacy's
+                    // `UPDATE_IP` flush carries the whole `clIP`
+                    // (`Char-UpdateChangedData.cpp:74-82`). Without that push
+                    // the server's life is true and the top-left bar stays
+                    // full — the 2026-10-21 playtest's Bug 2. A dodge or miss
+                    // moves no life and owes no 215.
+                    if hit.outcome == combat::SwingOutcome::Hit
+                        && let Some(mut basic) = registry.basic_info(hit.key)
+                    {
+                        basic.life = hit.life as i32;
+                        registry.set_basic_info(hit.key, basic.clone());
+                        registry.send_to(
+                            hit.key,
+                            GameMsg::ResponsePersonIp as u16,
+                            encode_person_ip(hit.char_unique, &basic),
+                        );
+                    }
                     // A player's death keeps its body, and it gets a prompt:
                     // the legacy's kill branch runs `DeathPenalty()` and then
                     // `RequestRevive(id, NORMAL)` back to back
@@ -415,6 +434,20 @@ async fn serve(cfg: &GameConfig) -> Result<(), AnyError> {
                     // from Test12.
                     if hit.life == 0 {
                         let dead = hit.char_unique;
+                        // Who landed the blow. The legacy copies the killer's
+                        // name into `szKillMeCharName` (`DeadChar_PC`,
+                        // `Server-Attack.cpp:6358`) — but an NPC's own name is
+                        // never written, so a monster kill went out blank and
+                        // the death dialog's name slot stayed empty (Cat's
+                        // 2026-10-21 Bug 4). This is the kind's display name
+                        // instead; the frame's encoder already caps it at the
+                        // legacy's `MAX_PLAYER_NAME`.
+                        let killer = {
+                            let world = monsters
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner);
+                            world.monster_display_name(hit.attacker_unique)
+                        };
                         registry.send_to(
                             hit.key,
                             GameMsg::ResponseDealthpenaltyinfo as u16,
@@ -422,7 +455,7 @@ async fn serve(cfg: &GameConfig) -> Result<(), AnyError> {
                                 si_money: 0,
                                 si_exp: 0,
                                 si_killed_mode: 0,
-                                sz_kill_me_char_name: String::new(),
+                                sz_kill_me_char_name: killer.unwrap_or_default().to_owned(),
                             }
                             .encode()
                             .to_vec(),
@@ -898,6 +931,18 @@ async fn handle_client(
                                 // already approaching (the first-step hesitation).
                                 // An approach already running keeps its walk —
                                 // `may_start_approach` is where both halves live.
+                                //
+                                // A swing that finds no tile to walk to ends the
+                                // order the way the legacy's does:
+                                // `Action_Attack()` returns -1 when it cannot
+                                // walk to the target and the order machinery turns
+                                // that into `OrderStop` (`Char-Common.cpp:1762-1766`,
+                                // the `else { return -1; }` at
+                                // `char-attack.cpp:1929-1938`). So an unreachable
+                                // target stops the fight instead of re-arming a
+                                // swing every second forever — the 24-second
+                                // frozen retry from the 2026-10-21 playtest.
+                                let mut unreachable = false;
                                 if may_start_approach(outcome, movement.is_some(), approach, target)
                                 {
                                     let range = player_attacks.range(class_kind);
@@ -924,10 +969,14 @@ async fn handle_client(
                                                 dest.1
                                             );
                                         }
-                                        None => logln!(
-                                            "game: {peer}: out of range of {target} (range \
-                                             {range}) from ({ax}, {ay}) and no approachable tile"
-                                        ),
+                                        None => {
+                                            logln!(
+                                                "game: {peer}: out of range of {target} (range \
+                                                 {range}) from ({ax}, {ay}) and no approachable \
+                                                 tile; attack order stopped"
+                                            );
+                                            unreachable = true;
+                                        }
                                     }
                                 }
                                 // Whatever the swing did, only `OutOfRange` still
@@ -935,7 +984,7 @@ async fn handle_client(
                                 if outcome != Swing::OutOfRange {
                                     approach = None;
                                 }
-                                (outcome != Swing::NoTarget).then(|| {
+                                (!unreachable && outcome != Swing::NoTarget).then(|| {
                                     (
                                         target,
                                         Instant::now()
@@ -1544,6 +1593,38 @@ async fn handle_client(
                         };
                         if me.life == 0 {
                             continue;
+                        }
+                        // Cat's bar-bounce fix (2026-10-21): a re-click on a
+                        // stacked cluster is resolved by the client to
+                        // whichever clone its hit test picked, so a second
+                        // click mid-fight can name a sibling standing on the
+                        // engaged monster's own tile. Switching would un-jim
+                        // the current monster and bar up a fresh one at full
+                        // life — the 26 → 32 → 30 → 28 overhead-bar bounce.
+                        // The fight stays on the engaged monster until it
+                        // dies or the click names one on another tile
+                        // (`combat::may_switch_target`).
+                        {
+                            let world = monsters
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner);
+                            let current = attack.map(|(c, _)| c);
+                            if !combat::may_switch_target(
+                                current,
+                                target_unique,
+                                current.and_then(|c| world.position(c)),
+                                world.position(target_unique),
+                            ) {
+                                let current = current.unwrap_or(target_unique);
+                                drop(world);
+                                attack = Some((current, Instant::now()));
+                                logln!(
+                                    "game: {peer}: ORDER_ATTACK -> monster {target_unique} is a \
+                                     clone on the engaged monster {current}'s tile; the fight \
+                                     stays on {current}"
+                                );
+                                continue;
+                            }
                         }
                         // A PC's swing goes to its neighbours and not to itself
                         // (`SendNeighbourExceptMeMsg`, `char-order.cpp:254`):

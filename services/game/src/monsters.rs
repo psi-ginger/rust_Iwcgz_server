@@ -383,6 +383,10 @@ pub(crate) struct MonsterWorld {
     /// attacker's own class decides what it may step onto, and only the world
     /// load sees both tables at once.
     block_by_kind: HashMap<u16, u16>,
+    /// `KindInfo_Unique` id -> that kind's display name, from the canonical
+    /// drop table's `Name` column — the death frame's killer name
+    /// ([`Self::monster_display_name`]). `""` for a kind the table names not.
+    name_by_kind: HashMap<u16, &'static str>,
     /// Which maps are being watched and which may sleep — the dormancy state
     /// machine behind the tick loop's skip (docs/DESIGN_MAP_DORMANCY.md).
     dormancy: MapDormancyManager,
@@ -430,6 +434,22 @@ impl MonsterWorld {
             .iter()
             .map(|r| (r.code.as_str(), r.drops.as_slice()))
             .collect();
+        let name_by_code: HashMap<&str, &str> = drops
+            .iter()
+            .map(|r| (r.code.as_str(), r.name.as_str()))
+            .collect();
+        // The killer's display name for the death frame: every kind id gets an
+        // entry, `""` where the drop table carries no name, so a lookup at
+        // death time cannot fail on a data gap.
+        let name_by_kind: HashMap<u16, &'static str> = unique
+            .iter()
+            .map(|u| {
+                (
+                    u.id,
+                    name_by_code.get(u.code.as_str()).copied().unwrap_or(""),
+                )
+            })
+            .collect();
 
         // One connectivity flood per kind mask, shared by every group of that
         // kind (the expensive half of `spawn_points`).
@@ -441,6 +461,17 @@ impl MonsterWorld {
                 center_x: group.center_x,
                 center_y: group.center_y,
                 radius: group.radius,
+            };
+            // Cat's density fix (2026-10-21): the ×3 is for the field. A group
+            // the static-placement generator takes verbatim — `Radius` 1 with
+            // every unit at `MinNum` 1 (`generate-npc-placements.ps1` refuses
+            // anything else) — is a town NPC: a trader, a quest giver, a store
+            // clerk. Those keep their shipped count, so a town stays one copy
+            // of each NPC instead of three stacked.
+            let density = if group.radius == 1 && group.units.iter().all(|u| u.max_num == 1) {
+                1
+            } else {
+                DENSITY_MULTIPLIER
             };
             let mut units = Vec::with_capacity(group.units.len());
             for unit in &group.units {
@@ -496,7 +527,7 @@ impl MonsterWorld {
                 units.push(SpawnUnit {
                     wire_kind,
                     level: unit.level,
-                    max_num: unit.max_num.saturating_mul(DENSITY_MULTIPLIER),
+                    max_num: unit.max_num.saturating_mul(density),
                     move_speed: stats.move_speed.clamp(0, 63) as u8,
                     life,
                     tiles,
@@ -524,7 +555,7 @@ impl MonsterWorld {
             if !units.is_empty() {
                 out.push(FieldGroup {
                     anchor,
-                    capacity: group.max_npc_num.saturating_mul(DENSITY_MULTIPLIER),
+                    capacity: group.max_npc_num.saturating_mul(density),
                     boss: group.boss,
                     // The file carries seconds; the legacy converts once at
                     // load (`NPC.cpp:223`). A malformed negative is 0.
@@ -552,6 +583,7 @@ impl MonsterWorld {
             jim_by: HashMap::new(),
             map: Some(map),
             block_by_kind,
+            name_by_kind,
             dormancy: MapDormancyManager::new(),
         })
     }
@@ -841,6 +873,25 @@ impl MonsterWorld {
             .iter()
             .find(|m| m.unique.u16() == monster_unique)
             .map(|m| self.groups[m.group].units[m.unit].dex)
+    }
+
+    /// The display name of the monster `monster_unique` is — the name the
+    /// death frame owes for a killing blow (`DeadChar_PC` copies the killer's
+    /// name into `szKillMeCharName`, `Server-Attack.cpp:6358`; the death
+    /// dialog's text has a slot for it, `NDeathDlg.cpp:112`).
+    ///
+    /// The legacy leaves that slot empty for an NPC killer — an NPC's
+    /// `clBI.clPerson.szName` is never written — so this is the port's fix per
+    /// Cat's 2026-10-21 directive: the kind's display name from the canonical
+    /// drop table's `Name` column (`Evil Raccoon` for the starter field).
+    /// `None` for a monster the world does not hold; the caller then sends the
+    /// legacy's empty string.
+    pub(crate) fn monster_display_name(&self, monster_unique: u16) -> Option<&'static str> {
+        let monster = self
+            .monsters
+            .iter()
+            .find(|m| m.unique.u16() == monster_unique)?;
+        self.name_by_kind.get(&monster.wire_kind).copied()
     }
 
     /// The tile an attacking player should walk to when `range` does not reach
@@ -1467,9 +1518,15 @@ const RESPAWN_MS: u64 = 10_000;
 const CORPSE_MS: u64 = 7_000;
 
 /// World-map spawn density (Cat, 2026-10-20 — 3x the shipped population):
-/// `load` multiplies every file-derived unit target *and* group cap by this.
-/// Both scale together, so a group's `MaxNPCNum` can never re-clamp its own
-/// amplified targets — the field lands on exactly 3x, not 3x-then-clamped.
+/// `load` multiplies every *field* group's file-derived unit target *and*
+/// group cap by this. Both scale together, so a group's `MaxNPCNum` can never
+/// re-clamp its own amplified targets — the field lands on exactly 3x, not
+/// 3x-then-clamped.
+///
+/// Not for the static town NPCs (Cat, 2026-10-21): a group the
+/// static-placement generator takes verbatim — `Radius` 1, every unit at
+/// `MinNum` 1 — keeps its shipped count, so a town holds one copy of each
+/// NPC instead of three stacked.
 const DENSITY_MULTIPLIER: i32 = 3;
 
 /// A corpse must free its id before its respawn draws one; the ordering above
@@ -1693,14 +1750,32 @@ mod tests {
         // skips those too (`NPC.cpp:961`). 157 - 5 - 4 = 148.
         assert_eq!(groups, 148, "one placeable group per shipped map-0 file");
         // The sum of the placeable groups' unit targets (`MinNum`) — the boot
-        // tick fills each unit to its target, so this is the shipped population
-        // at `DENSITY_MULTIPLIER`: targets and group caps scale by the same
-        // factor, so every group triples exactly (1_536 x 3).
+        // tick fills each unit to its target, so this is the shipped population.
+        // Two classes since Cat's density fix (2026-10-21): a field group
+        // (anything but `Radius` 1 with every unit at `MinNum` 1) triples, a
+        // static town group keeps its shipped count. 1_536 placeable units in
+        // total; 42 of them sit in town groups and spawn once, the other 1_494
+        // triple: 1_494 x 3 + 42 = 4_524.
         assert_eq!(
             world.monster_count(),
-            4_608,
-            "the shipped map-0 unit targets x DENSITY_MULTIPLIER"
+            4_524,
+            "field unit targets x DENSITY_MULTIPLIER, town units x1"
         );
+        // And every static town group holds exactly its shipped count — the
+        // fix behind "3 copies of the same NPC stacked in town".
+        for (index, group) in world.groups.iter().enumerate() {
+            if group.anchor.radius != 1 {
+                continue;
+            }
+            let shipped = usize::try_from(group.units.iter().map(|u| u.max_num).sum::<i32>())
+                .expect("town unit targets are non-negative");
+            let copies = world.monsters.iter().filter(|m| m.group == index).count();
+            assert_eq!(
+                copies, shipped,
+                "town group at ({}, {}) must hold its shipped count",
+                group.anchor.center_x, group.anchor.center_y
+            );
+        }
 
         let npc_top =
             gz_data::npc::NPC_CHAR_UNIQUE_BASE + gz_data::npc::NPC_PLACEMENTS.len() as u16;
@@ -1732,6 +1807,30 @@ mod tests {
                 m.unique
             );
         }
+    }
+
+    /// Cat's 2026-10-21 Bug 4: the death frame's killer name is the kind's
+    /// display name out of the canonical drop table's `Name` column — the
+    /// legacy left that slot blank for an NPC killer.
+    #[test]
+    fn a_spawned_monster_resolves_the_kind_display_name_for_the_death_frame() {
+        if !Path::new(DATA_ROOT).exists() {
+            return; // the game data is not part of this repository
+        }
+        let mut world = MonsterWorld::load(Path::new(DATA_ROOT)).expect("the field data loads");
+        world.spawn_all(&Registry::new());
+        // The starter field spawns Evil Raccoons; their kind's display name
+        // must reach the lookup the death path uses.
+        assert!(
+            world
+                .monsters
+                .iter()
+                .any(|m| world.monster_display_name(m.unique.u16()) == Some("Evil Raccoon")),
+            "the map-0 raccoons must resolve to their kind's display name"
+        );
+        // A monster the world does not hold yields no name at all — the
+        // caller then sends the legacy's blank rather than a guess.
+        assert_eq!(world.monster_display_name(0), None);
     }
 
     /// The record the client is given has to survive its own round trip, or a
