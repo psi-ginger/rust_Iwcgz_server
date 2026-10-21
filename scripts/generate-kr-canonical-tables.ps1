@@ -1,16 +1,16 @@
-# generate-kr-canonical-tables.ps1 - regenerate the KR-baseline canonical monster tables.
+# generate-kr-canonical-tables.ps1 - regenerate the canonical monster tables.
 #
-# Emits three committed tables from the Korean baseline plus the active English data,
-# and `-Check` fails when any has drifted:
+# Emits three committed tables from the active English client data plus the Korean
+# baseline where English data has none, and `-Check` fails when any has drifted:
 #
-#   * `crates/gz-data/data/CharAttackInfoCanonical.txt` - combat stats. EN 27-column
-#     schema; every column the KR baseline carries takes the KR value, the 7 columns
-#     only EN has (SortNUM, Luk, AttackE/R, DefenE/R, Wis) keep the EN value, and the
-#     `Name` column keeps the English display name. The EN rows are followed by the
-#     verified exact-code KR-only kinds - KR-only codes that already carry an EN wire
-#     id, so the EN client can resolve them (`KIND_BOMBDRAGON`, `KIND_JANGBOGO`,
-#     strategy doc 3.4). Human-confirmed rename pairs (Tier C) upgrade the EN-only row
-#     of the paired EN code in place, so they add no row.
+#   * `crates/gz-data/data/CharAttackInfoCanonical.txt` - combat stats. The shipped
+#     2008 EN client derives every monster from
+#     `New Era Live\CharInfo\charattackinfoE.txt`, so that file is the authority for
+#     all 27 columns: EN row set, EN row order, EN values, verbatim (Cat 2026-10-21).
+#     The EN rows are followed by the verified exact-code KR-only kinds - the only
+#     rows with no EN source at all (`KIND_BOMBDRAGON`, `KIND_JANGBOGO`, strategy doc
+#     3.4), which carry an EN wire id so the client can resolve them. Rename pairs
+#     (Tier C) resolve identity only: a pair must land on an EN row and writes no value.
 #   * `crates/gz-data/data/CharItemInfoCanonical.txt` - capture + drops. EN 6-column
 #     schema, same merge rule; the `ItemInfo` drop string comes from KR verbatim. A
 #     rename pair whose EN code has no EN row is appended.
@@ -21,15 +21,17 @@
 #     holds. The KR groups' extra kinds cannot resolve on an EN client and stay
 #     quarantined, minus the rename pairs (strategy doc 3.4, 4).
 #
-# The decision record is docs/DESIGN_MONSTER_KR_BASELINE_STRATEGY.md (docs repo):
-# the Korean baseline `Goonzu_kr_last` is the source of truth; English names and
-# the EN wire ids (`Data\KindInfo_Unique.txt`, never modified) layer on top.
-#   - shared kind codes are upgraded in place;
-#   - EN-only codes keep their EN values (provisional - no KR truth exists), unless a
-#     human confirmed them as a rename-pair target, which makes them KR-sourced;
-#   - KR-only codes are quarantined: an EN client cannot resolve a kind id it does not
-#     have, so they are reported but not emitted - unless a human confirmed a rename
-#     pair to an EN code that carries the wire id (Tier C), which resolves the KR code.
+# Combat stats are EN-authoritative (Cat 2026-10-21): the client's own
+# `CharAttackInfoE.txt` decides every value, so the server and the shipped client
+# cannot drift on a monster's numbers. `docs/DESIGN_MONSTER_KR_BASELINE_STRATEGY.md`
+# (docs repo) records the superseded KR-wins premise. Still Korean-sourced: the
+# capture/drop table (the EN item file carries no capture numbers for most kinds) and
+# the 2 Tier-B attack rows.
+#   - the EN row set is emitted unchanged, so KIND_ codes are 1:1 with the client file
+#     and a code is never duplicated;
+#   - KR-only codes stay quarantined - an EN client cannot resolve a kind id it does
+#     not have - except the Tier-B exact-code kinds and the rename pairs (Tier C),
+#     which resolve a KR code's identity to an EN code without moving any value.
 #
 # The KR `CharInfo\*.txt` files are NCR-encrypted (24-byte NCryptHeader, the read
 # path `NLib\NDataLoader.cpp:104-114`); the decoder below is the legacy algorithm
@@ -125,12 +127,15 @@ function ColMap([string[]]$Header) {
     $m
 }
 
-# The merge: EN row order and EN row set, KR values for every shared value column
-# (everything except the Char key and the Name display column), EN values kept for
-# columns the KR baseline never carried. KR codes are joined exactly, with a
-# case-insensitive fallback that is reported (strategy doc 7.4: case-only pairs are
-# recorded, never silent).
-function Merge-Table($Kr, $En) {
+# The merge: EN row order and EN row set. With -EnValues (the attack master) the EN
+# cells are emitted untouched - the shipped client file is the authority for every
+# monster stat - and the KR join is used only to report which KR codes EN lacks.
+# Without it (the drop master) every shared value column takes the KR value (everything
+# except the Char key and the Name display column) and columns the KR baseline never
+# carried keep the EN value. KR codes are joined exactly, with a case-insensitive
+# fallback that is reported (strategy doc 7.4: case-only pairs are recorded, never
+# silent).
+function Merge-Table($Kr, $En, [switch]$EnValues) {
     $krMap = ColMap $Kr.Header
     $enMap = ColMap $En.Header
     $krByCode = @{}
@@ -159,9 +164,13 @@ function Merge-Table($Kr, $En) {
             $caseOnly += "$code <-> $match"
         }
         if ($match) {
-            $krRow = $krByCode[$match]
-            foreach ($c in $common) { $cells[$enMap[$c]] = ($krRow[$krMap[$c]]).Trim() }
-            $upgraded++
+            # -EnValues leaves the EN row exactly as the client ships it, so no KR
+            # cell is written and nothing counts as upgraded.
+            if (-not $EnValues) {
+                $krRow = $krByCode[$match]
+                foreach ($c in $common) { $cells[$enMap[$c]] = ($krRow[$krMap[$c]]).Trim() }
+                $upgraded++
+            }
         }
         else { $provisional++ }
         $outRows += ,$cells
@@ -272,7 +281,7 @@ $krItem = Read-KrTable (Join-Path $KRRoot "CharInfo\CharItemInfo.txt")
 $enAttack = Read-EnTable (Join-Path $ENRoot "CharInfo\CharAttackInfoE.txt")
 $enItem = Read-EnTable (Join-Path $ENRoot "CharInfo\chariteminfoE.txt")
 
-$attack = Merge-Table $krAttack $enAttack
+$attack = Merge-Table $krAttack $enAttack -EnValues
 $item = Merge-Table $krItem $enItem
 
 # --- Tier C: confirmed rename pairs (strategy doc 4) ------------------------
@@ -333,13 +342,18 @@ $renamePairs = [ordered]@{
     "KIND_UNDERSEA_WHALE" = "KIND_DeepSeaWhale"
     "KIND_Xmas_Penguin"   = "KIND_CAVINE_RANGE"
 }
-$attackPairs = Apply-RenamePairs $attack $krAttack $renamePairs
-$itemPairs = Apply-RenamePairs $item $krItem $renamePairs
-# Every pair must land on the attack master (the KR attack roster holds all 39); a
-# shortfall means a typo in the pair table, not legitimate missing data.
-if (($attackPairs.Upgraded.Count + $attackPairs.Appended.Count) -ne $renamePairs.Count) {
-    throw "rename pairs applied to attack: $($attackPairs.Upgraded.Count + $attackPairs.Appended.Count) of $($renamePairs.Count)"
+# EN-authoritative: a rename pair resolves identity, never a value - the EN row it
+# names already carries the client's own numbers, so nothing is written into the attack
+# master. What still has to hold is that every pair lands on a real EN row (the KR
+# attack roster holds all 39); a miss means a typo in the pair table.
+$enMap = ColMap $enAttack.Header
+$enAttackCodes = New-Object System.Collections.Generic.HashSet[string]
+foreach ($r in $enAttack.Rows) { [void]$enAttackCodes.Add($r[$enMap["Char"]].Trim()) }
+$attackPairsMissing = @($renamePairs.Values | Where-Object { -not $enAttackCodes.Contains($_) } | Sort-Object)
+if ($attackPairsMissing.Count) {
+    throw "rename pairs with no EN attack row: $($attackPairsMissing -join ', ')"
 }
+$itemPairs = Apply-RenamePairs $item $krItem $renamePairs
 
 # --- wire-id gate (strategy doc step 3.4) -----------------------------------
 # The wire carries the KindInfo_Unique numeric id; a kind without an id cannot be
@@ -422,21 +436,24 @@ foreach ($code in $order) {
 }
 
 # --- emit -------------------------------------------------------------------
-$prov = "KR baseline (Goonzu_kr_last) values, EN schema + English display names; docs/DESIGN_MONSTER_KR_BASELINE_STRATEGY.md"
-Write-CanonTable (Join-Path $OutDir "CharAttackInfoCanonical.txt") "CharAttackInfoCanonical" $attack $prov
-Write-CanonTable (Join-Path $OutDir "CharItemInfoCanonical.txt") "CharItemInfoCanonical" $item $prov
+# One provenance per table: these three header lines are part of the emitted text, so
+# the drop master keeps its KR provenance byte for byte.
+$provAttack = "EN authority (New Era Live\CharInfo\CharAttackInfoE.txt) verbatim, plus the 2 Tier-B KR-only rows; see scripts/generate-kr-canonical-tables.ps1"
+$provDrops = "KR baseline (Goonzu_kr_last) values, EN schema + English display names; docs/DESIGN_MONSTER_KR_BASELINE_STRATEGY.md"
+Write-CanonTable (Join-Path $OutDir "CharAttackInfoCanonical.txt") "CharAttackInfoCanonical" $attack $provAttack
+Write-CanonTable (Join-Path $OutDir "CharItemInfoCanonical.txt") "CharItemInfoCanonical" $item $provDrops
 Write-ReconTable (Join-Path $OutDir "KindReconciliation.txt") $recon
 
 # --- report -----------------------------------------------------------------
 Write-Host ""
-Write-Host "attack: $($attack.Rows.Count) rows - $($attack.Upgraded + $attackPairs.Upgraded.Count) KR-upgraded, $($attack.Provisional - $attackPairs.Upgraded.Count) EN-provisional, $($tierB.Count) Tier-B exact-code KR-only appended; $($attack.KrOnly.Count - $tierB.Count - $attackPairs.Upgraded.Count) KR-only quarantined"
+Write-Host "attack: $($attack.Rows.Count) rows - $($attack.Rows.Count - $tierB.Count) EN-authoritative (charattackinfoE.txt verbatim), $($attack.Upgraded) KR-upgraded, $($tierB.Count) Tier-B exact-code KR-only appended; $($attack.KrOnly.Count - $tierB.Count - $renamePairs.Count) KR-only quarantined"
 if ($tierB.Count) { Write-Host "  Tier B appended: $($tierB -join ', ')" }
 if ($attack.Dups.Count) { Write-Host "  KR duplicate codes (last wins): $($attack.Dups -join ', ')" }
 if ($attack.CaseOnly.Count) { Write-Host "  case-only pairs: $($attack.CaseOnly -join '; ')" }
 Write-Host "drops : $($item.Rows.Count) rows - $($item.Upgraded + $itemPairs.Upgraded.Count) KR-upgraded, $($item.Provisional - $itemPairs.Upgraded.Count) EN-provisional; $($item.KrOnly.Count - $itemPairs.Upgraded.Count - $itemPairs.Appended.Count) KR-only quarantined"
 if ($item.Dups.Count) { Write-Host "  KR duplicate codes (last wins): $($item.Dups -join ', ')" }
 if ($item.CaseOnly.Count) { Write-Host "  case-only pairs: $($item.CaseOnly -join '; ')" }
-Write-Host "Tier C rename pairs: attack $($attackPairs.Upgraded.Count) upgraded / $($attackPairs.Appended.Count) appended; drops $($itemPairs.Upgraded.Count) upgraded / $($itemPairs.Appended.Count) appended"
+Write-Host "Tier C rename pairs: attack $($renamePairs.Count) resolved to EN rows (no value written); drops $($itemPairs.Upgraded.Count) upgraded / $($itemPairs.Appended.Count) appended"
 if ($itemPairs.Appended.Count) { Write-Host "  drops appended: $($itemPairs.Appended -join ', ')" }
 Write-Host "wire-id gate: $($attack.Rows.Count - $missingIds.Count)/$($attack.Rows.Count) attack codes have an EN KindInfo_Unique id"
 if ($missingIds.Count) { Write-Host "  missing ids: $($missingIds -join ', ')" -ForegroundColor Yellow }
