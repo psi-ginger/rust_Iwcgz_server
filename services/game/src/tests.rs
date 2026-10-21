@@ -1,11 +1,12 @@
 use super::*;
+use crate::combat::mirror_exp;
 use crate::registry::SessionKey;
 use async_trait::async_trait;
 use gz_db::{CharacterFull, FriendRepository, OwnedFriend, RepositoryError};
 use gz_proto::game::{
     GameLogin, MakeCharInfo, encode_all_char_info_one, encode_all_char_info_two,
     encode_change_horse, encode_family_update, encode_get_village_info, encode_login_many_batches,
-    encode_person_horse, encode_response_name, encode_skillbook_magic_info,
+    encode_person_horse, encode_person_ip, encode_response_name, encode_skillbook_magic_info,
 };
 use gz_proto::item::{Item, encode_person_item_info};
 use gz_proto::order::BasicCharUpdate;
@@ -282,6 +283,78 @@ fn the_basic_info_block_carries_the_life_it_is_given_not_the_rows_max() {
     assert_eq!(
         block.mana, row.max_mana,
         "MP is still unmodelled, so it stays the max"
+    );
+}
+
+/// The 2026-10-21 exp snap-back: the grant persists the new total and 270
+/// carries a delta the client **adds** (`Client-Person.cpp:1114`), but 215
+/// assigns the whole `cltPIPInfo` (`Client-Person-BigInfo.cpp:243`, a
+/// `ZeroMemory` + `memcpy` at `Parametabox.cpp:144-151`), so both session
+/// caches must already hold the new total before any absolute frame goes out.
+/// Neither was refreshed on a non-leveling grant: the bar climbed to 194 and
+/// the next monster hit or stat spend pushed the login-time value over it.
+///
+/// The grant itself is `PgCharacterRepository`-bound (`combat.rs`), so its
+/// database half cannot run in the gate; this pins the half that was missing —
+/// that the mirror keeps both caches, and therefore the next 215, on the
+/// granted total.
+#[tokio::test]
+async fn a_granted_exp_reaches_both_session_caches_before_the_next_215() {
+    let registry = Registry::new();
+    let (key, _inbox) = chat_join(&registry, session_info(1471, "Tester"));
+    let (_, _, items, _, _) = lazy_repos();
+
+    // World entry captured exp 0 into the 214 block (`main.rs`'s char select)
+    // and loaded the same value into the session row.
+    let row = seeded_tester();
+    assert_eq!(row.exp, 0, "the login-time value, purely for contrast");
+    registry.set_basic_info(key, basic_info_for_test(13, "Tester"));
+    let mut live = LiveFrames {
+        items: &items,
+        account_id: 7,
+        account_name: "tester".into(),
+        character: Some(row),
+        char_unique: 1471,
+        friend_list: Vec::new(),
+        quest: gz_proto::quest::PersonQuest::new(),
+    };
+
+    // `add_exp` committed 194; the grant mirrors it before either arm talks.
+    mirror_exp(&mut live, &registry, key, 194);
+
+    assert_eq!(
+        live.character.as_ref().expect("row still loaded").exp,
+        194,
+        "the session row must not lag the RETURNING exp"
+    );
+    assert_eq!(
+        registry
+            .basic_info(key)
+            .expect("captured at world entry")
+            .exp,
+        194,
+        "the 214 block must not lag either"
+    );
+
+    // The struck-player push (`main.rs`): life patched, exp read out of the
+    // block. `siCharUnique` 0..2, pad 2..8, `clIP` 8..72 with `siExp` at +40.
+    let mut on_hit = registry.basic_info(key).expect("captured at world entry");
+    on_hit.life = 42;
+    let on_hit_body = encode_person_ip(1471, &on_hit);
+    assert_eq!(
+        i64::from_le_bytes(on_hit_body[48..56].try_into().expect("215 is 72 bytes")),
+        194,
+        "the hit's clIP.siExp is the granted total, not the login-time one"
+    );
+
+    // The stat-spend push (`stats.rs`): built from the session row instead.
+    let spend = basic_info_for(7, "tester", live.character.as_ref().expect("row"), 42)
+        .expect("map 158 fits the SI16 index");
+    let spend_body = encode_person_ip(1471, &spend);
+    assert_eq!(
+        i64::from_le_bytes(spend_body[48..56].try_into().expect("215 is 72 bytes")),
+        194,
+        "the spend's clIP.siExp is the granted total too"
     );
 }
 

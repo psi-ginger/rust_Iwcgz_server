@@ -651,6 +651,39 @@ pub(crate) fn start_approach(
     Some(dest)
 }
 
+/// Mirrors a committed exp total into every cache a *full-snapshot* frame is
+/// built from.
+///
+/// The plain grant answers with 270 (`ResponseGetexp`), which the client
+/// **adds** to its running total (`Client-Person.cpp:1114`), but every absolute
+/// frame overwrites instead: 215's handler assigns the whole `cltPIPInfo`
+/// (`Client-Person-BigInfo.cpp:243`), and `cltPIPInfo::Set` is a `ZeroMemory`
+/// plus `memcpy` (`Parametabox.cpp:144-151`). A grant that wrote only the
+/// database therefore left both caches at their login-time value, so the next
+/// monster hit (`main.rs`), stat spend (`stats.rs`) or 214 inspect (`main.rs`)
+/// pushed that stale `clIP.siExp` and the experience bar snapped back off the
+/// true total — the same shape as Bug 2, on the same frame.
+///
+/// The session row feeds the self-bound frames and the 214 block feeds
+/// everyone else's; neither may lag the `RETURNING exp` `add_exp` just
+/// committed.
+pub(crate) fn mirror_exp(
+    live: &mut LiveFrames<'_>,
+    registry: &Registry,
+    session_key: SessionKey,
+    new_exp: i64,
+) {
+    if let Some(character) = live.character.as_mut() {
+        character.exp = new_exp;
+    }
+    // A block never captured has no frame to keep fresh: both the inspect reply
+    // and the struck-player push bail out before encoding one.
+    if let Some(mut block) = registry.basic_info(session_key) {
+        block.exp = new_exp;
+        registry.set_basic_info(session_key, block);
+    }
+}
+
 /// Resolves one player swing against a field monster, end to end: the range
 /// gate, the power and crit rolls, the 268 that carries the new life, the EXP
 /// grant every landed hit earns, and — on a kill — the death frames and the
@@ -882,6 +915,11 @@ pub(crate) async fn player_swing(
     // TRUE instead of the grant frame — or answer with the plain 270.
     if gained > 0 {
         let new_exp = characters.add_exp(character_id, gained).await?;
+        // Before either arm can emit an absolute frame: the 270 below carries a
+        // delta the client adds, but 215 replaces `clIP.siExp` outright
+        // (`Parametabox.cpp:144`), so any cache left at its login-time value
+        // snaps the experience bar backward on the very next hit or spend.
+        mirror_exp(live, registry, session_key, new_exp);
         if let Some(new_level) = leveled_to(level_table, attacker_level, new_exp) {
             let row = characters
                 .level_up(
