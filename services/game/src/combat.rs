@@ -835,24 +835,26 @@ pub(crate) async fn player_swing(
         .encode()
         .to_vec(),
     );
-    // Cat's Bug-5 id trace (2026-10-21): which entity the swing resolved,
-    // from which tile, and what life the frame carried — the line that
-    // answers "did the attacked entity id change when the bar bounced" —
-    // with the internal log tag (Cat 2026-10-21). Frame values are logged
-    // deliberately: they are what the client saw.
-    let tag = monsters
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .log_tag(hit.unique);
-    logln!(
-        "game: 268: {session_key:?}: monster {} {} at ({}, {}) life {life} \
-         (-{damage}) {:?}",
-        hit.unique,
-        tag,
-        hit.x,
-        hit.y,
-        hit.outcome
-    );
+    // Routine swings are silent (Cat 2026-10-21): against 4,500+ monsters and
+    // hundreds of players a per-swing line is terminal I/O the server cannot
+    // afford. Only the kill keeps it — a milestone beside the drop and
+    // level-up lines below. Frame values are logged deliberately: they are
+    // what the client saw.
+    if hit.died {
+        let tag = monsters
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .log_tag(hit.unique);
+        logln!(
+            "game: 268: {session_key:?}: monster {} {} died at ({}, {}) life {life} \
+             (-{damage}) {:?}",
+            hit.unique,
+            tag,
+            hit.x,
+            hit.y,
+            hit.outcome
+        );
+    }
     if hit.outcome != SwingOutcome::Hit {
         // A dodge or miss owes nothing: no EXP, no death frame, no life
         // movement — the legacy's handler returns right after the flagged
