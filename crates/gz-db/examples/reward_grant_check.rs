@@ -74,12 +74,34 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         failures.push(format!("money {money_before} + {MONEY} != {money_after}"));
     }
     for (label, got, want) in [
-        ("sword slot", a.as_ref().map(|r| i64::from(r.slot)), 15i64),
-        ("sword count", a.as_ref().map(|r| i64::from(r.count)), 1),
-        ("heal slot", b.as_ref().map(|r| i64::from(r.slot)), 16),
-        ("heal count", b.as_ref().map(|r| i64::from(r.count)), 3),
-        ("merged slot", c.as_ref().map(|r| i64::from(r.slot)), 16),
-        ("merged count", c.as_ref().map(|r| i64::from(r.count)), 5),
+        (
+            "sword slot",
+            a.as_ref().map(|r| i64::from(r.item.slot)),
+            15i64,
+        ),
+        (
+            "sword count",
+            a.as_ref().map(|r| i64::from(r.item.count)),
+            1,
+        ),
+        ("heal slot", b.as_ref().map(|r| i64::from(r.item.slot)), 16),
+        ("heal count", b.as_ref().map(|r| i64::from(r.item.count)), 3),
+        (
+            "merged slot",
+            c.as_ref().map(|r| i64::from(r.item.slot)),
+            16,
+        ),
+        (
+            "merged count",
+            c.as_ref().map(|r| i64::from(r.item.count)),
+            5,
+        ),
+        // What was *added*, which is what `siChangedNum` must carry: the sword
+        // was refused at 1 (a non-pileable is one item), the first heal filled a
+        // fresh stack of 3, and the second added 2 onto it.
+        ("sword delta", a.as_ref().map(|r| i64::from(r.delta)), 1),
+        ("heal delta", b.as_ref().map(|r| i64::from(r.delta)), 3),
+        ("merged delta", c.as_ref().map(|r| i64::from(r.delta)), 2),
     ] {
         if got != Some(want) {
             failures.push(format!("{label}: got {got:?}, want {want:?}"));
@@ -87,7 +109,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     // The stored record must carry the merged count, not the granted delta.
     if let Some(row) = &c {
-        let item = gz_proto::item::Item::decode(&row.raw)?;
+        let item = gz_proto::item::Item::decode(&row.item.raw)?;
         if i32::from(item.count()) != 5 {
             failures.push(format!(
                 "slot record count is {} after the merge, want 5",
@@ -97,9 +119,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Restore: drop exactly the two slots this run created and give the money back.
-    for slot in [a.as_ref().map(|r| r.slot), b.as_ref().map(|r| r.slot)]
-        .into_iter()
-        .flatten()
+    for slot in [
+        a.as_ref().map(|r| r.item.slot),
+        b.as_ref().map(|r| r.item.slot),
+    ]
+    .into_iter()
+    .flatten()
     {
         sqlx::query("DELETE FROM character_items WHERE character_id = $1 AND slot = $2")
             .bind(character_id)

@@ -121,7 +121,13 @@ impl RewardStorage for QuestRewardStore<'_> {
         item_unique: u16,
         count: i32,
     ) -> Result<Option<CharacterItem>, RepositoryError> {
-        self.items.grant(character_id, item_unique, count).await
+        // `store_item` reports the row — the quest counts on the item having
+        // landed, not on how much of it did.
+        Ok(self
+            .items
+            .grant(character_id, item_unique, count)
+            .await?
+            .map(|granted| granted.item))
     }
 
     async fn add_money(&self, character_id: i32, amount: i64) -> Result<(), RepositoryError> {

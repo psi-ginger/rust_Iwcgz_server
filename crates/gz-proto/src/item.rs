@@ -581,7 +581,14 @@ pub fn encode_person_item_info(slot: u16, item: &Item) -> [u8; PERSON_ITEM_INFO_
 
 /// The 7210 for an item *arriving* in the bag — the same 104 bytes as
 /// [`encode_person_item_info`], but carrying [`personiteminfo::OPTION_SHOW`]
-/// and the count in `siChangedNum`.
+/// and the amount gained in `siChangedNum`.
+///
+/// `count` is what was *added*, not the slot's new total. The legacy's DB layer
+/// logs the two side by side over `siChangedNum` and `clItem.siItemNum` —
+/// `Amount = %d, LeftItemNum = %d` (`DBMsgPersonItem.cpp:117-119`) — and the
+/// loot line reads the Amount (`NChatBarDlg.cpp:950`), so a merge that tops a
+/// stack of 25 up by 23 must say 23. Passing the total here over-counts every
+/// merge.
 ///
 /// Those two fields are the whole difference between "keep the client's copy of
 /// the slot in step" and "tell the player they got something". The client's

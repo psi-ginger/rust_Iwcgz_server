@@ -28,7 +28,8 @@ use std::time::Instant;
 use gz_data::kindinfo::{CharAttackRow, battle_power, canonical_char_attack, load_kind_unique};
 use gz_data::levelup::LevelUpTable;
 use gz_db::{
-    CharacterFull, CharacterRepository, ItemRepository, PgCharacterRepository, PgItemRepository,
+    CharacterFull, CharacterRepository, DropLocation, ItemRepository, PgCharacterRepository,
+    PgItemRepository,
 };
 use gz_proto::combat::{GetExpResponse, HIT_TARGET_MONSTER, HitResponse, LevelUpResponse};
 use gz_proto::game::encode_person_ip;
@@ -1031,10 +1032,14 @@ pub(crate) async fn player_swing(
             // the loot line and `SetItemData` raises the acquisition popup
             // (`Client-Person-BigInfo.cpp:1054-1093`).
             Ok(Some(granted)) => {
+                // `granted.delta` is what was *added*, not the slot's new total:
+                // `siChangedNum` carries the Amount, and `clItem` the
+                // LeftItemNum (`DBMsgPersonItem.cpp:117-119`). Merging 23 onto a
+                // stack of 25 must say 23, or every merge over-counts.
                 let gained = encode_person_item_gained(
-                    granted.slot,
-                    granted.count,
-                    &Item::from_raw(&granted.raw),
+                    granted.item.slot,
+                    granted.delta,
+                    &Item::from_raw(&granted.item.raw),
                 );
                 registry.send_to(
                     session_key,
@@ -1043,13 +1048,56 @@ pub(crate) async fn player_swing(
                 );
                 logln!(
                     "game: character {character_id} received item {item_unique} x{} (slot {})",
-                    granted.count,
-                    granted.slot
+                    granted.delta,
+                    granted.item.slot
                 );
             }
-            Ok(None) => logln_err!(
-                "game: drop {item_unique} found no free slot for character {character_id}"
-            ),
+            // The main bag is full. The legacy never destroys a drop it cannot
+            // file: `GiveItem` answers `GIVEITEM_RESULT_NOINVEN` and the item
+            // stays in the world for whoever walks over it next
+            // (`Char-Item.cpp:8959-8961`). The port granted straight into the
+            // bag, so a full bag logged the refusal and the item was gone —
+            // the drop-disappearance the RCA narrowed to exactly here. Land it
+            // on the ground at the kill instead, and say which way it went:
+            // an item that reached neither the bag nor the ground is lost, and
+            // silence is how this stayed invisible.
+            Ok(None) => {
+                let at = DropLocation {
+                    map_id: monsters::FIELD_MAP,
+                    x: hit.x,
+                    y: hit.y,
+                };
+                match items
+                    .spawn_ground(item_unique, count, at, character_id)
+                    .await
+                {
+                    Ok(Some(grounded)) => {
+                        registry.broadcast_near_point(
+                            monsters::FIELD_MAP,
+                            hit.x,
+                            hit.y,
+                            GameMsg::ResponseItemdrop as u16,
+                            grounded.encode().to_vec(),
+                        );
+                        logln!(
+                            "game: drop {item_unique} x{count} found no bag slot for character \
+                             {character_id}; it is on the ground at ({}, {})",
+                            grounded.x,
+                            grounded.y
+                        );
+                    }
+                    Ok(None) => logln_err!(
+                        "game: drop {item_unique} x{count} for character {character_id}: no bag \
+                         slot and no free cell within 5x5 of ({}, {}) — the item is LOST",
+                        hit.x,
+                        hit.y
+                    ),
+                    Err(e) => logln_err!(
+                        "game: drop {item_unique} could not reach the ground for character \
+                         {character_id}: {e}"
+                    ),
+                }
+            }
             Err(e) => logln_err!("game: drop grant failed: {e}"),
         }
     }

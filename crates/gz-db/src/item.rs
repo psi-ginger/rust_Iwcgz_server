@@ -38,6 +38,28 @@ pub struct CharacterItem {
     pub raw: Vec<u8>,
 }
 
+/// A [`ItemRepository::grant`] that landed: the slot's row after the write, and
+/// how much of the request actually reached it.
+///
+/// The two numbers are not the same, and the difference is a wire field. The
+/// legacy's DB layer logs them side by side — `Amount = %d, LeftItemNum =
+/// %d`, read over `siChangedNum` and `clItem.siItemNum`
+/// (`DBMsgPersonItem.cpp:117-119`) — and so does the client. A merge that
+/// tops a stack of 25 up by 23 answers *Amount* 23 and *LeftItemNum* 48:
+/// [`Self::item`] is the row, which is what `clItem` writes and what the bag
+/// then shows, while [`Self::delta`] is the *Amount* that `PERSONITEMINFO`'s
+/// `siChangedNum` carries and the loot line reads
+/// (`NChatBarDlg.cpp:950`), and that quest counting (`ServerDB-Item.cpp:2248`)
+/// and the party notice (`:2259`) accumulate. Reporting the row where the
+/// Amount belongs over-counts every merge.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Granted {
+    /// The slot's whole row after the write.
+    pub item: CharacterItem,
+    /// How much this grant added to the character's holdings.
+    pub delta: i32,
+}
+
 /// Re-exported so callers get [`container_of`] from the same place as the rest of
 /// the item API. The classification is a wire fact, which is why it lives in
 /// `gz_proto::item`.
@@ -220,6 +242,10 @@ pub trait ItemRepository: Send + Sync {
     /// not treat the reward as delivered (for a quest that means refusing the
     /// clear, `Server-Person.cpp:1287-1296`).
     ///
+    /// The result is a [`Granted`] rather than a bare row because the frame that
+    /// reports the grant needs **both** numbers: the row for `clItem`, and the
+    /// amount added for `siChangedNum`.
+    ///
     /// # Errors
     ///
     /// [`RepositoryError::Database`] if the read or write fails, or
@@ -230,7 +256,7 @@ pub trait ItemRepository: Send + Sync {
         character_id: i32,
         item_unique: u16,
         count: i32,
-    ) -> Result<Option<CharacterItem>, RepositoryError>;
+    ) -> Result<Option<Granted>, RepositoryError>;
 
     /// Replaces one slot's whole record — the write the sealing-up path makes.
     ///
@@ -479,6 +505,61 @@ impl PgItemRepository {
         .fetch_one(&self.pool)
         .await?;
         Ok(removed as u64)
+    }
+
+    /// Lands `count` of `item_unique` on the ground near `at`, without ever
+    /// touching a character's inventory.
+    ///
+    /// This is the bag-full fallback for a kill drop. `grant` answers `None`
+    /// when the main bag has no room, and the legacy never destroys an item it
+    /// cannot file: `GiveItem` returns `GIVEITEM_RESULT_NOINVEN` and the drop
+    /// stays in the world for whoever walks over it next
+    /// (`Char-Item.cpp:8959-8961`). The port granted straight into the bag, so
+    /// a full bag used to log the refusal and lose the item.
+    ///
+    /// `None` means the ground refused it too: the handle pool is exhausted
+    /// (65,535 live ground items) or every cell of the 5×5 box around `at` is
+    /// already taken. The caller must then say so — an item that reached
+    /// neither the bag nor the ground is gone, and silence is how the drop
+    /// disappearance this replaced stayed invisible.
+    ///
+    /// # Errors
+    ///
+    /// [`RepositoryError::Database`] if the write fails, or
+    /// [`RepositoryError::Invalid`] if the landed cell cannot be named on the
+    /// wire (the transaction then rolls back and nothing is written).
+    pub async fn spawn_ground(
+        &self,
+        item_unique: u16,
+        count: i32,
+        at: DropLocation,
+        dropped_by: i32,
+    ) -> Result<Option<GroundItem>, RepositoryError> {
+        if count <= 0 {
+            return Ok(None);
+        }
+        let mut tx = self.pool.begin().await?;
+        let raw = Item::from_unique(item_unique, u16::try_from(count).unwrap_or(u16::MAX)).encode();
+        let landed =
+            ground_insert(&mut tx, i32::from(item_unique), count, &raw, at, dropped_by).await?;
+
+        let grounded = match landed {
+            GroundOutcome::Landed(target, list_index) => GroundItem {
+                map_index: map_index_for(target.map_id)?,
+                x: cell_axis("clPos.siX", target.x)?,
+                y: cell_axis("clPos.siY", target.y)?,
+                item_unique,
+                list_index,
+            },
+            GroundOutcome::HandleExhausted | GroundOutcome::CellsTaken => {
+                // Nothing landed, so undo the handle claim with it — the same
+                // shape as `drop_slot`'s refusal arms.
+                tx.rollback().await?;
+                return Ok(None);
+            }
+        };
+        tx.commit().await?;
+        Ok(Some(grounded))
     }
 }
 
@@ -762,6 +843,115 @@ fn drop_candidates(at: DropLocation) -> impl Iterator<Item = DropLocation> {
     }))
 }
 
+/// How [`ground_insert`] resolved: the cell the item took, or why it took none.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GroundOutcome {
+    /// Landed: the cell it occupies, and the handle the client names it by.
+    Landed(DropLocation, u16),
+    /// The handle pool was empty and the sequence is past the UI16 the client
+    /// names ground objects by (65,535 live ground items).
+    HandleExhausted,
+    /// Every candidate cell of the 5×5 box around the requested one is taken.
+    CellsTaken,
+}
+
+/// Claims a handle and lands `count` of `item_unique` on the first free cell of
+/// the 5×5 box around `at`, inside the caller's transaction.
+///
+/// Shared by [`ItemRepository::drop_slot`] (a bag item going to the ground) and
+/// [`PgItemRepository::spawn_ground`] (a kill drop that found no room in a full
+/// bag). Both are an item reaching the ground, and the legacy writes the same
+/// `world_items` row for both — keeping one copy means the handle-pool and
+/// cell-race rules cannot drift apart between them.
+///
+/// The cell is chosen by the INSERT itself, not by a prior read:
+/// `world_items (map_id, x, y)` is UNIQUE (sql/0010) and every attempt is
+/// `ON CONFLICT DO NOTHING`, so a cell a concurrent drop just took simply
+/// yields the next candidate. There is no check-then-insert window left for
+/// two drops to race into the same cell.
+///
+/// The client keeps a single item per ground cell (`cltMapCommon::SetItemMap`
+/// overwrites) and `ITZMap::AddItem` (`ITZMap.cpp:283`) returns FALSE on an
+/// occupied cell — an item dropped onto an occupied cell renders nowhere and
+/// cannot be picked up. Hence [`drop_candidates`]: land on a free neighbouring
+/// cell instead of losing it.
+///
+/// The claim shares the caller's transaction, so the caller rolling back — a
+/// blocked cell, any error — returns a pooled handle by simply undoing the
+/// claim and burns only a sequence number when that is where the handle came
+/// from. Nothing is committed unless the caller commits.
+///
+/// # Errors
+///
+/// [`RepositoryError::Database`] if the read or write fails, or
+/// [`RepositoryError::Invalid`] if the landed handle does not fit the UI16 the
+/// wire carries.
+async fn ground_insert(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    item_unique: i32,
+    count: i32,
+    raw: &[u8],
+    at: DropLocation,
+    dropped_by: i32,
+) -> Result<GroundOutcome, RepositoryError> {
+    // H4: claim a handle before the cell search. Recycled handles go first
+    // (`world_items_free`, audit H4 / migration 0013), the sequence only when
+    // the pool is empty. `FOR UPDATE SKIP LOCKED` keeps two concurrent drops
+    // from claiming the same pooled handle.
+    let claimed: i64 = sqlx::query_scalar(
+        "WITH take AS ( \
+             DELETE FROM world_items_free \
+             WHERE obj_index = ( \
+                 SELECT obj_index FROM world_items_free \
+                 ORDER BY obj_index LIMIT 1 FOR UPDATE SKIP LOCKED) \
+             RETURNING obj_index) \
+         SELECT COALESCE((SELECT obj_index FROM take), \
+                         nextval('world_items_obj_index_seq'))",
+    )
+    .fetch_one(&mut **tx)
+    .await?;
+    // The sequence has climbed past the UI16 the client names ground objects
+    // by, and the pool was empty: 65,535 concurrent ground items. Refuse the
+    // drop — a resource limit must never kill the session (`?`-ing this out
+    // would let a client disconnect itself by dropping an item).
+    let Some(handle) = i32::try_from(claimed)
+        .ok()
+        .filter(|h| (1..=65_535).contains(h))
+    else {
+        return Ok(GroundOutcome::HandleExhausted);
+    };
+
+    for spot in drop_candidates(at) {
+        let inserted: Option<i32> = sqlx::query_scalar(
+            "INSERT INTO world_items \
+             (item_unique, count, raw, map_id, x, y, dropped_by, obj_index) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8) \
+             ON CONFLICT (map_id, x, y) DO NOTHING \
+             RETURNING obj_index",
+        )
+        .bind(item_unique)
+        .bind(count)
+        .bind(raw)
+        .bind(spot.map_id)
+        .bind(spot.x)
+        .bind(spot.y)
+        .bind(dropped_by)
+        .bind(handle)
+        .fetch_optional(&mut **tx)
+        .await?;
+        if let Some(list_index) = inserted {
+            let list_index = u16::try_from(list_index).map_err(|_| {
+                RepositoryError::Invalid(format!(
+                    "ground item handle {list_index} does not fit the UI16 that \
+                     GAMEMSG_RESPONSE_ITEMDROP carries"
+                ))
+            })?;
+            return Ok(GroundOutcome::Landed(spot, list_index));
+        }
+    }
+    Ok(GroundOutcome::CellsTaken)
+}
+
 /// Finds the lowest free **main-bag** slot inside an open transaction.
 ///
 /// A pickup goes through `CanAddInv(INVMODE_ALL, ...)` like a grant, so it places
@@ -816,7 +1006,7 @@ impl ItemRepository for PgItemRepository {
         character_id: i32,
         item_unique: u16,
         count: i32,
-    ) -> Result<Option<CharacterItem>, RepositoryError> {
+    ) -> Result<Option<Granted>, RepositoryError> {
         // A non-pileable item is one item per grant: `GiveItem` clamps the count
         // after asking `CanPile` (`Char-Item.cpp:8926-8934`).
         let count = grant_count(i32::from(item_unique), count);
@@ -884,12 +1074,18 @@ impl ItemRepository for PgItemRepository {
         .execute(&mut *tx)
         .await?;
         tx.commit().await?;
-        Ok(Some(CharacterItem {
-            slot,
-            container: container_of(slot),
-            item_unique: i32::from(item_unique),
-            count: new_count,
-            raw,
+        Ok(Some(Granted {
+            item: CharacterItem {
+                slot,
+                container: container_of(slot),
+                item_unique: i32::from(item_unique),
+                count: new_count,
+                raw,
+            },
+            // `grant_count`'s clamped answer — what went in, not the slot's new
+            // total. Merging 23 onto a stack of 25 reports 23, as `siChangedNum`
+            // must; `new_count` is what `clItem.siItemNum` carries.
+            delta: count,
         }))
     }
 
@@ -1353,96 +1549,38 @@ impl ItemRepository for PgItemRepository {
         let mut dropped = stored;
         dropped.set_count(requested);
 
-        // The client keeps a single item per ground cell
-        // (`cltMapCommon::SetItemMap` overwrites), and `ITZMap::AddItem`
-        // (`ITZMap.cpp:283`) returns FALSE on an occupied cell — so an item
-        // dropped onto an occupied cell renders nowhere and cannot be picked
-        // up: it is lost. Mirror the legacy's recovery by landing on a free
-        // neighbouring cell instead; without this the item is destroyed.
-        //
-        // The cell is chosen by the INSERT itself, not by a prior read:
-        // `world_items (map_id, x, y)` is UNIQUE (sql/0010) and every attempt is
-        // `ON CONFLICT DO NOTHING`, so a cell a concurrent drop just took simply
-        // yields the next candidate. There is no check-then-insert window left
-        // for two drops to race into the same cell.
-        let mut target = at;
-        let mut obj_index = None;
         // A zero count would violate `world_items.count > 0`; the legacy guards
         // the same case by sending `clChangedItem` only when both fields are
         // non-zero (`ServerDB-Item.cpp:2810`).
+        let mut target = at;
+        let mut obj_index = None;
         if requested > 0 {
-            // H4: claim a handle before the cell search. Recycled handles go
-            // first (`world_items_free`, audit H4 / migration 0013), the
-            // sequence only when the pool is empty. The claim shares this
-            // transaction: the rollbacks below — a blocked cell, any error —
-            // return a pooled handle by simply undoing the claim, and burn
-            // only a sequence number when that is where the handle came from.
-            // `FOR UPDATE SKIP LOCKED` keeps two concurrent drops from
-            // claiming the same pooled handle.
-            let claimed: i64 = sqlx::query_scalar(
-                "WITH take AS ( \
-                     DELETE FROM world_items_free \
-                     WHERE obj_index = ( \
-                         SELECT obj_index FROM world_items_free \
-                         ORDER BY obj_index LIMIT 1 FOR UPDATE SKIP LOCKED) \
-                     RETURNING obj_index) \
-                 SELECT COALESCE((SELECT obj_index FROM take), \
-                                 nextval('world_items_obj_index_seq'))",
+            let outcome = ground_insert(
+                &mut tx,
+                i32::from(stored_unique),
+                i32::from(requested),
+                &dropped.encode(),
+                at,
+                character_id,
             )
-            .fetch_one(&mut *tx)
             .await?;
-            // The sequence has climbed past the UI16 the client names ground
-            // objects by, and the pool was empty: 65,535 concurrent ground
-            // items. Refuse the drop — a resource limit must never kill the
-            // session (`?`-ing this out would let a client disconnect itself
-            // by dropping an item).
-            let Some(handle) = i32::try_from(claimed)
-                .ok()
-                .filter(|h| (1..=65_535).contains(h))
-            else {
-                tx.rollback().await?;
-                return Ok(DropOutcome {
-                    status: DropStatus::GroundFull,
-                    current: stored,
-                    dropped: None,
-                    grounded: None,
-                });
-            };
-            let mut landed: Option<(DropLocation, i32)> = None;
-            for spot in drop_candidates(at) {
-                let inserted: Option<i32> = sqlx::query_scalar(
-                    "INSERT INTO world_items \
-                     (item_unique, count, raw, map_id, x, y, dropped_by, obj_index) \
-                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8) \
-                     ON CONFLICT (map_id, x, y) DO NOTHING \
-                     RETURNING obj_index",
-                )
-                .bind(i32::from(stored_unique))
-                .bind(i32::from(requested))
-                .bind(dropped.encode())
-                .bind(spot.map_id)
-                .bind(spot.x)
-                .bind(spot.y)
-                .bind(character_id)
-                .bind(handle)
-                .fetch_optional(&mut *tx)
-                .await?;
-                if let Some(list_index) = inserted {
-                    landed = Some((spot, list_index));
-                    break;
-                }
-            }
-            match landed {
-                Some((spot, list_index)) => {
+            match outcome {
+                GroundOutcome::Landed(spot, handle) => {
                     target = spot;
-                    obj_index = Some(u16::try_from(list_index).map_err(|_| {
-                        RepositoryError::Invalid(format!(
-                            "ground item handle {list_index} does not fit the UI16 that \
-                             GAMEMSG_RESPONSE_ITEMDROP carries"
-                        ))
-                    })?);
+                    obj_index = Some(handle);
                 }
-                None => {
+                // The resource ceiling or the cell box refused the drop: it
+                // never reached the ground, so hand the slot back untouched.
+                GroundOutcome::HandleExhausted => {
+                    tx.rollback().await?;
+                    return Ok(DropOutcome {
+                        status: DropStatus::GroundFull,
+                        current: stored,
+                        dropped: None,
+                        grounded: None,
+                    });
+                }
+                GroundOutcome::CellsTaken => {
                     tx.rollback().await?;
                     return Ok(DropOutcome {
                         status: DropStatus::GroundBlocked { x: at.x, y: at.y },
@@ -1936,6 +2074,10 @@ mod tests {
     /// leftovers of an earlier failed run. The sweep itself also expires any
     /// *other* dev ground row older than an hour — that is the sweeper
     /// working as designed, not a side effect to avoid.
+    ///
+    /// Step 5 additionally covers `spawn_ground`, the bag-full fallback a kill
+    /// drop takes when the main bag cannot accept it: the row, the handle it
+    /// claimed, and the fact that it leaves the inventory alone.
     #[tokio::test]
     #[ignore = "needs DATABASE_URL and a live dev database"]
     async fn the_ground_sweeper_expires_unclaimed_drops_and_recycles_handles() {
@@ -2110,7 +2252,108 @@ mod tests {
             "the pickup handed the handle back"
         );
 
-        // --- 5. Restore the box: the bag row this wrote (wherever the pickup
+        // --- 5. The bag-full fallback. A kill drop whose main bag is full must
+        // reach the ground rather than be destroyed, so `spawn_ground` writes
+        // the same `world_items` row that `drop_slot` writes — carrying the
+        // amount it was asked for and the character it came from — and never
+        // touches the inventory.
+        let before_free: Vec<i32> =
+            sqlx::query_scalar("SELECT obj_index FROM world_items_free ORDER BY obj_index")
+                .fetch_all(&pool)
+                .await
+                .expect("read the pool");
+        let grounded = items
+            .spawn_ground(
+                TYPE_UNIQUE as u16,
+                7,
+                DropLocation {
+                    map_id: 0,
+                    x: 9001,
+                    y: 9000,
+                },
+                character_id,
+            )
+            .await
+            .expect("spawn_ground");
+        let grounded = grounded.expect("(9001, 9000) was free a moment ago, so it lands there");
+        assert_eq!(
+            (grounded.x, grounded.y),
+            (9001, 9000),
+            "the first free candidate is the requested cell; neighbours are covered by \
+             drop_candidates_try_the_requested_cell_before_any_neighbour"
+        );
+        let row: (Option<i32>, Option<i32>) =
+            sqlx::query_as("SELECT count, dropped_by FROM world_items WHERE obj_index = $1")
+                .bind(i32::from(grounded.list_index))
+                .fetch_one(&pool)
+                .await
+                .expect("read the row back");
+        assert_eq!(
+            row,
+            (Some(7), Some(character_id)),
+            "the row carries the amount and the dropper, as drop_slot's does"
+        );
+        let in_bag: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM character_items \
+             WHERE character_id = $1 AND item_unique = $2)",
+        )
+        .bind(character_id)
+        .bind(TYPE_UNIQUE)
+        .fetch_one(&pool)
+        .await
+        .expect("check the bag");
+        assert!(
+            !in_bag,
+            "spawn_ground is the path for an item the bag could not take; it must not \
+             write the inventory"
+        );
+        assert!(
+            before_free.contains(&i32::from(grounded.list_index)),
+            "it claimed a pooled handle, as every ground object does"
+        );
+        let after_free: Vec<i32> = sqlx::query_scalar("SELECT obj_index FROM world_items_free")
+            .fetch_all(&pool)
+            .await
+            .expect("read the pool again");
+        assert!(
+            !after_free.contains(&i32::from(grounded.list_index)),
+            "the claim must take the handle out of the pool, or it could be issued twice"
+        );
+        // Put the box back exactly as step 4 left it — the row gone and the
+        // handle pooled again — so the restore below keeps accounting for the
+        // one handle this test introduced instead of leaking a second one.
+        sqlx::query("DELETE FROM world_items WHERE obj_index = $1")
+            .bind(i32::from(grounded.list_index))
+            .execute(&pool)
+            .await
+            .expect("remove the spawned row");
+        sqlx::query("INSERT INTO world_items_free (obj_index) VALUES ($1) ON CONFLICT DO NOTHING")
+            .bind(i32::from(grounded.list_index))
+            .execute(&pool)
+            .await
+            .expect("hand the handle back");
+        // A zero-count spawn writes nothing at all — the legacy sends
+        // `clChangedItem` only when both fields are non-zero
+        // (`ServerDB-Item.cpp:2810`), and `world_items.count > 0`.
+        assert!(
+            items
+                .spawn_ground(
+                    TYPE_UNIQUE as u16,
+                    0,
+                    DropLocation {
+                        map_id: 0,
+                        x: 9001,
+                        y: 9000,
+                    },
+                    character_id,
+                )
+                .await
+                .expect("spawn_ground with nothing to place")
+                .is_none(),
+            "a zero count must not reach the ground"
+        );
+
+        // --- 6. Restore the box: the bag row this wrote (wherever the pickup
         // landed it), any ground row still standing, and the one pool entry
         // this test introduced. Other pool entries were consumed and
         // returned untouched.
