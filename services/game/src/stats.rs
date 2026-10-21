@@ -374,10 +374,13 @@ pub(crate) async fn handle_use_bonus(
             .ok_or("usebonus row disappeared after the write")?;
         // The session's current total, not the row's max: a spend does not heal,
         // and reporting the max is Bug 2's second sender — the bar snapping to
-        // full with no movement and no kill.
+        // full with no movement and no kill. Fail-closed, like `send_char_update`
+        // and `fan_char_update`: a fallback to the max would reintroduce that bug
+        // on exactly the path where the session is missing.
         let life = registry
             .info(session_key)
-            .map_or(character.max_life, |s| s.life as i32);
+            .ok_or("usebonus before the session is in the registry")?
+            .life as i32;
         let basic = basic_info_for(live.account_id, &live.account_name, character, life)?;
         // Re-capture the block the 214 inspect reads, so the next pull of this
         // character's stats is not stale.

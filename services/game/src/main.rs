@@ -405,29 +405,15 @@ async fn serve(cfg: &GameConfig) -> Result<(), AnyError> {
                         .encode()
                         .to_vec(),
                     );
-                    // Cat's Bug-5 id trace (2026-10-21), struck-player half:
-                    // the attacker's id and internal tag on the frame — the
-                    // fingerprint of any stray monster that outlives a fight
-                    // (retaliation glues it to its victim, whose gauge was
-                    // stuck full on the build she tested, so this log was the
-                    // only record of its swings). Frame values, as on the
-                    // monster-side trace.
-                    let attacker_tag = {
-                        let world = monsters
-                            .lock()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner);
-                        world.log_tag(hit.attacker_unique)
-                    };
-                    logln!(
-                        "game: 268: char {} struck at ({}, {}) by monster {} {} \
-                         life {life} (-{damage}) {:?}",
-                        hit.char_unique,
-                        hit.x,
-                        hit.y,
-                        hit.attacker_unique,
-                        attacker_tag,
-                        hit.outcome
-                    );
+                    // Deliberately no strike log on this path (Cat 2026-10-21, log
+                    // hygiene): a monster's swing on a player is the commonest line
+                    // this server could print, and the events worth an operator's
+                    // attention are already named without it — this player's death
+                    // below, the kill and drop frames on the monster side, and a
+                    // missing 214 block in the 215 push below. The Bug-5 fingerprint
+                    // this used to carry (attacker id and internal tag per swing) is
+                    // what that silence costs; re-add it behind a flag if it is
+                    // needed again.
                     // The struck player's own HUD gauge does not read the 268:
                     // it reads `clIP.Life`, which the client refreshes from a
                     // `RESPONSE_PERSON_IP` (215) push — the legacy's
@@ -436,16 +422,27 @@ async fn serve(cfg: &GameConfig) -> Result<(), AnyError> {
                     // the server's life is true and the top-left bar stays
                     // full — the 2026-10-21 playtest's Bug 2. A dodge or miss
                     // moves no life and owes no 215.
-                    if hit.outcome == combat::SwingOutcome::Hit
-                        && let Some(mut basic) = registry.basic_info(hit.key)
-                    {
-                        basic.life = hit.life as i32;
-                        registry.set_basic_info(hit.key, basic.clone());
-                        registry.send_to(
-                            hit.key,
-                            GameMsg::ResponsePersonIp as u16,
-                            encode_person_ip(hit.char_unique, &basic),
-                        );
+                    if hit.outcome == combat::SwingOutcome::Hit {
+                        match registry.basic_info(hit.key) {
+                            Some(mut basic) => {
+                                basic.life = hit.life as i32;
+                                registry.set_basic_info(hit.key, basic.clone());
+                                registry.send_to(
+                                    hit.key,
+                                    GameMsg::ResponsePersonIp as u16,
+                                    encode_person_ip(hit.char_unique, &basic),
+                                );
+                            }
+                            // Armed at char select. Missing here, the server's life
+                            // stays true while this player's bar stops moving for the
+                            // rest of the session — so a hole is named, never absorbed.
+                            None => logln_err!(
+                                "game: char {} has no 214 inspect block; life {} cannot \
+                                 reach its HUD",
+                                hit.char_unique,
+                                hit.life
+                            ),
+                        }
                     }
                     // A player's death keeps its body, and it gets a prompt:
                     // the legacy's kill branch runs `DeathPenalty()` and then
@@ -1242,15 +1239,28 @@ async fn handle_client(
                     // player's pull reads it out of the registry rather than the
                     // database (`Server-Person.cpp:83`).
                     // Selecting a fresh row, so current == max until the first hit.
-                    if let Some(session) = login.as_ref()
-                        && let Ok(basic) = basic_info_for(
+                    //
+                    // This is what arms the 215 a monster hit pushes below: no block
+                    // here means that push finds nothing, stays silent, and the
+                    // player's HUD never moves again for the session. Named, because
+                    // the failure would otherwise be invisible.
+                    match login.as_ref() {
+                        None => logln_err!(
+                            "game: {peer}: selectchar without a completed login; char \
+                             {char_unique} has no 214 inspect block"
+                        ),
+                        Some(session) => match basic_info_for(
                             session.account_id,
                             &session.username,
                             &character_id,
                             character_id.max_life,
-                        )
-                    {
-                        registry.set_basic_info(session_key, basic);
+                        ) {
+                            Ok(basic) => registry.set_basic_info(session_key, basic),
+                            Err(e) => logln_err!(
+                                "game: {peer}: char {char_unique} has no 214 inspect \
+                                 block ({e}); a monster hit cannot push its 215"
+                            ),
+                        },
                     }
                     // Hydrate the friend list from PostgreSQL, then tell any
                     // online friend that this character logged in (6207) — the

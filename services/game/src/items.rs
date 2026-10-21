@@ -370,7 +370,7 @@ pub(crate) async fn handle_inv_pickup(
             return Ok(());
         }
         PickupStatus::NoFreeSlot => {
-            logln!("game: invpickup: every carry slot is occupied");
+            logln!("game: invpickup: the main bag is full");
             return Ok(());
         }
     };

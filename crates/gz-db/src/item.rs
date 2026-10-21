@@ -691,6 +691,48 @@ fn new_slot_range() -> impl Iterator<Item = u16> {
     INV0..=INV_END
 }
 
+/// The slot a ground pickup stacks into, or `None` when nothing may absorb it.
+///
+/// Pure, so the pickup's merge rule is testable without a database — the same
+/// reason [`grant_slot`] is. It is the *pile* half of
+/// `cltPItemInfo::CanAddInv(INVMODE_ALL, ...)` (`ItemPerson.cpp:315-323`): the
+/// lowest slot already holding this item with room, searched across every carry
+/// container ([`carry_slots`]) in ascending order, exactly as the legacy's
+/// `for(i = start; i < end; i++)`.
+///
+/// Ascending is the rule, not a property of the read: PostgreSQL returns these
+/// rows in heap order, and without the sort whichever row it emitted first would
+/// decide — so a stack split between the bag and the horse tab could be absorbed
+/// by the horse row while the main-bag row waited for it, which is Bug 1 reaching
+/// the player through the pickup door.
+///
+/// A slot that does not fit a `u16`, or that lies outside every carry container,
+/// is skipped rather than trusted: a bad row must not become slot 0, which is an
+/// equipment slot.
+///
+/// # Arguments
+///
+/// * `candidates` — `(slot, held count)` rows for **this one item**; narrowing to
+///   the item is the query's job, this only chooses among them.
+/// * `count` — how many the pickup brings.
+fn pickup_merge_target(candidates: &[(i16, i32)], count: i32) -> Option<(u16, i32)> {
+    let carry: Vec<u16> = carry_slots().collect();
+    let mut mergeable: Vec<(u16, i32)> = candidates
+        .iter()
+        .filter_map(|(slot, held)| {
+            u16::try_from(*slot)
+                .ok()
+                .filter(|slot| carry.contains(slot))
+                .map(|slot| (slot, *held))
+        })
+        .collect();
+    mergeable.sort_unstable_by_key(|(slot, _)| *slot);
+    mergeable.into_iter().find_map(|(slot, held)| {
+        let total = held.checked_add(count)?;
+        (held > 0 && held < MAX_PILE && total <= MAX_PILE).then_some((slot, total))
+    })
+}
+
 /// The 24 cells of the 5x5 box around a requested drop cell, nearest ring
 /// first and within each ring in the legacy's scan order (dy then dx,
 /// ascending) — the exact preference of `FindProperAreaForDrop`
@@ -1516,32 +1558,27 @@ impl ItemRepository for PgItemRepository {
         // Try to stack into an existing slot that holds the same item and has room.
         let mut landed_in_existing = false;
         let slot_resolved = {
-            // Check for existing stackable slot first.
-            let candidates = sqlx::query_as::<_, (i16, i32, Vec<u8>)>(
-        "SELECT slot, count, raw FROM character_items WHERE character_id = $1 AND item_unique = $2",
-    )
-    .bind(character_id)
-    .bind(item_unique)
-    .fetch_all(&mut *tx)
-    .await?;
-            let mut merge_target: Option<(u16, i32)> = None;
-            // Only pileable items stack into an existing slot. Equipment -- even
-            // a duplicate of an equipped item -- goes to a free carry slot,
-            // exactly as the legacy `CanAddInv` (which piles only
-            // `if(pileswitch)`, `ItemPerson.cpp:315`) would place it.
-            if stackable(item_unique) {
-                for (slot, c, _raw) in &candidates {
-                    let slot = u16::try_from(*slot).unwrap_or(0);
-                    let c = *c;
-                    if c > 0 && c < MAX_PILE {
-                        let newc = c + count;
-                        if newc <= MAX_PILE {
-                            merge_target = Some((slot, newc));
-                            break;
-                        }
-                    }
-                }
-            }
+            // Ordered so the read itself is deterministic. `pickup_merge_target`
+            // sorts anyway, so the placement rule does not depend on this -- but a
+            // query feeding a "lowest slot wins" rule with heap order is a policy
+            // bug waiting for the planner to change its mind.
+            let candidates = sqlx::query_as::<_, (i16, i32)>(
+                "SELECT slot, count FROM character_items \
+                 WHERE character_id = $1 AND item_unique = $2 ORDER BY slot ASC",
+            )
+            .bind(character_id)
+            .bind(item_unique)
+            .fetch_all(&mut *tx)
+            .await?;
+            // Only pileable items stack into an existing slot. Equipment -- even a
+            // duplicate of an equipped item -- takes a new main-bag slot, exactly
+            // as the legacy `CanAddInv` (which piles only `if(pileswitch)`,
+            // `ItemPerson.cpp:315`) would place it.
+            let merge_target = if stackable(item_unique) {
+                pickup_merge_target(&candidates, count)
+            } else {
+                None
+            };
             match merge_target {
                 Some((mslot, mcount)) => {
                     // Replace the existing stack count; the raw is the item record template.
@@ -1642,9 +1679,9 @@ impl ItemRepository for PgItemRepository {
 #[cfg(test)]
 mod tests {
     use super::{
-        DropLocation, DropStatus, GroundClaim, Item, ItemRepository, MAX_ITEM_PER_PERSON,
+        DropLocation, DropStatus, GroundClaim, Item, ItemRepository, MAX_ITEM_PER_PERSON, MAX_PILE,
         PgItemRepository, PickupStatus, carry_slots, drop_candidates, grant_count, grant_slot,
-        stackable,
+        pickup_merge_target, stackable,
     };
     use gz_proto::item::personitem::*;
     use std::time::Duration;
@@ -1732,6 +1769,54 @@ mod tests {
 
         assert_eq!(grant_slot(&horse_first, 2000, 1), Some((20, 4)));
         assert_eq!(grant_slot(&bag_first, 2000, 1), Some((20, 4)));
+    }
+
+    /// `pickup_ground`'s merge obeys the same two rules as a grant: only a carry
+    /// container may absorb the pickup, and the lowest one wins whatever order the
+    /// rows arrive in. The legacy's merge scan is `[start, end)` ascending
+    /// (`ItemPerson.cpp:315-323`), and the pickup path was the half of that rule
+    /// the 2026-10-21 fix did not reach — a stack split between the bag and the
+    /// horse tab could be absorbed by the horse row while the bag row waited.
+    #[test]
+    fn a_pickup_merge_takes_the_lowest_carrying_slot_whatever_the_row_order() {
+        let horse_first = vec![(HORSE0 as i16, 3), (20, 3)];
+        let bag_first = vec![(20, 3), (HORSE0 as i16, 3)];
+
+        assert_eq!(pickup_merge_target(&horse_first, 1), Some((20, 4)));
+        assert_eq!(pickup_merge_target(&bag_first, 1), Some((20, 4)));
+    }
+
+    /// Every carry container is a legal merge target, sampled at each boundary the
+    /// partition defines: the main bag ends at `INV_END`, the horse bag spans
+    /// `HORSE0..=HORSE_END`, and the two extra bags cover `BAG0..=BAG1_END`.
+    #[test]
+    fn a_pickup_merge_accepts_every_container_boundary() {
+        for slot in [INV_END, HORSE0, HORSE_END, BAG0, BAG0_END, BAG1, BAG1_END] {
+            assert_eq!(
+                pickup_merge_target(&[(slot as i16, 3)], 1),
+                Some((slot, 4)),
+                "slot {slot} must absorb a pickup"
+            );
+        }
+    }
+
+    /// Nothing outside `[INV0, BAG1_END]` may absorb a pickup: the equipment
+    /// slots `0..=RESERVED1`, any row past the last container, and a row the store
+    /// could not have written. `-1` is the case the old code got wrong — it went
+    /// through `u16::try_from(*slot).unwrap_or(0)`, so corruption landed the
+    /// pickup in slot **0**, a weapon slot.
+    #[test]
+    fn a_pickup_merge_never_takes_a_slot_outside_the_carry_containers() {
+        for slot in [-1i16, 0, RESERVED1 as i16, 14, 79, 255] {
+            assert_eq!(
+                pickup_merge_target(&[(slot, 3)], 1),
+                None,
+                "slot {slot} must not absorb a pickup"
+            );
+        }
+        // A full stack has no room, and a zeroed row is not a stack.
+        assert_eq!(pickup_merge_target(&[(20, MAX_PILE)], 1), None);
+        assert_eq!(pickup_merge_target(&[(20, 0)], 1), None);
     }
 
     /// The merge range covers every container a character carries, but never

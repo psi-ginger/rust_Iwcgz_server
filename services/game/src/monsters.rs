@@ -1830,7 +1830,13 @@ fn broadcast_char_update(registry: &Registry, map_id: i32, monster: &Monster) {
             si_move_speed: monster.move_speed as i8,
             b_urgent_mode: false,
             si_life: monster.life as i32,
-            si_reserved_life: monster.life as i32,
+            // Legacy parity: `SendCharUpdate` sends `clPB.siReservedLife`
+            // (`Server.cpp:1674`), which `Parametabox.cpp:279` starts at 0 and
+            // only a pending heal ever raises. Echoing the life a second time here
+            // would park a stale maximum in the client's reserved field — invisible
+            // today, but read the moment anything computes `Life + siReservedLife`
+            // for a self-healing monster.
+            si_reserved_life: 0,
             si_mana: 0,
             si_x: monster.x.clamp(0, 0x3FF) as i16,
             si_y: monster.y.clamp(0, 0x3FF) as i16,
