@@ -612,22 +612,34 @@ fn grant_count(item_unique: i32, requested: i32) -> i32 {
 /// The slot a granted item lands in, and the count to write there.
 ///
 /// Pure, so the placement rule is testable without a database. It mirrors
-/// `cltPItemInfo::CanAddInv` (`ItemPerson.cpp:256`), which `GiveItem`
-/// (`Char-Item.cpp:8959`) calls before every grant: a **pileable** item first
-/// tops up an existing stack *of the same unique* that has room, and otherwise --
-/// or for a non-pileable item -- takes the lowest free carry slot. `None` is the
-/// legacy's `GIVEITEM_RESULT_NOINVEN`.
+/// `cltPItemInfo::CanAddInv(INVMODE_ALL, ...)` (`ItemPerson.cpp:256`), which
+/// `GiveItem` (`Char-Item.cpp:8959`) calls before every grant. That function has
+/// **two different ranges**, and confusing them is Bug 1:
 ///
-/// `occupied` is the character's `(slot, item_unique, count)` set; slots outside
-/// [`carry_slots`] cannot receive a grant, since the client never said which
-/// equipment slot it wants (the same reason the pickup path excludes them).
+/// - a pileable item first tops up an existing stack of the same unique that has
+///   room, searching every carry container ([`carry_slots`]);
+/// - otherwise it takes the lowest free slot of the main bag **only**
+///   ([`new_slot_range`]) and reports `CANADDINV_FAIL_FULL` when that bag is
+///   full — it never spills into the horse or the extra bags.
+///
+/// `None` is the legacy's `GIVEITEM_RESULT_NOINVEN`.
+///
+/// `occupied` is the character's `(slot, item_unique, count)` set; equipment
+/// slots cannot receive a grant, since the client never said which one it wants
+/// (the same reason the pickup path excludes them).
 fn grant_slot(occupied: &[(u16, i32, i32)], item_unique: i32, count: i32) -> Option<(u16, i32)> {
     if count <= 0 {
         return None;
     }
+    // Ascending, like the legacy's `for(i = start; i < end; i++)`. The rows come
+    // back in heap order, so without this the merge target would be whichever row
+    // PostgreSQL emitted first — and once a stack reached the horse bag it would
+    // keep absorbing that item for good.
+    let mut occupied: Vec<(u16, i32, i32)> = occupied.to_vec();
+    occupied.sort_unstable_by_key(|(slot, _, _)| *slot);
     let carry: Vec<u16> = carry_slots().collect();
     if stackable(item_unique) {
-        for (slot, held_unique, held) in occupied {
+        for (slot, held_unique, held) in &occupied {
             // Same item or nothing: piling onto a *different* item would write the
             // wrong unique into the slot, which is what `CanAddInv`'s
             // `dst_unique == src_unique` check is for (`ItemPerson.cpp:315`).
@@ -640,26 +652,43 @@ fn grant_slot(occupied: &[(u16, i32, i32)], item_unique: i32, count: i32) -> Opt
             }
         }
     }
-    carry
-        .into_iter()
+    new_slot_range()
         .find(|slot| !occupied.iter().any(|(s, _, held)| s == slot && *held > 0))
         .map(|slot| (slot, count))
 }
 
-/// The slots a picked-up item may land in, in the order the legacy would try
-/// them.
+/// Every container a character can hold an item in, ascending — the range the
+/// legacy **merges** into.
 ///
-/// The legacy asks `CanAddInv(INVMODE_ALL, ...)`, which considers every container
-/// a character can carry in. Equipment is excluded because the request is to
-/// *carry* the item, not to equip it — the client has not said which equipment
-/// slot it wants, so there is nothing to write one into. That leaves the main bag,
-/// the horse and both extra bags, in ascending slot order.
+/// `CanAddInv` scans `[PERSONITEM_INV0, PERSONITEM_INV0 + MAX_INVITEM_PER_PERSON)`
+/// = `[15, 79)` when looking for a stack to top up (`ItemPerson.cpp:323`), which
+/// spans the main bag, the horse and both extra bags. Equipment is outside it
+/// because the request is to *carry* the item, not to equip it — the client has
+/// not said which equipment slot it wants, so there is nothing to write one into.
+///
+/// This is **not** the range a new stack is placed in: see [`new_slot_range`].
+/// Using it for that is Bug 1 — the drop lands in the horse bag, which the client
+/// draws in a separate dialog a horse-less player never opens.
 fn carry_slots() -> impl Iterator<Item = u16> {
     use gz_proto::item::personitem::*;
     (INV0..=INV_END)
         .chain(HORSE0..=HORSE_END)
         .chain(BAG0..=BAG0_END)
         .chain(BAG1..=BAG1_END)
+}
+
+/// The slots a **new** stack may be placed in: the main bag only.
+///
+/// `CanAddInv(INVMODE_ALL)` sets `searchrange = MAX_ITEM_PER_INVENTORY` and scans
+/// `[start, start + searchrange)` = `[INV0, INV0 + 20)` = `[15, 35)` for an empty
+/// slot. It never reaches the containers beyond: the
+/// `if(invmode == INVMODE_ALL) { *prtnvalue = CANADDINV_FAIL_FULL; return false; }`
+/// at `ItemPerson.cpp:365-370` exits first, and the overflow loop below it is dead
+/// in `INVMODE_ALL`. So a full main bag refuses the item rather than hiding it in
+/// a bag the player cannot see.
+fn new_slot_range() -> impl Iterator<Item = u16> {
+    use gz_proto::item::personitem::*;
+    INV0..=INV_END
 }
 
 /// The 24 cells of the 5x5 box around a requested drop cell, nearest ring
@@ -691,7 +720,11 @@ fn drop_candidates(at: DropLocation) -> impl Iterator<Item = DropLocation> {
     }))
 }
 
-/// Finds the lowest free carry slot inside an open transaction.
+/// Finds the lowest free **main-bag** slot inside an open transaction.
+///
+/// A pickup goes through `CanAddInv(INVMODE_ALL, ...)` like a grant, so it places
+/// a new stack in the main bag only and reports no room rather than spilling into
+/// the horse or the extra bags — see [`new_slot_range`].
 ///
 /// "Free" means no row, or a row whose unique is zero. The table only ever holds
 /// occupied slots — [`write_slot`] clears by deleting — so in practice this tests
@@ -701,7 +734,7 @@ fn drop_candidates(at: DropLocation) -> impl Iterator<Item = DropLocation> {
 /// # Errors
 ///
 /// [`sqlx::Error`] if the read fails.
-async fn find_free_carry_slot(
+async fn find_free_main_bag_slot(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     character_id: i32,
 ) -> Result<Option<u16>, sqlx::Error> {
@@ -713,7 +746,7 @@ async fn find_free_carry_slot(
     .fetch_all(&mut **tx)
     .await?;
 
-    Ok(carry_slots().find(|slot| !occupied.contains(&(*slot as i16))))
+    Ok(new_slot_range().find(|slot| !occupied.contains(&(*slot as i16))))
 }
 
 #[async_trait]
@@ -1532,7 +1565,7 @@ impl ItemRepository for PgItemRepository {
                     landed_in_existing = true;
                     Some(mslot)
                 }
-                None => find_free_carry_slot(&mut tx, character_id).await?,
+                None => find_free_main_bag_slot(&mut tx, character_id).await?,
             }
         };
 
@@ -1660,9 +1693,50 @@ mod tests {
         assert_eq!(grant_slot(&[], 2000, 0), None);
     }
 
-    /// A pickup may land anywhere the character carries, but never in equipment:
-    /// the request is to carry the item and says nothing about which equipment
-    /// slot it wants.
+    /// `CanAddInv(INVMODE_ALL)` scans `[PERSONITEM_INV0, PERSONITEM_INV0 +
+    /// MAX_ITEM_PER_INVENTORY)` for a new slot and returns `CANADDINV_FAIL_FULL`
+    /// before it ever reaches the horse or the extra bags
+    /// (`ItemPerson.cpp:319-370`). Those containers are reachable *only* as a
+    /// pile target, so a full main bag refuses the grant rather than spilling
+    /// into slot 35 — which the client draws in a separate dialog the player may
+    /// never open, and which is what made the drop invisible.
+    #[test]
+    fn a_grant_never_places_a_new_stack_outside_the_main_bag() {
+        let main_bag_full: Vec<(u16, i32, i32)> =
+            (INV0..=INV_END).map(|slot| (slot, 1, 1)).collect();
+
+        assert_eq!(
+            grant_slot(&main_bag_full, 2000, 1),
+            None,
+            "the legacy answers CANADDINV_FAIL_FULL; slot 35 stays empty"
+        );
+    }
+
+    /// The pile target, by contrast, spans every carry container: the legacy
+    /// scans `[start, end)` = `[INV0, INV0 + MAX_INVITEM_PER_PERSON)` when it
+    /// merges. An existing horse-bag stack therefore still absorbs the grant.
+    #[test]
+    fn a_pile_target_may_be_any_carry_container() {
+        assert_eq!(grant_slot(&[(HORSE0, 2000, 3)], 2000, 1), Some((HORSE0, 4)));
+    }
+
+    /// The legacy walks slots ascending (`for(i = start; i < end; i++)`), so a
+    /// stack in the main bag always wins over an equal stack in the horse bag.
+    /// The rows arrive in PostgreSQL heap order, so without an explicit sort the
+    /// merge target would be arbitrary — and once a stack reaches slot 35 it
+    /// would keep absorbing that item forever.
+    #[test]
+    fn a_pile_target_is_the_lowest_matching_slot_whatever_order_the_rows_arrive_in() {
+        let horse_first = vec![(HORSE0, 2000, 3), (20, 2000, 3)];
+        let bag_first = vec![(20, 2000, 3), (HORSE0, 2000, 3)];
+
+        assert_eq!(grant_slot(&horse_first, 2000, 1), Some((20, 4)));
+        assert_eq!(grant_slot(&bag_first, 2000, 1), Some((20, 4)));
+    }
+
+    /// The merge range covers every container a character carries, but never
+    /// equipment: the request is to carry the item and says nothing about which
+    /// equipment slot it wants.
     #[test]
     fn carry_slots_exclude_equipment() {
         let slots: Vec<u16> = carry_slots().collect();
@@ -1676,8 +1750,8 @@ mod tests {
         assert!(slots.contains(&BAG0) && slots.contains(&BAG1_END));
     }
 
-    /// The carry ranges must cover the whole array except equipment and the unused
-    /// slot 79, or a pickup would be refused while a usable slot exists.
+    /// The merge range must cover the whole array except equipment and the unused
+    /// slot 79, or a stack outside the main bag could never absorb its own item.
     #[test]
     fn carry_slots_cover_every_carryable_slot_once() {
         let slots: Vec<u16> = carry_slots().collect();
@@ -1693,8 +1767,8 @@ mod tests {
         assert!(slots.iter().all(|&s| (INV0..BAG1_END + 1).contains(&s)));
     }
 
-    /// Lowest-slot-first, so a pickup lands in the main bag rather than the horse
-    /// when both are free -- the same order `CanAddInv` searches containers in.
+    /// Lowest-slot-first, so a main-bag stack always beats a horse one when both
+    /// match — the same ascending order `CanAddInv` scans `for(i = start; i < end)`.
     #[test]
     fn carry_slots_are_offered_lowest_first() {
         let slots: Vec<u16> = carry_slots().collect();
