@@ -109,6 +109,7 @@ CONFIG = {
     "PROP_HP_BASE": 8.0,
     "PROP_HP_PER_LEVEL": 0.05,
     # renewal (HealthAddChange) HP: VIT * (8000 + level*5)/1000  (blueprint 02 section 2.1)
+    # stock-binary baseline: since SPEC_CLIENT_REBUILD_PATCH.md §11 the shipped client follows proposed_hp, not this column.
     "RENEWAL_HP_BASE": 8000,
     "RENEWAL_HP_LEVEL": 5,
     "RENEWAL_HP_DIV": 1000,

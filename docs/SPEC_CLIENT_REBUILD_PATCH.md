@@ -32,6 +32,11 @@ below reconcile with Gate 0 (§2.3 of the design doc) in §10.
    the horizon server calls every PC above `2,999` an NPC. Both halves ship in
    one release.
 
+§11 (HP growth) is a **separate** patch with its own, unrelated server coupling
+(`stats::derived_max_life` + `kindinfo::MonsterStats::at`). It is not one of
+families A/B/C, carries no id-band meaning, and may be applied or reverted
+independently of the horizon partition.
+
 ## 2. Target state (patched client)
 
 | Class | Range | Bound immediates after patch |
@@ -1478,3 +1483,113 @@ settles it.
   20,000 renders as a PC; (5) server constants flip lands in the same release
   (design doc §6-P2) — a patched client against the interim server
   misclassifies every NPC id 8,500..=19,999 as a PC, so the two ship together.
+
+## 11. HP growth — `SetHitPoint` level term `×5` -> `×50` (2 sites, APPLIED 2026-10-21)
+
+Restores the §4.3.4 balance curve (`8.0 + 0.05×Level` HP per VIT) client-side so
+the server may keep its `level*50` `derived_max_life`. Independent of families
+A/B/C — see the note in §1.
+
+**Binary:** `New Era Live\New Era.exe`, 9,358,336 bytes (SPEC's pinned size;
+this build is the title-patched one, so its SHA differs from the header's
+survey SHA).
+
+| | SHA-256 |
+|---|---|
+| pre-patch (backup `New Era.exe.pre-hp-x50.bak`) | `45af8dc43ca854f76527c1cfe95fa063e5db5cb8f56cf05734bebcbccfd9dc39` |
+| post-patch (applied in place) | `e1916b43b52259da8441ad0ad285d5a4b51075fe2be218e813769279767caafe` |
+
+### 11.1 Sites
+
+Function: `cltParametaBox::SetHitPoint` @ RVA `0084C690`
+(`Parametabox.cpp:3366`; formula at `:3374`). `.text`, both rows same-width —
+no relocation, no code movement.
+
+| RVA | file off | old bytes | disasm | new bytes | rule |
+|---|---|---|---|---|---|
+| `0084C6B4` | `0044BAB4` | `81 c2 40 06 00 00` | `add edx, 0x640` | `81 c2 a0 00 00 00` | level base 1600 -> 160 |
+| `0084C6C2` | `0044BAC2` | `8d 0c 92` | `lea ecx, [edx + edx*4]` | `6b ca 32` | `imul ecx, edx, 0x32` — factor 5 -> 50 |
+
+### 11.2 Why two coupled immediates
+
+Source is `siVitHitpoint = (totalVit * (8000 + (level*5)))/1000`. MSVC folds the
+`5` out of `8000 + level*5` and emits `totalVit * (1600 + level) * 5 / 1000` —
+so **no `8000` literal exists near the multiply** (a sweep of all `×5` sites
+finds 603 `lea [reg*4+reg]` forms and zero `imul imm,5`; the closest `8000` is
+one instruction away but belongs to a different formula). The two rows must move
+together:
+
+- both patched: `(160 + level) * 50 = 8000 + level*50` — §4.3.4, base preserved;
+- site `0084C6C2` alone: `(1600 + level) * 50 = 80,000 + level*50` — the base
+  term inflates tenfold and every HP bar in the game breaks.
+
+### 11.3 Register/flag liveness (why it is safe in place)
+
+```
+0084C6B0  movsx edx, word [edx+0x1c]   ; edx = level
+0084C6B4  add   edx, 0x640             ; SITE 1
+0084C6BA  imul  edx, eax               ; edx = (level+1600)*totalVit  <- only consumer of SITE 1
+0084C6BD  mov   eax, 0x10624dd3        ; magic for /1000 (also dead-sets flags)
+0084C6C2  lea   ecx, [edx+edx*4]       ; SITE 2  <- edx's only consumer
+0084C6C5  imul  ecx                    ; edx:eax clobbered here; flags rewritten
+0084C6C7  sar   edx, 6                 ; ... magic divide -> /1000
+0084C6D1  mov   [edi+0x2a8], eax       ; siVitHitpoint
+```
+
+`edx` is dead after SITE 2's operand fetch, and flags from both sites are
+rewritten before any `jcc` reads them, so neither replacement disturbs live
+state. `edi`/`esi`/`ebx` untouched.
+
+### 11.4 Caller trace — monsters are affected (verified, not assumed)
+
+The patch was gated on this trace:
+
+- `SetHitPoint` has **exactly one** direct call site, `00844D7F`, inside
+  `cltParametaBox::Action` @ `00842BF0` (`Parametabox.cpp:4194`). No vtable
+  entry references `0084C690` (0 hits in every non-exec section).
+- `Action` has **14** direct callers. Thirteen pass a stack-local
+  `clPB` (`lea ecx, [ebp-…]`, temp recompute for dialogs/kindinfo/summons);
+  `007E7B30` is the one that writes a **member** —
+  `lea ecx, [esi+0x210]` == `cltCharCommon::ParametaBoxAction()`
+  (`Char-Common.cpp:4712`, reached from the char-info receive path
+  `Client-Person.cpp:3722`).
+- That caller computes `bnpc` at `[ebp-4]` as `3000 <= charunique < 20000`
+  (`IsInstanceNPC || IsNPC`, `Char-Common.cpp:4745`) — so NPC/monster ids do
+  pass `bnpc = 1`.
+- **`bnpc` never reaches the formula.** `Parametabox.cpp:3366-3397` reads `bnpc`
+  nowhere; `siVitHitpoint` at `:3374` is unconditional. `bnpc` only gates later
+  weapon-skill/buff sections via `pclchar`/`IsPC`.
+
+Consequence: the bar denominator `clPB.GetMaxLife()`
+(`Char-Draw.cpp:4651-4653`, `fillsize = GetLife() * realxsize / clPB.GetMaxLife()`)
+is this formula for **every** entity — PCs, monsters and town NPCs alike. The
+patch therefore shifts monster bars too, which is safe **only** because the
+server computes them with the same shared function (§11.5).
+
+### 11.5 Server coupling — both formulas, not just one
+
+`derived_max_life` is not the only place the level term lives:
+
+| where | role |
+|---|---|
+| `services/game/src/stats.rs` `derived_max_life` | player `max_life`, level-up and bonus recompute |
+| `crates/gz-data/src/kindinfo.rs` `MonsterStats::at` `health_add_change` branch | monster `max_hp` |
+| `services/game/src/world.rs:117` | town-NPC spawn life (via `derived_max_life`) |
+
+Flipping only `derived_max_life` would leave monster `max_hp` on `×5` against a
+client now on `×50`, and every monster bar would under-fill. **Both** carry the
+`level*5` term and both must read `level*50` in the same release.
+
+Existing rows are moved by `crates/gz-db/sql/0015_recompute_max_life.sql`
+(the `0014` migration set `level * 5`).
+
+### 11.6 Post-patch verification
+
+1. Re-read `0044BAB4`/`0044BAC2` and confirm `81 c2 a0 00 00 00` / `6b ca 32`;
+   confirm the file is still 9,358,336 bytes.
+2. Disassemble `0084C6B0..0084C6D1` and confirm `add edx, 0xa0` then
+   `imul ecx, edx, 0x32`.
+3. Re-run the families A/B/C sweep: all id-band rows must be unchanged by this
+   patch (it touches no `cmp` immediate).
+4. Lab: a PC at L50/100 VIT reads 1050 max HP on both sides; a monster's
+   overhead bar starts full and drains linearly to death.

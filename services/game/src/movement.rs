@@ -1068,7 +1068,7 @@ fn session_info_from(
         y: character.map(|c| c.pos_y).unwrap_or(0),
         school_id: character.map(|c| c.school_id).unwrap_or(0),
         class_kind: character.map(|c| c.class_kind as u16).unwrap_or(1),
-        life: character.map(|c| c.max_life as u32).unwrap_or(161),
+        life: character.map(|c| c.max_life as u32).unwrap_or(173),
         move_speed: character
             .map(|c| c.move_speed.clamp(0, 63) as u8)
             .unwrap_or(12),
@@ -1660,7 +1660,7 @@ mod tests {
             class_kind: 1,
             gender: 1,
             level: 13,
-            max_life: 161,
+            max_life: 173,
             max_mana: 40,
             move_speed: 12,
             exp: 0,

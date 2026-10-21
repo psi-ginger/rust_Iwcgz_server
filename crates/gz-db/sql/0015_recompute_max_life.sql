@@ -1,0 +1,27 @@
+-- Bring every existing character's stored `max_life` onto the §4.3.4 `×50`
+-- scale now that the client binary computes the same curve.
+--
+-- `0014_recompute_max_life.sql` had moved rows onto the stock client's `×5`
+-- level term, because the client computes its own gauge denominator —
+-- `clPB.GetMaxLife()` = `totalVit * (8000 + level*5) / 1000` under the shipped
+-- `Switch_HealthAddChange = 1` (`Parametabox.cpp:7268`, `:3374`) — and no
+-- packet can override it, so a `×50` server made `life / client_max` clamp to
+-- 1.0 and pinned the player's bar full (the 2026-10-21 playtest's Bug 1).
+--
+-- `New Era.exe` is now patched at RVA `0084C6B4` + `0084C6C2`
+-- (`SPEC_CLIENT_REBUILD_PATCH.md` §11), so the client's own denominator is
+-- `totalVit * (8000 + level*50) / 1000` and §4.3.4's `8.0 + 0.05×Level` HP
+-- per VIT is shippable again. Rows written while `0014` was current still
+-- carry the `×5` value, so recompute every row here too.
+--
+-- Monster `max_hp` is not stored in this table (it is derived per spawn by
+-- `kindinfo::MonsterStats::at`), and that function already flipped to `×50`
+-- in the same change.
+--
+-- PostgreSQL integer division truncates toward zero, matching the C-style
+-- truncation in `derived_max_life`. `handle_use_bonus` and the level-up path
+-- already recompute on the next spend/level, so this only fixes the stored
+-- value for characters that have done neither. Level 1 is unchanged by the
+-- flip (vit 5 -> 40, the DDL default).
+UPDATE character_stats
+   SET max_life = vit * (8000 + level * 50) / 1000;

@@ -108,7 +108,10 @@ const GUILDRANKTYPE_STANDING: u8 = 3;
 /// (`Parametabox.cpp:4379`) even though the status window prints it with a `%`
 /// (`NCharPerson.cpp:3237`), so `5 + 49 = 54` and
 /// `54 * (8000 + 1*5) / 1000 = 432` (`SetHitPoint`, `Parametabox.cpp:3374`) —
-/// the reported "VIT 54, HP 40/432", to the digit.
+/// the reported "VIT 54, HP 40/432", to the digit, as captured on the pre-§11
+/// binary. `SPEC_CLIENT_REBUILD_PATCH.md` §11 moves the level term only, so a
+/// patched build reports 434 for the same character (the test pins both, and
+/// the no-guild level-1 figure stays 40 either way).
 ///
 /// # What the legacy sends instead
 ///
@@ -665,7 +668,9 @@ mod tests {
     ///
     /// `clTotalBA` sums `clGuildBA` raw (`Parametabox.cpp:4379`) and
     /// `SetHitPoint` turns the total into a maximum at `Parametabox.cpp:3374`:
-    /// `siVitHitpoint = (vit * (8000 + level*5)) / 1000`.
+    /// `siVitHitpoint = (vit * (8000 + level*5)) / 1000` on the stock binary —
+    /// `level*50` once `SPEC_CLIENT_REBUILD_PATCH.md` §11 is applied, which is
+    /// exactly the term that patch moves.
     #[test]
     fn the_captured_guild_vit_reproduces_the_reported_max_hp() {
         // The captured record's `siVit`, pinned as a literal (the capture is in
@@ -674,13 +679,20 @@ mod tests {
         let guild_vit = 49;
         let base_vit = 5; // `character_stats.vit DEFAULT 5`, level 1
         let level = 1;
+        // The capture was taken on the pre-§11 binary, where 54 VIT reads 432.
         assert_eq!(
             (base_vit + guild_vit) * (8000 + level * 5) / 1000,
             432,
             "5 + 49 must be exactly the observed maximum, 432"
         );
-        // And with the guild term gone, the spec's level-1 figure.
-        assert_eq!(base_vit * (8000 + level * 5) / 1000, 40);
+        // The same character under the patched client: only the level term moved.
+        assert_eq!(
+            (base_vit + guild_vit) * (8000 + level * 50) / 1000,
+            434,
+            "the §11 patch moves the level term alone: 432 -> 434 at level 1"
+        );
+        // And with the guild term gone, the spec's level-1 figure (40 both ways).
+        assert_eq!(base_vit * (8000 + level * 50) / 1000, 40);
     }
 
     #[test]

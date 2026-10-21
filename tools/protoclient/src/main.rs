@@ -1433,9 +1433,9 @@ async fn probe_use_bonus(
     // `Parametabox.cpp:3374/3545` — recompute expected maxima from the raised
     // ability; untouched stats keep the seed's stored values.
     let expected_life = if pos == 3 {
-        expected_ability * (8000 + 13 * 5) / 1000
+        expected_ability * (8000 + 13 * 50) / 1000
     } else {
-        161
+        173
     };
     let expected_mana = if pos == 2 {
         expected_ability * (4000 + 13 * 5) / 1000

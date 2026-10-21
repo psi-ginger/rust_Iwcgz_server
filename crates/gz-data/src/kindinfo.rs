@@ -65,8 +65,10 @@
 //!
 //! - switch **off** (legacy): `MaxLife = totalVit * VIT_LIFE_RATE`
 //!   (`Parametabox.cpp:5798`; `VIT_LIFE_RATE = 4`, `parametabox.h:11`).
-//! - switch **on** ("HealthAddChange"): `totalVit * (8000 + level*5) / 1000`
-//!   with integer truncation (`SetHitPoint`, `Parametabox.cpp:3366-3374`).
+//! - switch **on** ("HealthAddChange"): `totalVit * (8000 + level*50) / 1000`
+//!   with integer truncation (`SetHitPoint`, `Parametabox.cpp:3366-3374`, **as
+//!   patched** — the stock binary's level term is `*5`; `SPEC_CLIENT_REBUILD_PATCH.md`
+//!   §11 moves it to `*50` in the same release as `stats::derived_max_life`).
 //!
 //! [`MonsterStats::at`] reproduces exactly that coupling: the level-scaling
 //! and the legacy HP formula come as a pair (switch off), the unscaled stats
@@ -225,7 +227,13 @@ impl MonsterStats {
     /// (`CommonLogic-SetChar.cpp:113-124`, only when off) and the HP formula
     /// dispatch (`Parametabox.cpp:7268-7282`) on that one switch, so this
     /// function takes it once and keeps the coupling: off → scaled stats +
-    /// `vit * VIT_LIFE_RATE`; on → raw stats + `vit * (8000 + level*5) / 1000`.
+    /// `vit * VIT_LIFE_RATE`; on → raw stats + `vit * (8000 + level*50) / 1000`.
+    ///
+    /// The `level*50` term is the **patched** client's (`SPEC_CLIENT_REBUILD_PATCH.md`
+    /// §11) and is deliberately not this module's stock value — it must stay
+    /// identical to `stats::derived_max_life` in `services/game`, or monster
+    /// `max_hp` and player `max_life` drift apart against one shared client
+    /// denominator (`clPB.GetMaxLife()`).
     ///
     /// The HP arithmetic is C-style integer maths: truncation toward zero at
     /// the `/1000` (`Parametabox.cpp:3374`), which for the shipped non-negative
@@ -249,7 +257,7 @@ impl MonsterStats {
             )
         };
         let max_hp = if health_add_change {
-            (vit * (8000 + level * 5)) / 1000
+            (vit * (8000 + level * 50)) / 1000
         } else {
             vit * VIT_LIFE_RATE
         };
@@ -651,10 +659,15 @@ mod tests {
         // Switch on: raw stats, new formula with C truncation.
         let new = MonsterStats::at(&create, &attack, 10, true);
         assert_eq!(new.vit, 30);
-        assert_eq!(new.max_hp, 30 * (8000 + 10 * 5) / 1000);
-        // Level 1 is the raw table in both branches.
+        assert_eq!(new.max_hp, 30 * (8000 + 10 * 50) / 1000);
+        // Level 1 is the raw table in both branches, and its level term is just
+        // `vit * 50 / 1000`, so spell the level-1 form out rather than pinning a
+        // rounded rate (`30 * 8` held at `×5`, not at `×50`).
         assert_eq!(MonsterStats::at(&create, &attack, 1, false).max_hp, 30 * 4);
-        assert_eq!(MonsterStats::at(&create, &attack, 1, true).max_hp, 30 * 8);
+        assert_eq!(
+            MonsterStats::at(&create, &attack, 1, true).max_hp,
+            30 * (8000 + 50) / 1000
+        );
     }
 
     /// The shipped files, parsed end to end — skipped when the game data is

@@ -521,10 +521,13 @@ impl MonsterWorld {
                 // gates the bar's denominator on that same switch for NPCs as
                 // well as players (`Parametabox.cpp:7268`) — so the pair has to be
                 // the one the client uses, not the legacy's older branch. This
-                // also matches the player path (`stats::derived_max_life`), which
-                // was aligned to this same `×5` level term in the 2026-10-21
-                // HUD-bar fix; the §4.3.4 `×50` had desynced player life from the
-                // client-computed max and pinned the player's own bar full.
+                // also matches the player path (`stats::derived_max_life`): both
+                // carry §4.3.4's `×50` level term, and the client binary carries
+                // it too — `SPEC_CLIENT_REBUILD_PATCH.md` §11 patches
+                // `SetHitPoint`, whose formula `bnpc` never reaches, so NPCs and
+                // monsters share the PC curve. Against an unpatched client this
+                // desynced and pinned the player's own bar full (the
+                // 2026-10-21 HUD-bar fix, superseded by the patch).
                 // shortcut: hardcoded rather than read from CountrySwitch.txt; read
                 // the file if a data set ships `Switch_HealthAddChange 0`.
                 let stats = MonsterStats::at(create_row, attack_row, unit.level, true);

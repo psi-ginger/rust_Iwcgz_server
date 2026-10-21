@@ -45,7 +45,8 @@ $files = @(
     "0011_character_friends.sql",
     "0012_character_quests.sql",
     "0013_world_item_recycle.sql",
-    "0014_recompute_max_life.sql"
+    "0014_recompute_max_life.sql",
+    "0015_recompute_max_life.sql"
 )
 
 foreach ($f in $files) {

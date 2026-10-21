@@ -100,38 +100,47 @@ pub(crate) struct Allocation {
     pub(crate) max_mana: i32,
 }
 
-/// `max_life = vit * (8000 + level*5) / 1000` — the client's `SetHitPoint`
-/// base (`Parametabox.cpp:3374`), reproduced exactly.
+/// `max_life = vit * (8000 + level*50) / 1000` — the client's `SetHitPoint`
+/// base (`Parametabox.cpp:3374`) **as patched** by `SPEC_CLIENT_REBUILD_PATCH.md`
+/// §11 (two same-width immediates, RVA `0084C6B4` + `0084C6C2`).
 ///
 /// This **must** equal the client's own `clPB.GetMaxLife()` because that is
 /// the denominator of every HP gauge: the HUD reads `clIP.GetLife() / clPB.
 /// GetMaxLife()` (`NCharPerson.cpp:3943-3958`), and under the shipped
 /// `Switch_HealthAddChange = 1` (`Data\CountrySwitch.txt`) `GetMaxLife()` is
-/// `GetTotalHitpoint()` = `totalVit * (8000 + level*5) / 1000`
+/// `GetTotalHitpoint()` = `totalVit * (8000 + level*50) / 1000`
 /// (`Parametabox.cpp:7268-7282`, `:3374`) — a value the **client computes
 /// itself** from the `clIP` stats it is sent. No packet can override that
-/// formula (the `5` is compiled into `New Era.exe`), so any server-side HP
+/// formula (both terms are compiled into `New Era.exe`), so any server-side HP
 /// above it reads as a permanently-full bar: the ratio `life / client_max`
 /// clamps to 1.0 while `life >= client_max`.
 ///
 /// The §4.3.4 reformation (approved 2026-10-20) multiplied the level term
-/// tenfold (`level*50`) to grant `8.0 + 0.05×Level` HP per VIT. That balance
-/// intent is **un-shippable against the stock client** — it made full-HP life
-/// exceed the client's display max by a growing margin (L50, 100 VIT: server
-/// 1050 vs client 825 → the first 225 damage invisible; the bar pinned full),
-/// which is the 2026-10-21 playtest's "player HUD HP bar stuck full" Bug 1.
-/// Reverting the level term to the client's `×5` restores an honest bar.
-/// Durability now scales with VIT, which both sides multiply identically.
+/// tenfold (`level*50`) to grant `8.0 + 0.05×Level` HP per VIT. Against the
+/// **stock** client that desynced and pinned the player's own bar full — the
+/// 2026-10-21 playtest's Bug 1 (L50, 100 VIT: server 1050 vs client 825, so
+/// the first 225 damage was invisible) — which is why the term was first
+/// reverted to the client's `×5`. The client is now patched to `×50` too, so
+/// the balance intent is shippable again.
+///
+/// **Coupled:** the same `level*50` term lives in
+/// `gz_data::kindinfo::MonsterStats::at` (monster `max_hp`), which is a
+/// different function in a different crate. Patching the client moves *every*
+/// entity's denominator — `SetHitPoint` ignores its `bnpc` flag and
+/// `cltCharCommon::ParametaBoxAction()` writes the member `clPB` for NPCs and
+/// monsters alike (`Char-Common.cpp:4712`, `Char-Draw.cpp:4651-4653`) — so
+/// flipping only this function would desync every monster bar. Both flip in
+/// one release, and stored rows move via `0015_recompute_max_life.sql`.
 ///
 /// The client's total can only ever be *larger* than this base (equipment
 /// `siEquipHitpoint%`, guild VIT via `clTotalBA`), never smaller — so the bar
 /// errs low, never stuck-full, when a character wears HP% gear or is in a
-/// guild. Level 1 is unchanged (vit 5 → 40, the DDL default), so existing
-/// rows stay valid.
+/// guild. Level 1 is unchanged (vit 5 -> 40, the DDL default), so level-1 rows
+/// stay valid.
 ///
-/// Spec pins: L1, 5 VIT = 40; L50, 100 VIT = 825; L100, 100 VIT = 850.
+/// Spec pins: L1, 5 VIT = 40; L50, 100 VIT = 1050; L100, 100 VIT = 1300.
 pub(crate) fn derived_max_life(vit: i32, level: i16) -> i32 {
-    (i64::from(vit) * (8000 + i64::from(level) * 5) / 1000) as i32
+    (i64::from(vit) * (8000 + i64::from(level) * 50) / 1000) as i32
 }
 
 /// `max_mana = mag * (4000 + level*5) / 1000` — the base term of

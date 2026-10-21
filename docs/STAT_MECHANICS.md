@@ -288,6 +288,13 @@ PVP-league enemy (`:3481` ★) → ×5 enemy-guild hunt-map war (`:3489` ★) �
 additive (`:3497-3501` ★) → event buf +10 % at buf ≥ 3 (`:3507` ★) → clamp current life to
 total (`:3514-3520` ★).
 
+> **Shipped-binary note (2026-10-21):** the deployed `New Era.exe` carries
+> `SPEC_CLIENT_REBUILD_PATCH.md` §11, so at runtime `:3374`'s level term is
+> **`level*50`** while the source tree above still reads `level*5`. The patch
+> touches `SetHitPoint` only — `SetManaPoint` and every `×5`/`÷1000` divisor in
+> this section are untouched, and `bnpc` never reaches the HP base term, so NPCs
+> and monsters follow the same curve as PCs.
+
 **SetManaPoint (ON), `:3537-3616`** — base ★ `:3545` `siMagManapoint = (totalMag * (4000 +
 (level*5))) / 1000;` → equip % (`:3565`) → set-item % (`:3574`) → weapon-skill INCMAG %
 (`:3582-3605`) → clamp (`:3612`). No PVP ×5 on mana.
@@ -303,8 +310,11 @@ only if present) (`:113-124`) — then life/mana to max (`:146/:150`). The port 
 monster scaling from the kind .dat rows (`MonsterStats::at`) instead — data-driven rather
 than formula-driven.
 
-Port ✅: `derived_max_life`/`derived_max_mana` = the ON base terms ★ (verified formulas,
-`stats.rs:106-115`).
+Port ✅: `derived_max_mana` = the ON base term ★ (verified formula, `stats.rs`).
+`derived_max_life` is §4.3.4's deliberate `×50` reformation and tracks the
+**patched** client rather than the legacy source — the two are pinned together
+in `SPEC_CLIENT_REBUILD_PATCH.md` §11 (the same `×50` term also lives in
+`kindinfo::MonsterStats::at`).
 
 ---
 

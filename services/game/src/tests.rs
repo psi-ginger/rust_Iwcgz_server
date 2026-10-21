@@ -140,7 +140,7 @@ fn seeded_tester() -> CharacterFull {
         class_kind: 1,
         gender: 1,
         level: 13,
-        max_life: 161,
+        max_life: 173,
         max_mana: 40,
         move_speed: 8,
         exp: 0,
@@ -680,11 +680,11 @@ fn the_derived_maxima_reproduce_the_ddl_defaults_and_the_repaired_seed() {
     // unchanged by §4.3.4 (its level term is 0 at level 1).
     assert_eq!(derived_max_life(5, 1), 40);
     assert_eq!(derived_max_mana(5, 1), 20);
-    // The level-13 seed row (vit 20) derives 161 under the client's `×5` level
-    // term (`SetHitPoint`, `Parametabox.cpp:3374`). The §4.3.4 `×50` had given
-    // 173, desyncing player life from the client-computed gauge max — reverted
-    // in the 2026-10-21 HUD-bar fix.
-    assert_eq!(derived_max_life(20, 13), 161);
+    // The level-13 seed row (vit 20) derives 173 under §4.3.4's `×50` level
+    // term (`SetHitPoint`, `Parametabox.cpp:3374`, **as patched** —
+    // `SPEC_CLIENT_REBUILD_PATCH.md` §11). The stock client's `×5` gave 161,
+    // which is what the 2026-10-21 HUD-bar fix briefly reverted to.
+    assert_eq!(derived_max_life(20, 13), 173);
     assert_eq!(derived_max_mana(10, 13), 40);
 }
 
@@ -748,7 +748,7 @@ fn allocating_spends_bonus_and_raises_the_stat() {
     assert_eq!(out.bonus, 0);
     assert_eq!(out.str_, 25);
     // Vit/mag are untouched, so the derived maxima do not move.
-    assert_eq!((out.max_life, out.max_mana), (161, 40));
+    assert_eq!((out.max_life, out.max_mana), (173, 40));
     // The total is invariant under an allocation: 95 + 5 both ways.
 }
 
@@ -756,10 +756,10 @@ fn allocating_spends_bonus_and_raises_the_stat() {
 fn allocating_vit_recomputes_max_life_from_the_formula() {
     let out = allocate_stat(&seeded_tester(), &UseBonus { pos: 3, amount: 5 }).unwrap();
     assert_eq!(out.vit, 25);
-    // The client's `SetHitPoint` base: vit * (8000 + level*5) / 1000 —
-    // 25 * 8065 / 1000 = 201 (the §4.3.4 `×50` level term was reverted in the
-    // 2026-10-21 HUD-bar fix; see `derived_max_life`).
-    assert_eq!(out.max_life, 25 * (8000 + 13 * 5) / 1000);
+    // The client's `SetHitPoint` base, as patched: vit * (8000 + level*50)
+    // / 1000 — 25 * 8650 / 1000 = 216 (§4.3.4's level term, carried by the
+    // client binary too; see `derived_max_life` and SPEC §11).
+    assert_eq!(out.max_life, 25 * (8000 + 13 * 50) / 1000);
     assert_eq!(out.bonus, 0);
 }
 
