@@ -100,16 +100,38 @@ pub(crate) struct Allocation {
     pub(crate) max_mana: i32,
 }
 
-/// `max_life = vit * (8000 + level*50) / 1000` — Cat's §4.3.4 reformation
-/// (approved 2026-10-20), retuning the legacy `SetHitPoint` base
-/// (`Parametabox.cpp:3374`, `(8000 + level*5) / 1000`) by multiplying the
-/// level term tenfold: VIT now grants `8.0 + 0.05×Level` HP per point
-/// (legacy: `8.0 + 0.005×Level`). Level 1 is untouched — vit 5 still derives
-/// 40, the DDL default — so existing rows stay valid and only growth changes.
+/// `max_life = vit * (8000 + level*5) / 1000` — the client's `SetHitPoint`
+/// base (`Parametabox.cpp:3374`), reproduced exactly.
 ///
-/// Spec pins: L1, 5 VIT = 40; L50, 100 VIT = 1050; L100, 100 VIT = 1300.
+/// This **must** equal the client's own `clPB.GetMaxLife()` because that is
+/// the denominator of every HP gauge: the HUD reads `clIP.GetLife() / clPB.
+/// GetMaxLife()` (`NCharPerson.cpp:3943-3958`), and under the shipped
+/// `Switch_HealthAddChange = 1` (`Data\CountrySwitch.txt`) `GetMaxLife()` is
+/// `GetTotalHitpoint()` = `totalVit * (8000 + level*5) / 1000`
+/// (`Parametabox.cpp:7268-7282`, `:3374`) — a value the **client computes
+/// itself** from the `clIP` stats it is sent. No packet can override that
+/// formula (the `5` is compiled into `New Era.exe`), so any server-side HP
+/// above it reads as a permanently-full bar: the ratio `life / client_max`
+/// clamps to 1.0 while `life >= client_max`.
+///
+/// The §4.3.4 reformation (approved 2026-10-20) multiplied the level term
+/// tenfold (`level*50`) to grant `8.0 + 0.05×Level` HP per VIT. That balance
+/// intent is **un-shippable against the stock client** — it made full-HP life
+/// exceed the client's display max by a growing margin (L50, 100 VIT: server
+/// 1050 vs client 825 → the first 225 damage invisible; the bar pinned full),
+/// which is the 2026-10-21 playtest's "player HUD HP bar stuck full" Bug 1.
+/// Reverting the level term to the client's `×5` restores an honest bar.
+/// Durability now scales with VIT, which both sides multiply identically.
+///
+/// The client's total can only ever be *larger* than this base (equipment
+/// `siEquipHitpoint%`, guild VIT via `clTotalBA`), never smaller — so the bar
+/// errs low, never stuck-full, when a character wears HP% gear or is in a
+/// guild. Level 1 is unchanged (vit 5 → 40, the DDL default), so existing
+/// rows stay valid.
+///
+/// Spec pins: L1, 5 VIT = 40; L50, 100 VIT = 825; L100, 100 VIT = 850.
 pub(crate) fn derived_max_life(vit: i32, level: i16) -> i32 {
-    (i64::from(vit) * (8000 + i64::from(level) * 50) / 1000) as i32
+    (i64::from(vit) * (8000 + i64::from(level) * 5) / 1000) as i32
 }
 
 /// `max_mana = mag * (4000 + level*5) / 1000` — the base term of

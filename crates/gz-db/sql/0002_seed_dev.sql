@@ -56,20 +56,23 @@ ON CONFLICT (account_id, slot) DO UPDATE
 -- `handle_use_bonus`). Level 13 makes the allowance `40 + 12*5 = 100`, exactly
 -- the row, so the starting 5 points are spendable.
 --
--- `max_life`/`max_mana` are stored columns no code path recomputes today, and the
--- seed never set them, so they sat at the 0001 defaults (40/20) while the real
--- formulas say otherwise. Both are the base terms at this level/ability:
---   max_life = vit * (8000 + level*50) / 1000 = 20 * 8650 / 1000 = 173
+-- `max_life`/`max_mana` are stored columns, and the seed set them to the base
+-- terms at this level/ability. Both must equal what `stats::derived_*` derives
+-- and what the client's own `clPB.GetMax*` computes (the HP/MP gauge
+-- denominator), so a fresh login's bar starts honest:
+--   max_life = vit * (8000 + level*5) / 1000 = 20 * 8065 / 1000 = 161
 --   max_mana = mag * (4000 + level*5) / 1000 = 10 * 4065 / 1000 = 40
--- (`stats::derived_max_life` follows Cat's 2026-10-20 §4.3.4 reformation —
--- the legacy base was `(8000 + level*5)`, `Parametabox.cpp:3374`; max_mana is
--- untouched. Both reproduce the DDL defaults exactly at level 1 — vit 5 -> 40,
+-- (`stats::derived_max_life` matches the client's `SetHitPoint`
+-- (`Parametabox.cpp:3374`, `(8000 + level*5)`); the §4.3.4 `×50` level term
+-- desynced player life from the client-computed max and pinned the HUD bar
+-- full — reverted to `×5` in the 2026-10-21 HUD-bar fix. max_mana is untouched.
+-- Both reproduce the DDL defaults exactly at level 1 — vit 5 -> 40,
 -- mag 5 -> 20 — which is what makes them the recalc source).
 -- `handle_use_bonus` recomputes both on every accepted spend.
 INSERT INTO character_stats
   (character_id, level, exp, str, dex, vit, mag, hnd, luk, wis,
    bonus_points, max_life, max_mana)
-SELECT c.character_id, 13, 0, 20, 15, 20, 10, 10, 10, 10, 5, 173, 40
+SELECT c.character_id, 13, 0, 20, 15, 20, 10, 10, 10, 10, 5, 161, 40
 FROM characters c
 JOIN accounts a ON a.account_id = c.account_id
 WHERE a.username = 'test' AND c.slot = 0

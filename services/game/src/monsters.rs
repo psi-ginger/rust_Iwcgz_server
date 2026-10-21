@@ -521,8 +521,10 @@ impl MonsterWorld {
                 // gates the bar's denominator on that same switch for NPCs as
                 // well as players (`Parametabox.cpp:7268`) — so the pair has to be
                 // the one the client uses, not the legacy's older branch. This
-                // also matches the player path, which has always used it
-                // (`stats::derived_max_life`).
+                // also matches the player path (`stats::derived_max_life`), which
+                // was aligned to this same `×5` level term in the 2026-10-21
+                // HUD-bar fix; the §4.3.4 `×50` had desynced player life from the
+                // client-computed max and pinned the player's own bar full.
                 // shortcut: hardcoded rather than read from CountrySwitch.txt; read
                 // the file if a data set ships `Switch_HealthAddChange 0`.
                 let stats = MonsterStats::at(create_row, attack_row, unit.level, true);
@@ -703,6 +705,26 @@ impl MonsterWorld {
     /// every group and unit, which is the whole one-tile-one-monster rule.
     fn occupied(&self, t: (i32, i32)) -> bool {
         self.monsters.iter().any(|m| (m.x, m.y) == t)
+    }
+
+    /// The runtime half of the one-tile-one-monster rule: whether any *other*
+    /// monster already holds `t` as its effective slot — the tile it is walking
+    /// to if it walks, else the tile it stands on.
+    ///
+    /// [`Self::occupied`] covers the boot fill; this covers movement. Gating
+    /// every walk destination on it is what keeps an idle `wander` or an
+    /// engage-approach from stacking two monsters on one tile — the click-bounce
+    /// sibling (two damaged monsters on the same cell alternate their life bar
+    /// under `FindLandChar`) that a spawn-time check can never see, because the
+    /// overlap is acquired after the fill. Reserving the walk *destination*
+    /// (not the tile being left) means two monsters deciding in the same AI pass
+    /// cannot both commit to the same tile: the first's reservation is visible
+    /// to the second.
+    fn slot_held(&self, except: usize, t: (i32, i32)) -> bool {
+        self.monsters
+            .iter()
+            .enumerate()
+            .any(|(i, m)| i != except && m.walk.as_ref().map(|w| w.dest).unwrap_or((m.x, m.y)) == t)
     }
 
     /// Cat's zero-collision placement (2026-10-21): the first tile nothing
@@ -1605,6 +1627,14 @@ impl MonsterWorld {
         if dest == (x, y) {
             return;
         }
+        // Runtime one-tile-one-monster: never walk onto a tile another monster
+        // already holds (its walk destination or its stance). A wander or an
+        // engage-approach that would land on an occupied tile simply waits an
+        // action slot and re-decides — the caller's `walk.is_none()` guard
+        // already arms that, so this cannot busy-loop.
+        if self.slot_held(index, dest) {
+            return;
+        }
         if !walkable_path(&self.groups[group].units[unit].tiles, (x, y), dest) {
             return;
         }
@@ -1996,6 +2026,76 @@ mod tests {
             world.monsters.len(),
             "one tile per monster — zero exact-coordinate collisions"
         );
+    }
+
+    /// The runtime half of the zero-collision directive (2026-10-21): after the
+    /// AI has run — idle `wander`s and engage-approaches both — no two monsters
+    /// hold the same slot (their walk destination if walking, else their stance).
+    ///
+    /// The boot fill proves spawn is clean; this proves movement never stacks
+    /// two monsters on one tile, which is the click-bounce sibling a spawn check
+    /// cannot see because the overlap is acquired *after* the fill. Two monsters
+    /// with the same final destination would both come to rest on it and
+    /// alternate their life bar under `FindLandChar`. Both movement kinds funnel
+    /// through `order_move`, the `slot_held`-gated chokepoint.
+    ///
+    /// Asserted on the *effective slot* (destination-or-stance), the invariant
+    /// `slot_held` maintains. A momentary crossing of two mid-walk paths can
+    /// share an intermediate tile (transient, legacy parity) but never the
+    /// resting tile, which is what a persistent bounce needs.
+    #[test]
+    fn running_the_ai_never_stacks_two_monsters_on_one_tile() {
+        use crate::registry::{Outbound, SessionInfo};
+
+        if !Path::new(DATA_ROOT).exists() {
+            return; // the game data is not part of this repository
+        }
+        let mut world = MonsterWorld::load(Path::new(DATA_ROOT)).expect("the field data loads");
+        let registry = Registry::new();
+        world.spawn_all(&registry);
+
+        // A player standing in the field so nearby aggressive monsters engage
+        // and walk toward it (the engage-approach path); the rest idle-wander.
+        let key = Registry::next_key();
+        let (tx, _rx) = tokio::sync::mpsc::channel::<Outbound>(crate::registry::OUTBOUND_CAP);
+        let at = (world.monsters[0].x, world.monsters[0].y);
+        registry.register(
+            key,
+            tx,
+            std::sync::Arc::new(tokio::sync::Notify::new()),
+            SessionInfo {
+                char_unique: pc(1000),
+                name: "Watcher".to_owned(),
+                level: 1,
+                map_id: FIELD_MAP,
+                x: at.0,
+                y: at.1,
+                school_id: 0,
+                class_kind: 1,
+                life: 40,
+                move_speed: 12,
+                sex: 1,
+                gm_level: 0,
+            },
+        );
+
+        let mut rng = Rng::new(7);
+        // Wander is a 1-in-25 draw per action slot and walks take slots to
+        // settle, so a couple hundred slots exercises both the idle and the
+        // engaged movement of the whole 4,524-monster field.
+        for slot in 1..=250u64 {
+            world.tick(&registry, slot * AI_SLOT_MS, &mut rng);
+            let mut held: std::collections::HashMap<(i32, i32), u32> =
+                std::collections::HashMap::new();
+            for m in &world.monsters {
+                let at = m.walk.as_ref().map(|w| w.dest).unwrap_or((m.x, m.y));
+                *held.entry(at).or_default() += 1;
+            }
+            assert!(
+                held.values().all(|&n| n == 1),
+                "slot {slot}: two monsters share a tile — the click-bounce sibling"
+            );
+        }
     }
 
     /// The record the client is given has to survive its own round trip, or a

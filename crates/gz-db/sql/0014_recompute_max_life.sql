@@ -1,0 +1,21 @@
+-- Bring every existing character's stored `max_life` onto the client-honest
+-- scale after the 2026-10-21 HUD-bar fix.
+--
+-- The §4.3.4 reformation (approved 2026-10-20) had `stats::derived_max_life`
+-- use a `level*50` level term. That made the server's full-HP life exceed the
+-- client's own gauge denominator — `clPB.GetMaxLife()` =
+-- `totalVit * (8000 + level*5) / 1000` under the shipped
+-- `Switch_HealthAddChange = 1` (`Parametabox.cpp:7268`, `:3374`), a value the
+-- client computes itself and no packet can override — so `life / client_max`
+-- clamped to 1.0 and the player's HP bar read permanently full (the
+-- 2026-10-21 playtest's Bug 1). The level term is now reverted to the client's
+-- `×5`.
+--
+-- Rows seeded or levelled before the fix still carry a `×50` `max_life`. This
+-- recomputes the base term for every row so a fresh login's bar starts honest.
+-- PostgreSQL integer division truncates toward zero, matching the C-style
+-- truncation in `derived_max_life`. `handle_use_bonus` and the level-up path
+-- already recompute on the next spend/level, so this only fixes the stored
+-- value for characters that have not yet done either.
+UPDATE character_stats
+   SET max_life = vit * (8000 + level * 5) / 1000;
