@@ -96,6 +96,14 @@ const AI_DECIDE_ONE_IN: u32 = 25;
 /// rule.
 const WANDER_RADIUS: i32 = 5;
 
+/// How far an occupied spawn pick may search outward for free, walkable,
+/// in-leash ground — Cat's zero-collision spawner rule (2026-10-21): a
+/// stride pick a live monster already stands on falls through the unit's
+/// own safe tiles and then to rings of this radius around the pick. Every
+/// shipped group leash is at least this wide, so the search stays inside
+/// the group's square.
+const SPAWN_EXPAND_RADIUS: i32 = 5;
+
 /// One group's kind, resolved against the kind tables and the map.
 #[derive(Debug, Clone)]
 struct SpawnUnit {
@@ -177,6 +185,11 @@ struct Monster {
     /// checkable at every call site (design doc §5.0).
     unique: MonsterEntityId,
     wire_kind: u16,
+    /// Cat's internal log tag (2026-10-21): this kind's nth instance minted
+    /// this boot — `[032_01]` for the first raccoon ([`Monster::tag`]).
+    /// Server-side logging only; packets carry [`Monster::wire_kind`] and
+    /// nothing else.
+    instance: u16,
     level: u8,
     /// Current life. Reaches 0 only long enough for the death path to remove
     /// the instance, because a body is deleted rather than left lying
@@ -218,6 +231,15 @@ struct Monster {
     /// wander/search decision is every-25-frames, the swing is the kind's own
     /// interval — and the client animates the swing on this one.
     next_swing_ms: u64,
+}
+
+impl Monster {
+    /// The server-side log tag — `[<kind>_<instance>]`, e.g. `[032_01]` for
+    /// the first raccoon (Cat 2026-10-21). For humans reading a log; never
+    /// serialized, never on the wire.
+    fn tag(&self) -> String {
+        format!("[{:03}_{:02}]", self.wire_kind, self.instance)
+    }
 }
 
 /// What a monster's swing did to a player, for the caller to broadcast.
@@ -362,6 +384,9 @@ pub(crate) struct MonsterWorld {
     /// still drawing the death animation never sees the id reused (audit H3,
     /// the legacy's `FindEmptyCharUnique`, `Char-Server.h:1006-1037`).
     ids: IdAllocator,
+    /// `kind -> how many of that kind this boot has minted` — the per-kind
+    /// counter behind [`Monster::instance`] (Cat's log tag, 2026-10-21).
+    kind_seq: HashMap<u16, u16>,
     /// `(group index, when it is due)` — the legacy's respawn gate, one entry
     /// per monster that has died.
     respawn: Vec<(usize, u64)>,
@@ -578,6 +603,7 @@ impl MonsterWorld {
             // The pools start above the static-NPC block, so the two id
             // ranges cannot overlap (`IsNPC` covers both, `npc.rs`).
             ids: IdAllocator::new(),
+            kind_seq: HashMap::new(),
             respawn: Vec::new(),
             corpses: Vec::new(),
             jim_by: HashMap::new(),
@@ -611,12 +637,13 @@ impl MonsterWorld {
             for unit_index in 0..self.groups[index].units.len() {
                 let unit = &self.groups[index].units[unit_index];
                 let want = unit.max_num.max(0) as usize;
-                // shortcut: a deterministic stride across the sorted safe tiles,
-                // not the legacy's random `FindEmptyAreaForCharLocate`. The same
-                // index is reused on respawn, which is also deterministic. The
-                // stride wraps once a target outruns the tile list (a density-
-                // amplified fill can); clamping would pile every extra monster
-                // on the last tile.
+                // The stride is a *preference*, not the placement: a
+                // deterministic first pick across the sorted safe tiles (not
+                // the legacy's random `FindEmptyAreaForCharLocate`), and
+                // [`Self::open_spawn_tile`] then enforces Cat's
+                // one-tile-one-monster rule (2026-10-21). The old stride
+                // wrapped once a target outran the tile list and stacked 37%
+                // of the map on shared tiles; that is gone.
                 let step = (unit.tiles.len() / want.max(1)).max(1);
                 let places: Vec<(i32, i32)> = (0..want)
                     .map(|k| unit.tiles[(k * step) % unit.tiles.len()])
@@ -631,31 +658,91 @@ impl MonsterWorld {
                     "monster placed outside its group's leash"
                 );
                 // Resolved above so the mutable borrow below is the only one.
-                for at in places {
+                for base in places {
+                    // Cat's zero-collision rule (2026-10-21): never place on
+                    // a tile a live monster already stands on.
+                    let Some(at) = self.open_spawn_tile(index, unit_index, base) else {
+                        logln_err!(
+                            "monsters: no free tile near ({}, {}) for group {index} \
+                             unit {unit_index} — spawn refused",
+                            base.0,
+                            base.1
+                        );
+                        continue;
+                    };
                     if !self.spawn_one(registry, index, unit_index, at) {
                         return;
                     }
                 }
             }
         }
-        // Cat's H3 (2026-10-21): the stride wraps wherever a density-amplified
-        // target outruns the kind's safe-tile list, so several instances can
-        // stand on ONE exact tile — one drawn sprite, several ids — and a
-        // re-click's hit test may resolve a sibling (the Bug-5 bar bounce).
-        // Logged at boot against the layout a playtest ran on.
+        // Boot assertion of the zero-collision rule (Cat's directive,
+        // 2026-10-21): one tile holds exactly one monster. The data test
+        // pins this deterministically; this catches a live data change.
         let mut per_tile: HashMap<(i32, i32), u32> = HashMap::new();
         for m in &self.monsters {
             *per_tile.entry((m.x, m.y)).or_default() += 1;
         }
-        let shared: u32 = per_tile.values().filter(|&&n| n > 1).sum();
-        let stacked_tiles = per_tile.values().filter(|&&n| n > 1).count();
-        if stacked_tiles > 0 {
+        let collisions: u32 = per_tile.values().filter(|&&n| n > 1).sum();
+        if collisions > 0 {
+            logln_err!(
+                "monsters: {collisions} monster(s) share a spawn tile — the \
+                 one-tile-one-monster rule is broken"
+            );
+        } else {
             logln!(
-                "game: monsters: {stacked_tiles} exact tile(s) carry more than one \
-                 instance ({shared} monsters) — ghost stacks; a re-click on one may \
-                 resolve a sibling id"
+                "game: monsters: {} monster(s) on {} distinct tile(s) — 0 tile \
+                 collisions",
+                self.monsters.len(),
+                per_tile.len()
             );
         }
+    }
+
+    /// Whether any live monster stands on `t` — one membership test over
+    /// every group and unit, which is the whole one-tile-one-monster rule.
+    fn occupied(&self, t: (i32, i32)) -> bool {
+        self.monsters.iter().any(|m| (m.x, m.y) == t)
+    }
+
+    /// Cat's zero-collision placement (2026-10-21): the first tile nothing
+    /// stands on — `base`, then the unit's own sorted safe tiles, then
+    /// walkable tiles on expanding rings around `base` ("dynamically search
+    /// an unoccupied adjacent walkable tile or expand the candidate
+    /// radius"). Ring candidates stay inside the group's leash and are
+    /// judged with the same kind block [`Self::approach_tile`] uses. `None`
+    /// only when the whole neighbourhood is taken — the caller then refuses
+    /// that one spawn, logged, never a panic (A8).
+    fn open_spawn_tile(&self, group: usize, unit: usize, base: (i32, i32)) -> Option<(i32, i32)> {
+        if !self.occupied(base) {
+            return Some(base);
+        }
+        for &t in &self.groups[group].units[unit].tiles {
+            if !self.occupied(t) {
+                return Some(t);
+            }
+        }
+        let u = &self.groups[group].units[unit];
+        let block = *self.block_by_kind.get(&u.wire_kind)?;
+        let map = self.map.as_ref()?;
+        for r in 1..=SPAWN_EXPAND_RADIUS {
+            for dy in -r..=r {
+                for dx in -r..=r {
+                    // The tiles a smaller ring already covered are interior.
+                    if dx.abs().max(dy.abs()) != r {
+                        continue;
+                    }
+                    let t = (base.0 + dx, base.1 + dy);
+                    if self.groups[group].anchor.contains(FIELD_MAP, t.0, t.1)
+                        && is_walkable(map, t.0, t.1, block)
+                        && !self.occupied(t)
+                    {
+                        return Some(t);
+                    }
+                }
+            }
+        }
+        None
     }
 
     /// Places one monster into `group` at `at`, taking the next id and
@@ -707,9 +794,16 @@ impl MonsterWorld {
             );
             return false;
         };
+        // Cat's log tag (2026-10-21): this kind's nth instance this boot.
+        let instance = {
+            let next = self.kind_seq.entry(u.wire_kind).or_insert(0);
+            *next = next.saturating_add(1);
+            *next
+        };
         let monster = Monster {
             unique,
             wire_kind: u.wire_kind,
+            instance,
             level: u.level.clamp(0, 255) as u8,
             life: u.life,
             x: at.0,
@@ -728,6 +822,16 @@ impl MonsterWorld {
         self.monsters.push(monster);
         broadcast_spawn(registry, FIELD_MAP, &monster);
         true
+    }
+
+    /// Cat's internal log tag (2026-10-21) — `[032_01]` for the first
+    /// raccoon — for log lines that carry only the unique. A bare `#<unique>`
+    /// when the world does not hold the monster (died, or a session's id).
+    pub(crate) fn log_tag(&self, unique: u16) -> String {
+        self.monsters
+            .iter()
+            .find(|m| m.unique.u16() == unique)
+            .map_or_else(|| format!("#{unique}"), Monster::tag)
     }
 
     /// Tells one session about every monster in its 3×3 cell block — the monster
@@ -1120,8 +1224,10 @@ impl MonsterWorld {
                     // bounce without this line is not a target switch.
                     logln!(
                         "game: 263: target switch by {attacker}: un-jim monster \
-                         {stale_unique} at ({x}, {y}), bar follows {}",
-                        monster.unique
+                         {stale_unique} {} at ({x}, {y}), bar follows {} {}",
+                        self.monsters[stale].tag(),
+                        monster.unique,
+                        monster.tag()
                     );
                 }
                 // Pre-P4 a Tier-3 id above the SI16 cap has no 263 frame to
@@ -1225,8 +1331,13 @@ impl MonsterWorld {
                 continue;
             }
             // The same deterministic index the boot pass would have used for
-            // this slot.
-            let at = unit.tiles[(have as usize).min(unit.tiles.len() - 1)];
+            // this slot, then the zero-collision rule: a wanderer may have
+            // walked onto that tile since (respawn is a spawn — Cat,
+            // 2026-10-21), and one tile holds one monster.
+            let base = unit.tiles[(have as usize).min(unit.tiles.len() - 1)];
+            let Some(at) = self.open_spawn_tile(group, unit_index, base) else {
+                return;
+            };
             self.spawn_one(registry, group, unit_index, at);
             return;
         }
@@ -1438,8 +1549,9 @@ impl MonsterWorld {
             if (session.x - x).abs() <= aggressive && (session.y - y).abs() <= aggressive {
                 self.monsters[index].target = Some(session.char_unique.si16());
                 logln!(
-                    "game: monster {} engaged character {}",
+                    "game: monster {} {} engaged character {}",
                     self.monsters[index].unique,
+                    self.monsters[index].tag(),
                     session.char_unique
                 );
                 break;
@@ -1860,15 +1972,14 @@ mod tests {
         assert_eq!(world.monster_display_name(0), None);
     }
 
-    /// Cat's H3 precondition (2026-10-21): the shipped spawn's stride wraps
-    /// wherever a density-amplified target outruns the kind's safe-tile list,
-    /// so instances share EXACT coordinates — one drawn sprite, two ids. That
-    /// is the ghost stack a re-click can resolve to a sibling id (the Bug-5
-    /// bar bounce), and why the retarget rule keeps the engaged monster when
-    /// a new order names a clone on its tile. Counts are per-unit sums
-    /// (`want` vs the safe-tile list), so they hold regardless of load order.
+    /// Cat's zero-collision spawner directive (2026-10-21): at spawn, one
+    /// tile holds exactly one monster — all 4,524 of them. The stride is
+    /// only a preference now; an occupied pick falls through the unit's own
+    /// safe tiles and then to walkable rings around it
+    /// ([`MonsterWorld::open_spawn_tile`]). `per_pos.len() == monsters.len()`
+    /// is exactly "no tile was ever shared".
     #[test]
-    fn the_shipped_spawn_has_exact_coordinate_ghost_stacks() {
+    fn the_shipped_spawn_never_shares_a_tile() {
         if !Path::new(DATA_ROOT).exists() {
             return; // the game data is not part of this repository
         }
@@ -1879,12 +1990,11 @@ mod tests {
         for m in &world.monsters {
             *per_pos.entry((m.x, m.y)).or_default() += 1;
         }
-        let stacked_monsters: u32 = per_pos.values().filter(|&&n| n > 1).sum();
-        let stacked_tiles = per_pos.values().filter(|&&n| n > 1).count();
-        assert_eq!(stacked_tiles, 781, "tiles carrying more than one instance");
+        assert_eq!(world.monsters.len(), 4_524, "every unit still fills");
         assert_eq!(
-            stacked_monsters, 1_671,
-            "monsters standing on a shared tile"
+            per_pos.len(),
+            world.monsters.len(),
+            "one tile per monster — zero exact-coordinate collisions"
         );
     }
 
@@ -1895,6 +2005,7 @@ mod tests {
         let monster = Monster {
             unique: sid(9001),
             wire_kind: 15,
+            instance: 1,
             level: 30,
             life: 40,
             x: 246,
@@ -1960,6 +2071,7 @@ mod tests {
             world.monsters.push(Monster {
                 unique: sid(unique),
                 wire_kind: 15,
+                instance: 1,
                 level: 1,
                 life: 10,
                 x: at.0,
@@ -2459,19 +2571,31 @@ mod tests {
                 map_index: FIELD_MAP,
                 center_x: 0,
                 center_y: 0,
-                radius: 10,
+                // Wide enough that every instance owns its own tile: the
+                // zero-collision rule (Cat 2026-10-21) forbids the old shared
+                // 100-tile wrap this test used to fill over.
+                radius: 68,
             },
             capacity: 10_000,
             boss: false,
             respawn_ms: RESPAWN_MS,
             units: (0..8)
-                .map(|_| SpawnUnit {
+                .map(|unit_index| SpawnUnit {
                     wire_kind: 15,
                     level: 1,
                     max_num: 576,
                     move_speed: 12,
                     life: 20,
-                    tiles: (0..100).map(|i| (i % 10, i / 10)).collect(),
+                    // Each unit owns a disjoint 576-tile slice of the 137x137
+                    // leash square, so all 4_608 instances stand on distinct
+                    // coordinates — and a wander stays inside its own unit's
+                    // tiles (`walkable_path`), so respawn slots stay free too.
+                    tiles: (0..576)
+                        .map(|j| {
+                            let i = unit_index * 576 + j;
+                            ((i % 137) - 68, (i / 137) - 68)
+                        })
+                        .collect(),
                     min_atk: 1,
                     max_atk: 2,
                     ac: 0,
@@ -2488,8 +2612,9 @@ mod tests {
         });
         world.spawn_all(&registry);
         // 8 units x 576 = the tuned field's exact 4_608 (1_536 x 3), each unit
-        // filling over 100 shared tiles — the stride-wrap path, at population
-        // scale, inside the 11,500-id standard pool.
+        // on its own slice of the leash square — one tile per monster (the
+        // zero-collision rule), at population scale, inside the 11,500-id
+        // standard pool.
         let population: usize = 8 * 576;
         assert_eq!(world.monsters.len(), population, "the boot fill");
         let mut rng = Rng::new(7);
@@ -2544,7 +2669,9 @@ mod tests {
     /// delay, so it keeps the fixed stand-in.
     #[test]
     fn a_boss_group_respawns_on_its_interval_and_an_ordinary_group_does_not() {
-        fn group(boss: bool, respawn_ms: u64) -> FieldGroup {
+        // `at` is this group's ground: the two groups get distinct tiles —
+        // one tile holds one monster (Cat's zero-collision rule, 2026-10-21).
+        fn group(boss: bool, respawn_ms: u64, at: (i32, i32)) -> FieldGroup {
             FieldGroup {
                 anchor: SpawnGroup {
                     map_index: FIELD_MAP,
@@ -2561,7 +2688,7 @@ mod tests {
                     max_num: 1,
                     move_speed: 12,
                     life: 20,
-                    tiles: vec![(0, 0)],
+                    tiles: vec![at],
                     min_atk: 1,
                     max_atk: 2,
                     ac: 0,
@@ -2579,8 +2706,8 @@ mod tests {
 
         let registry = Registry::new();
         let mut world = MonsterWorld::empty();
-        world.groups.push(group(true, 60_000));
-        world.groups.push(group(false, 60_000));
+        world.groups.push(group(true, 60_000, (0, 0)));
+        world.groups.push(group(false, 60_000, (1, 0)));
         world.spawn_all(&registry);
         assert_eq!(world.monster_count(), 2);
         let mut rng = Rng::new(7);

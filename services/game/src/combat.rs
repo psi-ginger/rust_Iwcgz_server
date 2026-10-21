@@ -587,38 +587,6 @@ pub(crate) enum Swing {
     NoTarget,
 }
 
-/// Whether an `ORDER_ATTACK` naming `incoming` may move the fight off
-/// `current` — false when it must stay.
-///
-/// # Why a same-tile re-click keeps the engaged monster (Cat 2026-10-21)
-///
-/// The ×3 field density stacks several monsters on one tile. Every re-click
-/// on that stack is resolved by the *client* to whichever clone its hit test
-/// picked, so a second click mid-fight can name a different clone standing on
-/// the engaged monster's own tile. The legacy's target switch is faithful
-/// (`clCurOrder.Set(&ReserveOrder)` replaces the order outright), but here it
-/// also un-jims the current monster and jims a fresh one
-/// (`hit_by_player`'s `SetBeAttackedSwitch` mirror) — and the fresh clone's
-/// full life reads as the overhead bar jumping back up mid-fight, the
-/// 26 → 32 → 30 → 28 bounce from the 2026-10-21 playtest.
-///
-/// So the fight stays on the monster already engaged while the new click
-/// names a sibling on its tile. The rule releases itself: a dead or departed
-/// target's `position` is `None` ([`crate::monsters::MonsterWorld::position`]
-/// reads the live vector), so the click that picks the next clone after a
-/// kill goes through, and a click on another tile switches as ever.
-pub(crate) fn may_switch_target(
-    current: Option<u16>,
-    incoming: u16,
-    current_tile: Option<(i32, i32)>,
-    incoming_tile: Option<(i32, i32)>,
-) -> bool {
-    !matches!(
-        (current, current_tile, incoming_tile),
-        (Some(c), Some(a), Some(b)) if c != incoming && a == b
-    )
-}
-
 /// Whether an `OutOfRange` swing may (re)start the approach walk.
 ///
 /// # Why a walk in flight does not block the click
@@ -836,11 +804,18 @@ pub(crate) async fn player_swing(
     );
     // Cat's Bug-5 id trace (2026-10-21): which entity the swing resolved,
     // from which tile, and what life the frame carried — the line that
-    // answers "did the attacked entity id change when the bar bounced".
-    // Frame values are logged deliberately: they are what the client saw.
+    // answers "did the attacked entity id change when the bar bounced" —
+    // with the internal log tag (Cat 2026-10-21). Frame values are logged
+    // deliberately: they are what the client saw.
+    let tag = monsters
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .log_tag(hit.unique);
     logln!(
-        "game: 268: {session_key:?}: monster {} at ({}, {}) life {life} (-{damage}) {:?}",
+        "game: 268: {session_key:?}: monster {} {} at ({}, {}) life {life} \
+         (-{damage}) {:?}",
         hit.unique,
+        tag,
         hit.x,
         hit.y,
         hit.outcome
@@ -1429,38 +1404,6 @@ mod tests {
             BASE_ATTACK_BONUS,
             "zero MAG still carries the flat base"
         );
-    }
-
-    /// Cat's 2026-10-21 bar-bounce fix: a re-click on a stacked cluster must
-    /// not move the fight to a sibling clone on the engaged monster's tile,
-    /// and must not block anything else.
-    #[test]
-    fn a_same_tile_clone_re_click_keeps_the_engaged_target() {
-        // Different clone, same tile: stay.
-        assert!(!may_switch_target(
-            Some(9001),
-            9002,
-            Some((10, 20)),
-            Some((10, 20))
-        ));
-        // Same target re-clicked: fine (a plain re-arm).
-        assert!(may_switch_target(
-            Some(9001),
-            9001,
-            Some((10, 20)),
-            Some((10, 20))
-        ));
-        // Another tile: a real switch.
-        assert!(may_switch_target(
-            Some(9001),
-            9002,
-            Some((10, 20)),
-            Some((11, 20))
-        ));
-        // The engaged monster is gone (dead or off-world): the rule releases.
-        assert!(may_switch_target(Some(9001), 9002, None, Some((10, 20))));
-        assert!(may_switch_target(None, 9002, None, Some((10, 20))));
-        assert!(may_switch_target(Some(9001), 9002, Some((10, 20)), None));
     }
 
     /// Cat's §4.3.7 WIS ranks — the caster's half of the AGI reformation.

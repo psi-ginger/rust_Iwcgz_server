@@ -406,18 +406,26 @@ async fn serve(cfg: &GameConfig) -> Result<(), AnyError> {
                         .to_vec(),
                     );
                     // Cat's Bug-5 id trace (2026-10-21), struck-player half:
-                    // the attacker's id on the frame — the fingerprint of a
-                    // stacked sibling that outlived the fight (retaliation
-                    // glues it to its victim, whose gauge was stuck full on
-                    // that build, so this log was the only record of its
-                    // swings). Frame values, as on the monster-side trace.
+                    // the attacker's id and internal tag on the frame — the
+                    // fingerprint of any stray monster that outlives a fight
+                    // (retaliation glues it to its victim, whose gauge was
+                    // stuck full on the build she tested, so this log was the
+                    // only record of its swings). Frame values, as on the
+                    // monster-side trace.
+                    let attacker_tag = {
+                        let world = monsters
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        world.log_tag(hit.attacker_unique)
+                    };
                     logln!(
-                        "game: 268: char {} struck at ({}, {}) by monster {} \
+                        "game: 268: char {} struck at ({}, {}) by monster {} {} \
                          life {life} (-{damage}) {:?}",
                         hit.char_unique,
                         hit.x,
                         hit.y,
                         hit.attacker_unique,
+                        attacker_tag,
                         hit.outcome
                     );
                     // The struck player's own HUD gauge does not read the 268:
@@ -1608,38 +1616,6 @@ async fn handle_client(
                         };
                         if me.life == 0 {
                             continue;
-                        }
-                        // Cat's bar-bounce fix (2026-10-21): a re-click on a
-                        // stacked cluster is resolved by the client to
-                        // whichever clone its hit test picked, so a second
-                        // click mid-fight can name a sibling standing on the
-                        // engaged monster's own tile. Switching would un-jim
-                        // the current monster and bar up a fresh one at full
-                        // life — the 26 → 32 → 30 → 28 overhead-bar bounce.
-                        // The fight stays on the engaged monster until it
-                        // dies or the click names one on another tile
-                        // (`combat::may_switch_target`).
-                        {
-                            let world = monsters
-                                .lock()
-                                .unwrap_or_else(std::sync::PoisonError::into_inner);
-                            let current = attack.map(|(c, _)| c);
-                            if !combat::may_switch_target(
-                                current,
-                                target_unique,
-                                current.and_then(|c| world.position(c)),
-                                world.position(target_unique),
-                            ) {
-                                let current = current.unwrap_or(target_unique);
-                                drop(world);
-                                attack = Some((current, Instant::now()));
-                                logln!(
-                                    "game: {peer}: ORDER_ATTACK -> monster {target_unique} is a \
-                                     clone on the engaged monster {current}'s tile; the fight \
-                                     stays on {current}"
-                                );
-                                continue;
-                            }
                         }
                         // A PC's swing goes to its neighbours and not to itself
                         // (`SendNeighbourExceptMeMsg`, `char-order.cpp:254`):
