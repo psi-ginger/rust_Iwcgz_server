@@ -834,6 +834,17 @@ pub(crate) async fn player_swing(
         .encode()
         .to_vec(),
     );
+    // Cat's Bug-5 id trace (2026-10-21): which entity the swing resolved,
+    // from which tile, and what life the frame carried — the line that
+    // answers "did the attacked entity id change when the bar bounced".
+    // Frame values are logged deliberately: they are what the client saw.
+    logln!(
+        "game: 268: {session_key:?}: monster {} at ({}, {}) life {life} (-{damage}) {:?}",
+        hit.unique,
+        hit.x,
+        hit.y,
+        hit.outcome
+    );
     if hit.outcome != SwingOutcome::Hit {
         // A dodge or miss owes nothing: no EXP, no death frame, no life
         // movement — the legacy's handler returns right after the flagged

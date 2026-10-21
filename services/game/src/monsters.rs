@@ -638,6 +638,24 @@ impl MonsterWorld {
                 }
             }
         }
+        // Cat's H3 (2026-10-21): the stride wraps wherever a density-amplified
+        // target outruns the kind's safe-tile list, so several instances can
+        // stand on ONE exact tile — one drawn sprite, several ids — and a
+        // re-click's hit test may resolve a sibling (the Bug-5 bar bounce).
+        // Logged at boot against the layout a playtest ran on.
+        let mut per_tile: HashMap<(i32, i32), u32> = HashMap::new();
+        for m in &self.monsters {
+            *per_tile.entry((m.x, m.y)).or_default() += 1;
+        }
+        let shared: u32 = per_tile.values().filter(|&&n| n > 1).sum();
+        let stacked_tiles = per_tile.values().filter(|&&n| n > 1).count();
+        if stacked_tiles > 0 {
+            logln!(
+                "game: monsters: {stacked_tiles} exact tile(s) carry more than one \
+                 instance ({shared} monsters) — ghost stacks; a re-click on one may \
+                 resolve a sibling id"
+            );
+        }
     }
 
     /// Places one monster into `group` at `at`, taking the next id and
@@ -1095,6 +1113,15 @@ impl MonsterWorld {
                         y,
                         GameMsg::ResponseJim as u16,
                         encode_jim(stale_unique, 0),
+                    );
+                    // Cat's Bug-5 id trace (2026-10-21): the bar only ever
+                    // jumps when this pair fires — old monster's bar down,
+                    // new monster's bar up at its (possibly fresh) life. A
+                    // bounce without this line is not a target switch.
+                    logln!(
+                        "game: 263: target switch by {attacker}: un-jim monster \
+                         {stale_unique} at ({x}, {y}), bar follows {}",
+                        monster.unique
                     );
                 }
                 // Pre-P4 a Tier-3 id above the SI16 cap has no 263 frame to
@@ -1831,6 +1858,34 @@ mod tests {
         // A monster the world does not hold yields no name at all — the
         // caller then sends the legacy's blank rather than a guess.
         assert_eq!(world.monster_display_name(0), None);
+    }
+
+    /// Cat's H3 precondition (2026-10-21): the shipped spawn's stride wraps
+    /// wherever a density-amplified target outruns the kind's safe-tile list,
+    /// so instances share EXACT coordinates — one drawn sprite, two ids. That
+    /// is the ghost stack a re-click can resolve to a sibling id (the Bug-5
+    /// bar bounce), and why the retarget rule keeps the engaged monster when
+    /// a new order names a clone on its tile. Counts are per-unit sums
+    /// (`want` vs the safe-tile list), so they hold regardless of load order.
+    #[test]
+    fn the_shipped_spawn_has_exact_coordinate_ghost_stacks() {
+        if !Path::new(DATA_ROOT).exists() {
+            return; // the game data is not part of this repository
+        }
+        let mut world = MonsterWorld::load(Path::new(DATA_ROOT)).expect("the field data loads");
+        world.spawn_all(&Registry::new());
+        let mut per_pos: std::collections::HashMap<(i32, i32), u32> =
+            std::collections::HashMap::new();
+        for m in &world.monsters {
+            *per_pos.entry((m.x, m.y)).or_default() += 1;
+        }
+        let stacked_monsters: u32 = per_pos.values().filter(|&&n| n > 1).sum();
+        let stacked_tiles = per_pos.values().filter(|&&n| n > 1).count();
+        assert_eq!(stacked_tiles, 781, "tiles carrying more than one instance");
+        assert_eq!(
+            stacked_monsters, 1_671,
+            "monsters standing on a shared tile"
+        );
     }
 
     /// The record the client is given has to survive its own round trip, or a
