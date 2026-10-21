@@ -336,15 +336,23 @@ impl Movement {
 }
 
 /// Sends one 200 `CHARUPDATE` for the given cell (`cltServer::SendCharUpdate`,
-/// `Server.cpp:1654-1689`). Life, mana and move speed come from the cached row,
-/// because stats are not modelled yet.
-/// Sends one 200 `CHARUPDATE` for the given cell.
+/// `Server.cpp:1654-1689`). Move speed comes from the cached row; **life comes from
+/// the session**, because the legacy reads `GetLife()` (`Server.cpp:1672`) and the
+/// client writes whatever it receives straight into its own avatar
+/// (`Client-Person-BigInfo.cpp:1228`, the guard commented out at `:1224-1225`).
+/// Sending the max here is Bug 2: the HUD bar snapping to full on every step and on
+/// every approach walk.
 ///
 /// `urgent=true` for teleports/long jumps (>3 tiles); `false` for normal steps.
+// Eight, not seven: it carries the socket pair *and* the session pair. Mirrors
+// `fan_char_update`, which reads the same session for the same reason.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn send_char_update(
     stream: &mut TcpStream,
     outbound: &mut Cipher,
     live: &LiveFrames<'_>,
+    registry: &Registry,
+    session_key: SessionKey,
     x: i32,
     y: i32,
     urgent: bool,
@@ -353,7 +361,13 @@ pub(crate) async fn send_char_update(
         .character
         .as_ref()
         .ok_or("char update before the character row is loaded")?;
-    let body = char_update_body(live.char_unique, character, x, y, urgent)?;
+    // The identical read `fan_char_update` makes, so the mover's own copy and the
+    // copies queued to observers stay byte-identical (one encoder, one source).
+    let life = registry
+        .info(session_key)
+        .ok_or("char update before the session is in the registry")?
+        .life;
+    let body = char_update_body(live.char_unique, character, life, x, y, urgent)?;
     send_encoded(stream, outbound, GameMsg::ResponseCharupdate, &body).await
 }
 
@@ -365,10 +379,13 @@ pub(crate) async fn send_char_update(
 /// can queue byte-identical bodies without a second encoder that could drift, and
 /// taken as a row rather than a `LiveFrames` so it is testable without a database.
 ///
+/// `life` is the **session's current total**, passed in rather than read from the
+/// row: the row only carries the max, and the legacy sends `GetLife()`
+/// (`Server.cpp:1672`). See [`send_char_update`] for why a max here is Bug 2.
+///
 /// # Errors
 ///
 /// A `char_unique` or tile that does not fit the struct's narrower fields.
-/// Builds the 200 `CHARUPDATE` body for one cell.
 ///
 /// `urgent` controls `bUrgentMode`:
 /// - `true`  -> teleports / long jumps (>3 tiles) where the client must snap and animate via `MoveTo`+`MoveInit`.
@@ -378,6 +395,7 @@ pub(crate) async fn send_char_update(
 pub(crate) fn char_update_body(
     char_unique: i32,
     character: &CharacterFull,
+    life: u32,
     x: i32,
     y: i32,
     urgent: bool,
@@ -393,8 +411,16 @@ pub(crate) fn char_update_body(
         // - `true`  -> teleport / long jump (>3 tiles): client calls `MoveTo` + `MoveInit`.
         // - `false` -> normal step: 241 ORDER_MOVE already gave destination; 200 is just confirmation.
         b_urgent_mode: urgent,
-        si_life: character.max_life,
+        // Current life, never the max — the legacy reads `GetLife()`
+        // (`Server.cpp:1672`). The client stores this unconditionally
+        // (`Client-Person-BigInfo.cpp:1228`) while the HUD divides by a max it
+        // computes itself from `clPB` (`NCharPerson.cpp:3944`), so this numerator
+        // is the only part of the bar a 200 can move.
+        si_life: life as i32,
         si_reserved_life: 0,
+        // shortcut: current MP is not modelled (the session carries life only and
+        // nothing ever decrements it), so this is always the max — upgrade when
+        // spell costs become a session value the way `life` is.
         si_mana: character.max_mana,
         si_x: i16::try_from(x).map_err(|_| format!("x {x} does not fit SI16"))?,
         si_y: i16::try_from(y).map_err(|_| format!("y {y} does not fit SI16"))?,
@@ -463,10 +489,12 @@ pub(crate) fn fan_char_update(
     y: i32,
     urgent: bool,
 ) -> Result<usize, AnyError> {
-    let body = char_update_body(char_unique, character, x, y, urgent)?;
+    // Resolved first so the body carries the mover's **current** life — the same
+    // read [`send_char_update`] makes, keeping the two writers byte-identical.
     let origin = registry
         .info(session_key)
         .ok_or("char update fan before the session is in the registry")?;
+    let body = char_update_body(char_unique, character, origin.life, x, y, urgent)?;
     Ok(registry.broadcast_near_others(
         &origin,
         session_key,
@@ -635,7 +663,7 @@ pub(crate) async fn step_movement(
         }
     }
 
-    send_char_update(stream, outbound, live, x, y, false).await?;
+    send_char_update(stream, outbound, live, registry, session_key, x, y, false).await?;
     Ok(())
 }
 
@@ -772,7 +800,17 @@ pub(crate) async fn handle_userorder(
     // both, so an observer that missed the origin tile would otherwise start its
     // walk from a stale one. Self still gets it directly, before the fan, so the
     // ordering the capture shows (241, 200, 200…) is preserved for this client.
-    send_char_update(stream, outbound, live, start.0, start.1, false).await?;
+    send_char_update(
+        stream,
+        outbound,
+        live,
+        registry,
+        session_key,
+        start.0,
+        start.1,
+        false,
+    )
+    .await?;
     fan_char_update(
         registry,
         session_key,

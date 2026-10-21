@@ -744,7 +744,16 @@ impl LiveFrames<'_> {
         }
 
         // 248: the identity-and-stats block, from `characters` + `character_stats`.
-        let basic = basic_info_for(self.account_id, &self.account_name, character)?;
+        //
+        // World entry runs straight after the login/warp full-heal, so the current
+        // total is the row's max here. `basic_info_for` still takes it explicitly —
+        // the max is a property of *this* call site, not of the builder (Bug 2).
+        let basic = basic_info_for(
+            self.account_id,
+            &self.account_name,
+            character,
+            character.max_life,
+        )?;
         // The trailing four `SI16` are the capture's set-item progress: type 20
         // step 3, both second slots zero. There is no set-item table yet.
         Ok(Some(encode_all_char_info_one(&basic, 20, 3, 0, 0)))

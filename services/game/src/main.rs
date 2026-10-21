@@ -1241,9 +1241,14 @@ async fn handle_client(
                     // Capture the full stat block for the 214 inspect: another
                     // player's pull reads it out of the registry rather than the
                     // database (`Server-Person.cpp:83`).
+                    // Selecting a fresh row, so current == max until the first hit.
                     if let Some(session) = login.as_ref()
-                        && let Ok(basic) =
-                            basic_info_for(session.account_id, &session.username, &character_id)
+                        && let Ok(basic) = basic_info_for(
+                            session.account_id,
+                            &session.username,
+                            &character_id,
+                            character_id.max_life,
+                        )
                     {
                         registry.set_basic_info(session_key, basic);
                     }

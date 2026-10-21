@@ -174,10 +174,16 @@ fn seeded_tester() -> CharacterFull {
 /// (`Client-Person-BigInfo.cpp:1187-1222`), so those are the fields under test.
 #[test]
 fn the_observer_fan_carries_the_same_cell_and_speed_as_the_movers_own_frame() {
-    let body = char_update_body(1471, &seeded_tester(), 28, 90, false).unwrap();
+    // 161, not the row's `max_life` of 173: a 200 carries the session's current
+    // total (`Server.cpp:1672`), so passing the max here would *be* Bug 2.
+    let body = char_update_body(1471, &seeded_tester(), 161, 28, 90, false).unwrap();
     let update = BasicCharUpdate::decode(&body).expect("the fan body decodes as a 200");
 
     assert_eq!(update.si_char_unique, 1471);
+    assert_eq!(
+        update.si_life, 161,
+        "current life, not the row's max_life of 173 (Bug 2)"
+    );
     assert_eq!((update.si_x, update.si_y), (28, 90));
     assert_eq!(
         update.si_move_speed, 8,
@@ -247,6 +253,10 @@ fn the_fan_reaches_a_nearby_session_and_skips_the_mover() {
     assert_eq!(frame.cmd, GameMsg::ResponseCharupdate as u16);
     let update = BasicCharUpdate::decode(&frame.payload).expect("observer body decodes");
     assert_eq!((update.si_x, update.si_y), (28, 90));
+    assert_eq!(
+        update.si_life, 161,
+        "the fan reads the session's current life, not the row's max_life of 173"
+    );
     assert!(
         rmover.try_recv().is_err(),
         "the mover writes its own copy directly; a queued one could land after a later direct one"
@@ -254,6 +264,24 @@ fn the_fan_reaches_a_nearby_session_and_skips_the_mover() {
     assert!(
         rfar.try_recv().is_err(),
         "cell (40, 26) is not in the 3x3 block around (2, 6)"
+    );
+}
+
+/// Bug 2, second sender: the 215 `clIP` carries the life it is *given*.
+/// `handle_use_bonus` passes the session's current total; a builder that fell
+/// back to the row's max would snap a hurt character's bar to full on a stat
+/// spend — no movement, no kill, no healing.
+#[test]
+fn the_basic_info_block_carries_the_life_it_is_given_not_the_rows_max() {
+    let row = seeded_tester();
+    assert_eq!(row.max_life, 173, "the row's max, purely for contrast");
+
+    let block = basic_info_for(1, "Tester", &row, 21).expect("map 158 fits the SI16 index");
+
+    assert_eq!(block.life, 21, "the current total, not 173");
+    assert_eq!(
+        block.mana, row.max_mana,
+        "MP is still unmodelled, so it stays the max"
     );
 }
 

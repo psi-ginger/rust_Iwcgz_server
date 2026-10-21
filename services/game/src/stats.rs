@@ -372,7 +372,13 @@ pub(crate) async fn handle_use_bonus(
             .character
             .as_ref()
             .ok_or("usebonus row disappeared after the write")?;
-        let basic = basic_info_for(live.account_id, &live.account_name, character)?;
+        // The session's current total, not the row's max: a spend does not heal,
+        // and reporting the max is Bug 2's second sender — the bar snapping to
+        // full with no movement and no kill.
+        let life = registry
+            .info(session_key)
+            .map_or(character.max_life, |s| s.life as i32);
+        let basic = basic_info_for(live.account_id, &live.account_name, character, life)?;
         // Re-capture the block the 214 inspect reads, so the next pull of this
         // character's stats is not stale.
         registry.set_basic_info(session_key, basic.clone());
@@ -405,6 +411,11 @@ pub(crate) async fn handle_use_bonus(
 /// [`LiveFrames::regenerate`] emits 248 from it and `handle_use_bonus` emits the
 /// 215 `clIP` from it, so the two frames can never disagree about a stat.
 ///
+/// `life` is the caller's **current** total, passed in because the row carries only
+/// the max and the client overwrites its whole `clIP` from this frame
+/// (`Client-Person-BigInfo.cpp:236-243`). A max here reports a hurt character as
+/// full — Bug 2's second sender.
+///
 /// # Errors
 ///
 /// A map id that does not fit the `SI16 clPos.siMapIndex`.
@@ -412,6 +423,7 @@ pub(crate) fn basic_info_for(
     account_id: i32,
     account_name: &str,
     character: &CharacterFull,
+    life: i32,
 ) -> Result<BasicInfo, AnyError> {
     let map_index = i16::try_from(client_map_index(character.map_id)).map_err(|_| {
         format!(
@@ -440,7 +452,8 @@ pub(crate) fn basic_info_for(
         wis: character.wis,
         level: character.level,
         bonus: character.bonus_points,
-        life: character.max_life,
+        life,
+        // shortcut: no current MP is modelled, so this is always the max.
         mana: character.max_mana,
         exp: character.exp,
         money: character.money,

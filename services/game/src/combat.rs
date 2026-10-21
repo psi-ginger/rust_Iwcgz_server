@@ -914,7 +914,13 @@ pub(crate) async fn player_swing(
                     .character
                     .as_ref()
                     .ok_or("level-up row disappeared after the write")?;
-                let basic = basic_info_for(live.account_id, &live.account_name, character)?;
+                // The full-heal above restored the session to this same total, so
+                // reading it back is the only way the 215 can never claim more life
+                // than the session actually holds (Bug 2).
+                let life = registry
+                    .info(session_key)
+                    .map_or(row.max_life as i32, |s| s.life as i32);
+                let basic = basic_info_for(live.account_id, &live.account_name, character, life)?;
                 // Re-capture the block the 214 inspect reads.
                 registry.set_basic_info(session_key, basic.clone());
                 encode_person_ip(me.char_unique.si16(), &basic)
