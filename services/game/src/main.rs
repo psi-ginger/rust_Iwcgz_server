@@ -405,6 +405,21 @@ async fn serve(cfg: &GameConfig) -> Result<(), AnyError> {
                         .encode()
                         .to_vec(),
                     );
+                    // Cat's Bug-5 id trace (2026-10-21), struck-player half:
+                    // the attacker's id on the frame — the fingerprint of a
+                    // stacked sibling that outlived the fight (retaliation
+                    // glues it to its victim, whose gauge was stuck full on
+                    // that build, so this log was the only record of its
+                    // swings). Frame values, as on the monster-side trace.
+                    logln!(
+                        "game: 268: char {} struck at ({}, {}) by monster {} \
+                         life {life} (-{damage}) {:?}",
+                        hit.char_unique,
+                        hit.x,
+                        hit.y,
+                        hit.attacker_unique,
+                        hit.outcome
+                    );
                     // The struck player's own HUD gauge does not read the 268:
                     // it reads `clIP.Life`, which the client refreshes from a
                     // `RESPONSE_PERSON_IP` (215) push — the legacy's
