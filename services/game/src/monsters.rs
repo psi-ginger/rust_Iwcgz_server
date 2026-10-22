@@ -181,8 +181,9 @@ struct FieldGroup {
 struct Monster {
     /// `uiMakeCharUnique` — a [`ids::StandardMonsterId`] in H3's band (never a
     /// static NPC's id, never a session's), or a [`MonsterEntityId::Tier3`]
-    /// once P3 opens the extended band. The type is what keeps that claim
-    /// checkable at every call site (design doc §5.0).
+    /// once the client rebuild opens the extended band (D9: one-shot `u32`).
+    /// The type is what keeps that claim checkable at every call site
+    /// (design doc §5.0).
     unique: MonsterEntityId,
     wire_kind: u16,
     /// Cat's internal log tag (2026-10-21): this kind's nth instance minted
@@ -777,7 +778,8 @@ impl MonsterWorld {
     /// Which pool an id comes from is [`ids::spawn_tier`]'s answer (design doc
     /// §3.3): today every group is a field group and `tier3_level_floor` is
     /// `None`, so every spawn is Tier 1 — the structure is in place and the
-    /// switch stays off until the P3 client rebuild (§4). Exhaustion mirrors
+    /// switch stays off until the client rebuild (§4; D9 makes that a one-shot
+    /// `u32` widening, not a staged "P3"). Exhaustion mirrors
     /// the legacy's `FindEmptyCharUnique` returning 0: the spawn is refused
     /// and logged, never a panic (A8).
     fn spawn_one(
@@ -789,8 +791,8 @@ impl MonsterWorld {
     ) -> bool {
         let u = &self.groups[group].units[unit];
         // Every group this loader produces is a field group (map 0); a dungeon
-        // map's groups prefer Tier 2 when multi-map loading arrives — P1 ships
-        // the routing rule, not a dungeon to apply it to (§3.3).
+        // map's groups prefer Tier 2 when multi-map loading arrives — the
+        // routing rule ships now, with no dungeon yet to apply it to (§3.3).
         let context = if self.groups[group].anchor.map_index == FIELD_MAP {
             SpawnContext::WorldMap
         } else {
@@ -801,7 +803,7 @@ impl MonsterWorld {
             SpawnTier::Tier1 => self.ids.alloc_tier1().map(MonsterEntityId::Standard),
             SpawnTier::Tier2 => self.ids.alloc_tier2().map(MonsterEntityId::Standard),
             // Tier 3 exhausted falls back to the context's standard tier
-            // rather than refusing outright (§3.3); unreachable while the P1
+            // rather than refusing outright (§3.3); unreachable while the
             // floor is `None`.
             SpawnTier::Tier3 => self
                 .ids
@@ -1255,9 +1257,10 @@ impl MonsterWorld {
                         monster.tag()
                     );
                 }
-                // Pre-P4 a Tier-3 id above the SI16 cap has no 263 frame to
-                // carry (§4); no pool mints one until P3, so this is the
-                // frame-skip rule rather than a live path.
+                // A Tier-3 id above the SI16 cap has no 263 frame to carry
+                // (§4); no pool mints one while the floor is `None`, so this
+                // is the frame-skip rule rather than a live path. D9 lifts
+                // the cap in one pass (one-shot `u32`), not via a UI16 stage.
                 if let Some(jimed_unique) = monster.unique.si16() {
                     registry.broadcast_near_point(
                         FIELD_MAP,
@@ -1814,9 +1817,9 @@ fn broadcast_spawn(registry: &Registry, map_id: i32, monster: &Monster) {
 /// Queues one monster's per-tile position to every session near the new cell —
 /// the 200 half of a walk. Life is the resulting total, as in every other 200.
 fn broadcast_char_update(registry: &Registry, map_id: i32, monster: &Monster) {
-    // Pre-P4, a Tier-3 id above the SI16 wire cap has no 200 frame to carry
-    // it (§4); no pool mints one until P3, so this is the frame-skip rule
-    // rather than a live path.
+    // A Tier-3 id above the SI16 wire cap has no 200 frame to carry it (§4);
+    // no pool mints one while the floor is `None`, so this is the frame-skip
+    // rule rather than a live path. D9 lifts the cap in one pass.
     let Some(si_unique) = monster.unique.si16() else {
         return;
     };

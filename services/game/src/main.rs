@@ -1728,7 +1728,12 @@ async fn handle_client(
                     let request = RequestHit::decode(payload.as_ref())?;
                     // The target is named by its `CR` id, which for a field
                     // monster *is* its char unique (`NPC.cpp:972`). Anything
-                    // outside that block is a player, and PVP is out of scope.
+                    // outside that block is a player, which is not a monster in
+                    // `MonsterWorld`, so `player_swing` resolves it to
+                    // `Swing::NoTarget` and nothing happens. PVP is planned
+                    // rather than out of scope: `docs/rust-rewrite/ROADMAP.md`
+                    // D10 calls for a flat token payout by placement (1st 10 /
+                    // 2nd 5 / 3rd 3) with no bonus curves.
                     let Ok(target_unique) = u16::try_from(request.cl_attack_target.si_attack_id)
                     else {
                         continue;

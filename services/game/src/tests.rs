@@ -866,9 +866,10 @@ fn allocating_vit_recomputes_max_life_from_the_formula() {
 
 #[test]
 fn allocate_rejects_zero_and_negative_amounts() {
-    // `siAmount <= 0` is refused outright: the reset path (item 24035, the
-    // `IDC_BUTTON_*2` space) is deferred, and zero is a no-op that must not
-    // cheerfully "succeed".
+    // `siAmount <= 0` is refused outright: item 24035's reset path is cut
+    // permanently (ROADMAP.md D3 — resets are the native Level 10 / Level 30
+    // milestones only), and zero is a no-op that must not cheerfully
+    // "succeed".
     assert!(allocate_stat(&seeded_tester(), &UseBonus { pos: 0, amount: 0 }).is_err());
     assert!(allocate_stat(&seeded_tester(), &UseBonus { pos: 0, amount: -1 }).is_err());
     // The reset pos space never reaches the amount rule benefit-of-the-doubt.

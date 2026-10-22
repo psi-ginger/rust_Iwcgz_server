@@ -1,6 +1,15 @@
 //! Typed id domains and the pools that mint them — Phase P1 of
 //! `docs/DESIGN_THREE_TIER_ID_ARCHITECTURE.md` §3.
 //!
+//! > **`P1`…`P4` are not a schedule — see D9.**
+//! > The design doc planned a *progressive* widening: P2 raises [`T2_TOP`], P3
+//! > opens Tier 3 behind a level floor, P4 widens the SI16 frame fields to UI16.
+//! > **`docs/rust-rewrite/ROADMAP.md` §D9 supersedes that plan**: when the
+//! > client/wire expansion actually happens it is **one-shot to `u32`, in a
+//! > single pass** — no intermediate constant rewrite, no staged gates. Every
+//! > `P1`…`P4` mentioned below is only the *name of a switch or refusal that
+//! > exists today*; it must not be read as work to schedule or execute.
+//!
 //! Three domains with no conversion between them, so cross-band assignment is a
 //! compile error rather than a runtime surprise (§5.0, Cat spec 3):
 //!
@@ -12,9 +21,10 @@
 //!   the §3.5 mutual borrow (T1 ↔ T2) inside the band.
 //! - [`Tier3MonsterId`] — the extended endgame band `30_000..=59_999` in an
 //!   isolated [`WindowPool`] nothing else can reach. Its *issuance* stays off
-//!   until the P3 client rebuild (Gate 0: the shipped client's tables stop at
-//!   `MAX_CHAR_NUMBER = 20_000`, design doc §2.3) — `tier3_level_floor` is
-//!   `None` — but the pool exists so its shape is testable today (T9/T11).
+//!   until the client rebuild opens it (Gate 0: the shipped client's tables
+//!   stop at `MAX_CHAR_NUMBER = 20_000`, design doc §2.3; that widening is
+//!   D9's one-shot `u32` change) — `tier3_level_floor` is `None` — but the
+//!   pool exists so its shape is testable today (T9/T11).
 //!
 //! [`MonsterEntityId`] is the storage enum both monster types funnel through,
 //! so one `Vec<Monster>` holds either without a bare int at a call site (§5.0).
@@ -49,21 +59,26 @@ pub(crate) const T2_FLOOR: u16 = T1_TOP + 1;
 
 /// Top of Tier 2 — today's true live wall: Gate 0 measured the shipped client's
 /// `MAX_CHAR_NUMBER = 20_000` (design doc §2.3), so no id ≥ this is visible to
-/// a stock client. P2 rewrites exactly this one constant to `29_999`, after the
-/// client rebuild `MAX_CHAR_NUMBER ≥ 30_000` (§4).
+/// a stock client. The design doc's "raise this to `29_999` after the rebuild"
+/// is **not** a scheduled stage any more: D9 collapses the staged plan into one
+/// change (`docs/rust-rewrite/ROADMAP.md`), which this constant follows rather
+/// than leads (§4).
 pub(crate) const T2_TOP: u16 = CLIENT_TABLE_TOP - 1;
 
 /// Tier 3's floor — the legacy partition's extended band
-/// (`Char-Server.h:1006-1037`), client-gated until P3 (§6).
+/// (`Char-Server.h:1006-1037`), client-gated (§6) until the rebuild D9
+/// specifies as a one-shot `u32` widening.
 pub(crate) const T3_FLOOR: u16 = 30_000;
 
-/// Tier 3's top: `2 × MAX_CHAR_NUMBER − 1`, the second client table the P3
+/// Tier 3's top: `2 × MAX_CHAR_NUMBER − 1`, the second client table the
 /// rebuild widens to (§2.4).
 pub(crate) const T3_TOP: u16 = 59_999;
 
 /// Largest id an SI16 frame field can carry (`siCharUnique` and friends). A
-/// Tier-3 id above this has no interactive frame until P4 widens SI16 → UI16
-/// (§4); [`Tier3MonsterId::try_si16`] is where that refusal lives.
+/// Tier-3 id above this has no interactive frame. Lifting it is D9's single
+/// one-shot move to `u32` when the wire changes — explicitly **not** an
+/// intermediate `SI16 → UI16` stage (§4); [`Tier3MonsterId::try_si16`] is
+/// where that refusal lives.
 pub(crate) const WIRE_SI16_TOP: u16 = 32_767;
 
 /// Why an id was refused. Displayed in the log lines that accompany the `None`
@@ -139,8 +154,8 @@ pub(crate) enum Tier {
 pub struct StandardMonsterId(NonZeroU16);
 
 impl StandardMonsterId {
-    /// The wire value, lossless at any `T2_TOP` the design allows (`29_999 <
-    /// 32_767` at the P2 top, `19_999` today).
+    /// The wire value, lossless at any `T2_TOP` the design allows (`19_999`
+    /// today, `29_999` if the wall is ever raised — either way `< 32_767`).
     #[must_use]
     pub(crate) fn si16(self) -> i16 {
         self.0.get() as i16
@@ -198,9 +213,10 @@ impl Tier3MonsterId {
     }
 
     /// The SI16 frame conversion, refusing ids above [`WIRE_SI16_TOP`] — the
-    /// P4 gate in one method (design doc §5.0, invariant 7). Pre-P4 no pool
-    /// mints an id above the cap, so `Some` is the only result until the
-    /// widening lands.
+    /// wire gate in one method (design doc §5.0, invariant 7). No pool mints
+    /// an id above the cap, so `Some` is the only result today; D9 makes
+    /// lifting it a single one-shot `u32` widening rather than a `UI16` stage
+    /// (`docs/rust-rewrite/ROADMAP.md`).
     #[must_use]
     pub(crate) fn try_si16(self) -> Option<i16> {
         if self.u16() <= WIRE_SI16_TOP {
@@ -253,10 +269,10 @@ impl MonsterEntityId {
     }
 
     /// The SI16 frame conversion: infallible for standard ids, and for Tier 3
-    /// refused above [`WIRE_SI16_TOP`] until P4 (see
-    /// [`Tier3MonsterId::try_si16`]). Encode sites that need an SI16 frame
-    /// skip it on `None` — a frame that cannot name its subject must not be
-    /// invented (design doc §4).
+    /// refused above [`WIRE_SI16_TOP`] (see [`Tier3MonsterId::try_si16`]; D9
+    /// is what would lift it, in one pass). Encode sites that need an SI16
+    /// frame skip it on `None` — a frame that cannot name its subject must not
+    /// be invented (design doc §4).
     #[must_use]
     pub(crate) fn si16(self) -> Option<i16> {
         match self {
@@ -368,10 +384,12 @@ impl DualTierPool {
 pub(crate) struct IdAllocator {
     standard: Mutex<DualTierPool>,
     tier3: Mutex<WindowPool>,
-    /// P3's switch: `None` (P1's default) keeps every spawn on the standard
-    /// pools regardless of level; `Some(floor)` routes `level ≥ floor` to
-    /// Tier 3 first via [`spawn_tier`]. No setter until P3 — the rebuild gate
-    /// is the client's, not this field's (§4).
+    /// The Tier-3 level floor: `None` (the shipped default) keeps every spawn
+    /// on the standard pools regardless of level; `Some(floor)` routes
+    /// `level ≥ floor` to Tier 3 first via [`spawn_tier`]. There is no setter —
+    /// the gate is the client rebuild, and D9 fixes *how* that rebuild widens
+    /// the wire (one-shot `u32`), so this never opens as a staged "P3" step
+    /// (§4, `docs/rust-rewrite/ROADMAP.md`).
     tier3_level_floor: Option<u16>,
 }
 
@@ -393,7 +411,8 @@ impl IdAllocator {
         Self::default()
     }
 
-    /// P3's level floor, `None` until the client rebuild lands (§6).
+    /// The Tier-3 level floor, `None` until the client rebuild lands (§6;
+    /// D9 specifies that rebuild's wire change as one-shot `u32`).
     #[must_use]
     pub(crate) fn tier3_level_floor(&self) -> Option<u16> {
         self.tier3_level_floor
@@ -421,8 +440,8 @@ impl IdAllocator {
     }
 
     /// A Tier-3 id from the isolated pool. Never borrows (Tier 3 has no
-    /// sibling, §3.5); returns `None` while the pool is un-issued (P1/P2) or
-    /// spent.
+    /// sibling, §3.5); returns `None` while the pool is un-issued (it is
+    /// today, the floor being `None`) or spent.
     pub(crate) fn alloc_tier3(&self) -> Option<Tier3MonsterId> {
         self.tier3
             .lock()
@@ -510,7 +529,7 @@ pub(crate) enum SpawnTier {
 }
 
 /// Tier assignment, the pure function T12 pins: a level at or above
-/// `tier3_level_floor` goes Tier 3 when the P3 switch is on, otherwise the
+/// `tier3_level_floor` goes Tier 3 when the floor is set, otherwise the
 /// context decides — field spawns Tier 1, dungeon spawns Tier 2 (§3.3). The
 /// exhaustion fallback (Tier 3 spent → the context's standard tier) lives at
 /// the call site in `MonsterWorld::spawn_one`, where the pools are.
@@ -666,7 +685,8 @@ mod tests {
         assert!(Tier3MonsterId::try_from_u16(T3_TOP + 1).is_err());
 
         // The SI16 gate (invariant 7): at or below the wire cap is fine, one
-        // above it refuses until P4's frame widening.
+        // above it refuses — D9 replaces the planned "P4 stage" with a single
+        // one-shot `u32` widening, so this refusal is lifted in one pass.
         let at_cap = Tier3MonsterId::try_from_u16(WIRE_SI16_TOP).expect("in band");
         assert_eq!(at_cap.try_si16(), Some(WIRE_SI16_TOP as i16));
         let over_cap = Tier3MonsterId::try_from_u16(WIRE_SI16_TOP + 1).expect("in band");
@@ -675,7 +695,7 @@ mod tests {
         assert_eq!(
             MonsterEntityId::Tier3(over_cap).si16(),
             None,
-            "the storage enum carries the P4 refusal"
+            "the storage enum carries the wire-cap refusal"
         );
         assert_eq!(
             MonsterEntityId::Tier3(at_cap).si16(),
@@ -683,12 +703,12 @@ mod tests {
         );
     }
 
-    /// T12 — tier assignment (design doc §3.3): the P3 floor wins when it is
-    /// on, the context decides while it is off, and the P1 default keeps the
-    /// floor off.
+    /// T12 — tier assignment (design doc §3.3): the floor wins when it is
+    /// set, the context decides while it is off, and the shipped default
+    /// keeps the floor off.
     #[test]
     fn t12_spawn_tier_follows_the_floor_then_the_context() {
-        // P1 default: the floor is off, so every context stays standard.
+        // Shipped default: the floor is off, so every context stays standard.
         assert_eq!(
             spawn_tier(9_999, SpawnContext::WorldMap, None),
             SpawnTier::Tier1
@@ -697,7 +717,7 @@ mod tests {
             spawn_tier(9_999, SpawnContext::Dungeon, None),
             SpawnTier::Tier2
         );
-        // P3 with a floor: level >= floor goes Tier 3, from either context.
+        // With a floor set: level >= floor goes Tier 3, from either context.
         assert_eq!(
             spawn_tier(100, SpawnContext::WorldMap, Some(100)),
             SpawnTier::Tier3
@@ -715,7 +735,7 @@ mod tests {
             spawn_tier(99, SpawnContext::Dungeon, Some(100)),
             SpawnTier::Tier2
         );
-        // The allocator's own default matches the P1 switch position.
+        // The allocator's own default matches the shipped switch position.
         assert_eq!(IdAllocator::new().tier3_level_floor(), None);
     }
 }

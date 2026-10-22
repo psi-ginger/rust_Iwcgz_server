@@ -194,9 +194,13 @@ pub(crate) fn allocate_stat(
     let pos = request.pos;
     let amount = request.amount;
 
-    // The reset path (`siAmount < 0`, `IDC_BUTTON_*2` = 1115..1120 with no WIS2
-    // button) consumes item 24035 and is deferred; a zero or negative amount is
-    // refused, never misinterpreted as an allocation. See the T-018 card.
+    // Reset path (`siAmount < 0`, `IDC_BUTTON_*2` = 1115..1120 with no WIS2
+    // button). Per `docs/rust-rewrite/ROADMAP.md` D3 this is **cut, not
+    // deferred**: item 24035 is dropped entirely — no cash- or item-based
+    // reset exists — and a reset may only come from the native free milestones
+    // at Level 10 and Level 30, which is a different path, not this allocate
+    // request. A zero or negative amount is therefore always refused here,
+    // never misinterpreted as an allocation. (Was "deferred, see T-018".)
     if amount <= 0 {
         return Err(format!(
             "siAmount {amount} is not a positive allocation (the reset path is not wired)"

@@ -25,6 +25,20 @@ buffering between Tier 1 ↔ Tier 2 only.**
 
 ---
 
+> ### ⚠ SUPERSEDED IN PART — D9 (2026-10-22): the P2 → P3 → P4 *stepping plan* is cancelled
+>
+> The band structure, tiers, pools and Gate 0 walls described here **all still stand and are
+> implemented**. What is withdrawn is the *staged schedule* for widening the id space: "P2
+> raises `T2_TOP` to `29_999`", "P3 opens Tier 3 behind `tier3_level_floor`", and "P4 widens
+> the SI16 frame fields to UI16" were three gated steps over a single boundary problem.
+>
+> **`docs/rust-rewrite/ROADMAP.md` §D9 is authoritative:** when the client/wire expansion
+> takes place it is **one-shot to `u32`, in a single pass** — no intermediate constant
+> rewrite, no staged gates. Read every `P1`…`P4` below as a *name for the state that already
+> shipped or the switch that already exists*, never as a task to schedule.
+
+---
+
 ## 0. Change log vs. the two-tier draft
 
 | Item | Two-tier draft | **Final (this doc)** |
