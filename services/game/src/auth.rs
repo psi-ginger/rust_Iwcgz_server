@@ -8,7 +8,7 @@ use gz_db::{
     PgCharacterRepository, RepositoryError, password,
 };
 use gz_proto::game::{
-    CharListEntry, CharUnique, GameLogin, MakeCharInfo, client_map_index, decode_make_new_char,
+    CharListEntry, GameLogin, MakeCharInfo, client_map_index, decode_make_new_char,
     encode_del_result,
 };
 use gz_proto::notice::encode_another_auth;
@@ -271,10 +271,9 @@ pub(crate) async fn handle_select_char(
     characters: &PgCharacterRepository,
     cfg: &GameConfig,
     session: &GameSession,
-    key1: u8,
-    key2: u8,
+    char_unique: i32,
     slot: i32,
-) -> Result<(CharacterFull, i32), AnyError> {
+) -> Result<CharacterFull, AnyError> {
     if !(0..i32::from(CHAR_SLOTS)).contains(&slot) {
         return Err(format!("selectchar slot {slot} out of range 0..{CHAR_SLOTS}").into());
     }
@@ -285,33 +284,19 @@ pub(crate) async fn handle_select_char(
         .ok_or_else(|| format!("no character in account {} slot {slot}", session.account_id))?;
 
     // The character's durable wire identity. Allocated lazily on first world entry
-    // (`resolve_game_unique`); under the D1 collapse this becomes the session's
-    // `char_unique` too, so per-character frames carry an id the client already
-    // holds. We re-send `RESPONSE_CLIENTCHARUNIQUE` here with the durable id so
-    // the client's `MyCharUnique` follows, while the cipher key stays the same.
+    // (`resolve_game_unique`); stored internally for downstream per-character
+    // frames and DB sync. It is **not** sent on the wire: the client's
+    // `MyCharUnique` is the handshake's ephemeral id, and
+    // `RESPONSE_CLIENTCHARUNIQUE` (opcode 244) is handshake-only — re-sending it
+    // mid-session corrupts the stream cipher. Per-character frames therefore
+    // carry the session's `char_unique`, which the client already holds.
     let game_unique = characters
         .resolve_game_unique(character.character_id)
         .await?;
     logln!(
-        "game: selectchar {:?}: durable game_unique {game_unique}",
+        "game: selectchar {:?}: durable game_unique {game_unique} (session char_unique {char_unique})",
         character.name
     );
-
-    // Re-bind the client's `MyCharUnique` to the durable id. The cipher key is
-    // re-sent unchanged, so encryption is unaffected; only the id updates.
-    send_encoded(
-        stream,
-        outbound,
-        GameMsg::ResponseClientcharunique,
-        &CharUnique {
-            char_unique: game_unique,
-            key1,
-            key2,
-            version: cfg.client_compat_version,
-        }
-        .encode(),
-    )
-    .await?;
 
     // SERVERINFO sets `bReceiveServerInfoSwitch`, which `SetCharReservedChar`
     // checks before it will create any avatar. It must precede RESPONSE_LOGIN.
@@ -324,8 +309,9 @@ pub(crate) async fn handle_select_char(
     .await?;
 
     let make_char = MakeCharInfo {
-        // Now equals the client's (just-updated) `MyCharUnique`.
-        make_char_unique: u16::try_from(game_unique).unwrap_or(0),
+        // Must equal the `char_unique` from opcode 1 or the client ignores the
+        // record (`SetCharReservedChar` compares `MyCharUnique`).
+        make_char_unique: u16::try_from(char_unique).unwrap_or(0),
         make_char_kind: u16::try_from(character.class_kind.max(0)).unwrap_or(0),
         level: u8::try_from(character.level.clamp(0, 255)).unwrap_or(1),
         life: u32::try_from(character.max_life.max(0)).unwrap_or(0),
@@ -358,7 +344,7 @@ pub(crate) async fn handle_select_char(
         character.pos_x,
         character.pos_y
     );
-    Ok((character, game_unique))
+    Ok(character)
 }
 
 /// Applies `GAMEMSG_REQUEST_MAKENEWCHAR` (7): persist a new character and
@@ -404,6 +390,13 @@ pub(crate) async fn handle_make_new_char(
         &entry.encode(),
     )
     .await?;
+    // The client's `RESPONSE_MAKENEWCHAR` handler only calls `PutCharList`
+    // (adds the record) and never re-renders the slot list, so the newly
+    // created character does not appear until a re-login. `RESPONSE_CHARLIST`
+    // (opcode 3) calls `PutCharList` *and* `SetSelectChar(CurrentCharInfoList)`,
+    // which is what actually refreshes the slot UI. `PutCharList` is indexed by
+    // slot, so sending both is idempotent.
+    send_encoded(stream, outbound, GameMsg::ResponseCharlist, &entry.encode()).await?;
     logln!("game: created char {name:?} id={character_id} slot={slot} for account {account_id}");
     Ok(())
 }
