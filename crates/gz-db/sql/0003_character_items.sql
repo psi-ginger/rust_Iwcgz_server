@@ -26,17 +26,19 @@ CREATE UNIQUE INDEX IF NOT EXISTS characters_game_unique_key
 
 -- Allocation source for `game_unique`. The lower bound is 1000 so it cannot
 -- collide with the low hand-pinned ids the legacy world handed out (the dev
--- character is pinned to 1471); the upper bound matches the CHECK above. No
--- CYCLE: exhausting the range should fail loudly rather than hand out a live id.
+-- D1 collapse: `game_unique` is now the character's wire identity (the session's
+-- `char_unique`), so it must live in the player band rather than 1000..=19999.
+-- Range follows the interim player band (1..=8499); widen to 1..=20000 when the
+-- horizon band lands (D9 one-shot u32).
 CREATE SEQUENCE IF NOT EXISTS character_game_unique_seq
-  START WITH 1000 MINVALUE 1000 MAXVALUE 19999;
+  START WITH 1 MINVALUE 1 MAXVALUE 8499;
 
 -- Start above whatever is already pinned. `is_called = false` means the next
 -- `nextval` returns exactly this value. The floor is the sequence's MINVALUE, so
--- a fresh database hands out 1000 rather than tripping the bound.
+-- a fresh database hands out 1 rather than tripping the bound.
 SELECT setval(
   'character_game_unique_seq',
-  GREATEST(1000, COALESCE((SELECT MAX(game_unique) FROM characters), 0) + 1),
+  GREATEST(1, COALESCE((SELECT MAX(game_unique) FROM characters), 0) + 1),
   false
 );
 
