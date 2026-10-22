@@ -683,7 +683,7 @@ async fn handle_client(
     // session, the way `m_uiCharID` is a connection-scoped number in the legacy.
     // `characters.game_unique` holds the durable per-character id and
     // `handle_select_char` cross-checks the two.
-    let mut char_unique = cfg.char_unique(allocate_char_unique()) as i32;
+    let char_unique = cfg.char_unique(allocate_char_unique()) as i32;
     send_encoded(
         &mut stream,
         &mut outbound,
@@ -996,6 +996,28 @@ async fn handle_client(
                                                  tile; attack order stopped"
                                             );
                                             unreachable = true;
+                                            // Option B (stop-in-place sync): there is no
+                                            // dedicated ORDER_STOP opcode, and the legacy's
+                                            // OrderStop(BY_COMPUTER) is server-side only, so
+                                            // the client keeps its own attack order alive and
+                                            // swings for 0 damage. Nudge the client with a
+                                            // ResponsePersonIp (215) carrying the player's
+                                            // current life so its HUD/state resyncs; a true
+                                            // stop frame would need REA work on the client.
+                                            if let (Some(info), Some(basic)) = (
+                                                registry.info(session_key),
+                                                registry.basic_info(session_key),
+                                            ) {
+                                                let body = encode_person_ip(
+                                                    info.char_unique.si16(),
+                                                    &basic,
+                                                );
+                                                registry.send_to(
+                                                    session_key,
+                                                    GameMsg::ResponsePersonIp as u16,
+                                                    body,
+                                                );
+                                            }
                                         }
                                     }
                                 }
@@ -1161,7 +1183,7 @@ async fn handle_client(
                     }
                     movement = None;
 
-                    let (character_id, game_unique) = {
+                    let character_id = {
                         let session = login
                             .as_ref()
                             .ok_or("selectchar before a successful game login")?;
@@ -1171,17 +1193,11 @@ async fn handle_client(
                             &characters,
                             cfg,
                             session,
-                            key1,
-                            key2,
+                            char_unique,
                             slot,
                         )
                         .await?
                     };
-                    // D1 collapse: the session's wire id follows the durable
-                    // `game_unique` now that the client's MyCharUnique was
-                    // re-bound above. Keep `char_unique` in sync so downstream
-                    // frames carry the unified id.
-                    char_unique = game_unique;
                     if let Some(session) = login.as_mut() {
                         session.character_id = Some(character_id.character_id);
                     }
@@ -1190,7 +1206,6 @@ async fn handle_client(
                         live.account_name = session.username.clone();
                     }
                     live.character = Some(character_id.clone());
-                    live.char_unique = game_unique;
                     // Enter the character into the shared table. From here on
                     // this player is visible to the chat family, and a second
                     // REQUEST_SELECTCHAR re-enters the same key with a fresh
