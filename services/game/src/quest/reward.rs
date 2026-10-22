@@ -123,6 +123,13 @@ impl RewardStorage for QuestRewardStore<'_> {
     ) -> Result<Option<CharacterItem>, RepositoryError> {
         // `store_item` reports the row — the quest counts on the item having
         // landed, not on how much of it did.
+        //
+        // Placement goes through `items.grant` (-> `grant_slot`), which scans
+        // `new_slot_range()` = `INV0..=INV_END` = `15..=34` for the first free
+        // slot and merges pileable stacks in ascending slot order. There is no
+        // hardcoded slot here: an empty inventory's first reward lands at slot 15
+        // (top-left), matching the universal inventory rule. See
+        // `gz-db`'s `a_grant_lands_in_the_top_left_slot_of_an_empty_bag`.
         Ok(self
             .items
             .grant(character_id, item_unique, count)
