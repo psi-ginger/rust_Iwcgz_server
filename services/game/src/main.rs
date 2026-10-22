@@ -212,34 +212,6 @@ const GROUND_SWEEP_EVERY_MS: u64 = 60_000;
 const KEEPALIVE_IDLE: std::time::Duration = std::time::Duration::from_secs(60);
 const KEEPALIVE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
 
-/// Hands out per-session character ids in `1..=PLAYER_CHAR_UNIQUE_TOP`.
-///
-/// The legacy's equivalent is `m_uiCharID`, a UI16 the session manager assigns
-/// when it binds a session (`CharServer-Session.cpp:58` passes it straight into
-/// `MakeSimpleChar`) — a connection-scoped number, not a database column. Only
-/// [`GameConfig::char_unique`] is the only source; it always returns the allocation.
-///
-/// The band is audit H3's: the client indexes its `CharUniqueInfo` table
-/// (`uiMakeCharUnique`, `SetCharReservedChar`) by this id, and from
-/// [`PLAYER_CHAR_UNIQUE_TOP`] + 1 upward the ids belong to the monster
-/// allocator — so the wrap has to stay inside the player band.
-static NEXT_CHAR_UNIQUE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
-
-/// Next session character id, wrapping inside the player band.
-///
-/// 0 can never come out: the legacy never hands out a zeroed id, and 0 collides
-/// with the "empty" pattern every zeroed capture frame carries.
-fn allocate_char_unique() -> u32 {
-    band_char_unique(NEXT_CHAR_UNIQUE.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
-}
-
-/// The one step every allocation goes through: a raw counter value to a legal
-/// player id. Pure, so the wrap can be tested across every counter phase
-/// without racing the live counter another test is allocating from.
-fn band_char_unique(raw: u32) -> u32 {
-    raw % (PLAYER_CHAR_UNIQUE_TOP as u32) + 1
-}
-
 /// A millisecond reading for [`gz_net::session::Session`], standing in for
 /// `GetTickCount()`.
 ///
@@ -683,7 +655,13 @@ async fn handle_client(
     // session, the way `m_uiCharID` is a connection-scoped number in the legacy.
     // `characters.game_unique` holds the durable per-character id and
     // `handle_select_char` cross-checks the two.
-    let char_unique = cfg.char_unique(allocate_char_unique()) as i32;
+    // D1 collapse: the session's `char_unique` is no longer an ephemeral
+    // per-connection id. It is resolved at select-char time from the
+    // character's durable `game_unique` (see `handle_select_char`), so every
+    // per-character frame carries an id the client already holds. Kept as a
+    // mutable slot here because `LiveFrames` and the registry are seeded before
+    // the character is known.
+    let mut char_unique: i32 = 0;
     send_encoded(
         &mut stream,
         &mut outbound,
@@ -697,7 +675,7 @@ async fn handle_client(
         .encode(),
     )
     .await?;
-    logln!("game: {peer}: charunique={char_unique} -> ({key1:#04x}, {key2:#04x})");
+    logln!("game: {peer}: link established -> ({key1:#04x}, {key2:#04x})");
 
     // Inbound frames use the negotiated session cipher, keyed by the bytes just
     // sent -- the exact pairing at char.cpp:5177-5219.
@@ -1161,7 +1139,7 @@ async fn handle_client(
                     }
                     movement = None;
 
-                    let character_id = {
+                    let (character_id, game_unique) = {
                         let session = login
                             .as_ref()
                             .ok_or("selectchar before a successful game login")?;
@@ -1171,11 +1149,14 @@ async fn handle_client(
                             &characters,
                             cfg,
                             session,
-                            char_unique,
                             slot,
                         )
                         .await?
                     };
+                    // D1 collapse: the session's wire id is now the character's
+                    // durable `game_unique`, so per-character frames carry an id
+                    // the client already holds.
+                    char_unique = game_unique;
                     if let Some(session) = login.as_mut() {
                         session.character_id = Some(character_id.character_id);
                     }
@@ -1184,6 +1165,7 @@ async fn handle_client(
                         live.account_name = session.username.clone();
                     }
                     live.character = Some(character_id.clone());
+                    live.char_unique = game_unique;
                     // Enter the character into the shared table. From here on
                     // this player is visible to the chat family, and a second
                     // REQUEST_SELECTCHAR re-enters the same key with a fresh

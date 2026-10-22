@@ -270,9 +270,8 @@ pub(crate) async fn handle_select_char(
     characters: &PgCharacterRepository,
     cfg: &GameConfig,
     session: &GameSession,
-    char_unique: i32,
     slot: i32,
-) -> Result<CharacterFull, AnyError> {
+) -> Result<(CharacterFull, i32), AnyError> {
     if !(0..i32::from(CHAR_SLOTS)).contains(&slot) {
         return Err(format!("selectchar slot {slot} out of range 0..{CHAR_SLOTS}").into());
     }
@@ -282,35 +281,21 @@ pub(crate) async fn handle_select_char(
         .await?
         .ok_or_else(|| format!("no character in account {} slot {slot}", session.account_id))?;
 
-    // The character now exists as a world entity, so give it a durable id if it
-    // has never had one. It is *not* what goes on the wire: `make_char_unique`
-    // below echoes the session's `char_unique`, and every replayed frame carries
-    // that same session id, so the wire is self-consistent either way.
-    //
-    // The mismatch is therefore *inert today* and only worth reporting as future
-    // debt: once T-017 generates per-character frames from the database instead
-    // of replaying, those frames will carry `stored_unique`, and a session
-    // holding a different `char_unique` will have them all discarded by
-    // `SetCharReservedChar`.
-    //
-    // The earlier wording of this message ("the replayed per-character frames
-    // will be discarded by the client") was wrong about the mechanism and
-    // misled a 2026-10-05 diagnosis into blaming the id mismatch for a
-    // character-switch desync that was a missing already-bound guard instead.
-    // A character whose id *does* match, `Tester`, glitched identically; and
-    // `test3`, which does not match, entered the world cleanly.
-    let stored_unique = characters
+    // The character's durable wire identity. Allocated lazily on first world entry
+    // (see `resolve_game_unique`); under the D1 collapse this becomes the
+    // session's `char_unique` too, so per-character frames carry an id the
+    // client already holds (`SetCharReservedChar` compares against
+    // `MyCharUnique`).
+    let game_unique = characters
         .resolve_game_unique(character.character_id)
         .await?;
-    if stored_unique != char_unique {
+    if game_unique != 0 {
         logln!(
-            "game: selectchar {:?} has durable game_unique {stored_unique} but this session's \
-             char_unique is {char_unique}; harmless while the world is replayed (every frame \
-             carries the session id), but T-017 must make these agree or the client will discard \
-             this character's records",
+            "game: selectchar {:?}: durable game_unique {game_unique} (session char_unique will follow)",
             character.name
         );
     }
+    let stored_unique = game_unique;
 
     // SERVERINFO sets `bReceiveServerInfoSwitch`, which `SetCharReservedChar`
     // checks before it will create any avatar. It must precede RESPONSE_LOGIN.
@@ -325,7 +310,7 @@ pub(crate) async fn handle_select_char(
     let make_char = MakeCharInfo {
         // Must equal the `char_unique` from opcode 1 or the client ignores the
         // record (`SetCharReservedChar` compares `MyCharUnique`).
-        make_char_unique: u16::try_from(char_unique).unwrap_or(0),
+        make_char_unique: u16::try_from(stored_unique).unwrap_or(0),
         make_char_kind: u16::try_from(character.class_kind.max(0)).unwrap_or(0),
         level: u8::try_from(character.level.clamp(0, 255)).unwrap_or(1),
         life: u32::try_from(character.max_life.max(0)).unwrap_or(0),
@@ -358,7 +343,7 @@ pub(crate) async fn handle_select_char(
         character.pos_x,
         character.pos_y
     );
-    Ok(character)
+    Ok((character, stored_unique))
 }
 
 /// Applies `GAMEMSG_REQUEST_MAKENEWCHAR` (7): persist a new character and

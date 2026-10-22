@@ -32,9 +32,9 @@
 //!
 //! There is deliberately no `GAME_PROLOGUE` / `GAME_WORLD_BULK` any more. The
 //! capture-replay mode they selected was retired on 2026-10-09: world entry is
-//! generated from PostgreSQL and `char_unique` is allocated per session. Both
-//! variables are now ignored rather than rejected, so a stale one left in a shell
-//! cannot break a launch.
+//! generated from PostgreSQL and `char_unique` is the character's durable
+//! `game_unique` (D1 collapse). Both variables are now ignored rather than
+//! rejected, so a stale one left in a shell cannot break a launch.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -144,23 +144,6 @@ impl GameConfig {
             data_root,
             debug_log,
         })
-    }
-
-    /// The character id the client is told to key its per-character records on.
-    ///
-    /// Always the per-session allocation — the legacy's shape: `m_uiCharID` is a
-    /// session-scoped id handed out by the session manager
-    /// (`CharServer-Session.cpp:58` passes it straight into `MakeSimpleChar`), not a
-    /// database column. The retired capture mode overrode this with the reference
-    /// session's `0x05BF`, which is what made two-client testing impossible: two
-    /// sessions shared one id, so each treated the other's frames as its own
-    /// (`bselfswitch`, `Client-Person-BigInfo.cpp:1160-1176`).
-    ///
-    /// The durable per-character id lives in `characters.game_unique` and
-    /// `handle_select_char` cross-checks the two.
-    #[must_use]
-    pub const fn char_unique(&self, allocated: u32) -> u32 {
-        allocated
     }
 }
 
@@ -394,31 +377,6 @@ mod tests {
         let cfg = GameConfig::from_env().unwrap();
         assert_eq!(cfg.listen, "0.0.0.0:4010");
         assert_eq!(cfg.service_area, 0x08);
-    }
-
-    /// Every session gets its own character id, always.
-    ///
-    /// This is the property the retired capture mode broke: pinning every session
-    /// to one id made two clients share a character, so each treated the other's
-    /// frames as its own (`bselfswitch`, `Client-Person-BigInfo.cpp:1160-1176`) and
-    /// wrote the other's life/mana into its own avatar (`:1228-1238`, unconditional).
-    #[test]
-    fn char_unique_is_always_the_per_session_allocation() {
-        let env = EnvGuard::take();
-        env.key_only();
-        let cfg = GameConfig::from_env().unwrap();
-        assert_eq!(cfg.char_unique(4_711), 4_711);
-        assert_eq!(cfg.char_unique(4_712), 4_712);
-        assert_ne!(
-            cfg.char_unique(4_711),
-            cfg.char_unique(4_712),
-            "two sessions must never share a character id"
-        );
-        assert_ne!(
-            cfg.char_unique(4_711),
-            gz_proto::captured_lengths::CAPTURED_CHAR_UNIQUE as u32,
-            "and neither may be the retired capture's id"
-        );
     }
 
     #[test]
