@@ -274,7 +274,7 @@ mod tests {
             room: Some(16),
             ..Default::default()
         };
-        let plan = RewardPlan::for_quest(chain(30005), 100);
+        let plan = RewardPlan::for_quest(chain(30000), 100);
         let grant = grant_reward(&storage, &actor(), &plan).await.unwrap();
 
         match grant {
@@ -300,7 +300,7 @@ mod tests {
     #[tokio::test]
     async fn a_full_inventory_grants_nothing() {
         let storage = MemoryRewardStorage::default(); // room: None
-        let plan = RewardPlan::for_quest(chain(30005), 100);
+        let plan = RewardPlan::for_quest(chain(30000), 100);
         let grant = grant_reward(&storage, &actor(), &plan).await.unwrap();
 
         assert!(matches!(grant, RewardGrant::InventoryFull));

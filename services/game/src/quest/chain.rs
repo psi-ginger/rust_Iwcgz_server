@@ -73,8 +73,8 @@ pub(crate) const BEGINNER2_CHAIN: &[ChainQuest] = &[
         predecessor: 30000,
         reward_money: 110,
         reward_exp: 30,
-        reward_item: 20164,
-        reward_item_num: 1,
+        reward_item: 0,
+        reward_item_num: 0,
     },
     ChainQuest {
         quest_type: 14,
@@ -86,8 +86,8 @@ pub(crate) const BEGINNER2_CHAIN: &[ChainQuest] = &[
         predecessor: 30003,
         reward_money: 120,
         reward_exp: 30,
-        reward_item: 20163,
-        reward_item_num: 1,
+        reward_item: 0,
+        reward_item_num: 0,
     },
     ChainQuest {
         quest_type: 14,
