@@ -393,22 +393,60 @@ fn live_world_entry_sends_the_per_character_state_block() {
     );
 }
 
-/// T6 — H3: the player band is enforced by the typed id and the registry.
+/// Two sessions must never share a character id — the property the retired
+/// capture mode broke.
 ///
-/// With the ephemeral allocator gone (D1 collapse), distinctness and band
-/// membership are database properties (character_game_unique_seq). What remains
-/// testable here is the typed-id + registry belt-and-braces: the typed id
-/// refuses 0, the NPC band floor and everything above it *before a
-/// `SessionInfo` can be built*, and the registry's own band check stays as the
-/// backstop (design doc §5.3) — so a session can never shadow a monster's
-/// unique.
+/// Pinning every session to one id made two clients the same character, so each
+/// treated the other's 200 as its own (`bselfswitch`,
+/// `Client-Person-BigInfo.cpp:1160-1176`) and wrote the other's life/mana into
+/// its own avatar (`:1228-1238`, unconditional). That is a client-side identity
+/// collision, which no server-side test can observe — hence it is pinned as a
+/// property of the allocator rather than over a socket.
 #[test]
-fn player_band_is_enforced_by_the_typed_id_and_the_registry() {
-    // The registry's own band check is what pins the player band now that the
-    // ephemeral allocator is gone (D1 collapse): a session's char_unique is the
-    // character's durable `game_unique`, allocated in the player band by
-    // `character_game_unique_seq`, so distinctness and band membership are
-    // database properties rather than allocator properties.
+fn two_sessions_get_distinct_character_ids() {
+    let first = allocate_char_unique();
+    let second = allocate_char_unique();
+    assert_ne!(
+        first, second,
+        "two sessions must never share a character id"
+    );
+    // And every allocation stays inside the player band, which clears both the
+    // client's `CharUniqueInfo` table (it indexes by `uiMakeCharUnique`) and
+    // the NPC band the monster allocator owns (audit H3).
+    for id in [first, second] {
+        assert!(
+            (1..=u32::from(PLAYER_CHAR_UNIQUE_TOP as u16)).contains(&id),
+            "allocation {id} escaped the player band"
+        );
+    }
+    assert_ne!(
+        gz_proto::captured_lengths::CAPTURED_CHAR_UNIQUE as u64,
+        u64::from(PLAYER_CHAR_UNIQUE_TOP as u16),
+        "the retired capture's id is a different character, not the band"
+    );
+}
+
+/// T6 — H3: the id bands partition the space. Players wrap strictly inside
+/// `1..=8499`, and the typed id refuses 0, the NPC band floor and everything
+/// above it *before a `SessionInfo` can be built* — a stronger statement than
+/// `register` returning false, whose own band check stays as the
+/// belt-and-braces behind it (design doc §5.3) — so a session can never
+/// shadow a monster's unique.
+#[test]
+fn player_ids_wrap_inside_the_player_band_and_the_registry_refuses_foreign_ids() {
+    let top = u32::from(PLAYER_CHAR_UNIQUE_TOP as u16);
+    // Every counter phase across two whole wraps — including the boundary
+    // itself, where the old allocator used to special-case a zero. The live
+    // composition (fetch_add + this step) is exercised by the distinctness
+    // test above; whatever raw value arrives here, the step must land in band.
+    for raw in 0..top * 2 {
+        let id = band_char_unique(raw);
+        assert!(
+            (1..=top).contains(&id),
+            "raw {raw} yielded {id}, out of band"
+        );
+    }
+
     let registry = Registry::new();
     let enter = |char_unique: i16| {
         let (tx, _rx) = tokio::sync::mpsc::channel(crate::registry::OUTBOUND_CAP);
