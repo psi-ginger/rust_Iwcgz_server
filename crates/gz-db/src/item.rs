@@ -1852,7 +1852,23 @@ mod tests {
         assert_eq!(grant_slot(&[(15, 2000, 29999)], 2000, 5), Some((16, 5)));
     }
 
-    /// The count rule beside the placement rule: a non-pileable reward is one
+    /// Universal inventory rule (owner directive): slot numbering starts at
+    /// TOP-LEFT and advances left-to-right, top-to-bottom, so the first
+    /// available slot of an empty main bag is always `INV0` (slot 15), never
+    /// slot 17 or any other offset. Locks in the top-left rule for grants.
+    #[test]
+    fn a_grant_lands_in_the_top_left_slot_of_an_empty_bag() {
+        assert_eq!(
+            grant_slot(&[], 100, 5),
+            Some((INV0, 5)),
+            "first free slot of an empty main bag must be the top-left (INV0 = 15)"
+        );
+        assert_eq!(
+            grant_slot(&[], 2000, 1),
+            Some((INV0, 1)),
+            "top-left rule holds for pileable items too"
+        );
+    }
     /// item, however many the reward row asked for; a pileable one keeps its count.
     #[test]
     fn a_non_pileable_grant_is_one_item() {
