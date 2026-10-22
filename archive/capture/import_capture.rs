@@ -58,10 +58,17 @@ pub async fn run(
             report.empty += 1;
             continue;
         }
-        report.occupied += 1;
+        // Ghost (sparse) items — records whose only non-zero content is the
+        // `siUnique`/`siItemNum` pair — are NOT imported. The client does not
+        // render them (they are invisible in the bag), so carrying them only
+        // blocks slots and forces later grants (quest rewards, loot) past the
+        // top-left. The legacy's own records for these uniques are not in the
+        // item table, so they cannot be consumed or displayed anyway.
         if item.raw[4..].iter().all(|&b| b == 0) {
             report.sparse += 1;
+            continue;
         }
+        report.occupied += 1;
         rows.push(CharacterItem {
             slot: slot as u16,
             container: container_of(slot as u16),
