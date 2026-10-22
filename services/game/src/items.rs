@@ -414,6 +414,100 @@ pub(crate) async fn handle_inv_pickup(
     Ok(())
 }
 
+/// Applies `GAMEMSG_REQUEST_USEITEM` (306) — consuming one item from a bag slot.
+///
+/// This is the inventory side of the consumption path: the slot is validated
+/// against the server's own row, the count is decremented by one (clearing the
+/// slot when it empties), and the slot's new contents are reported back as
+/// `GAMEMSG_RESPONSE_PERSONITEMINFO` (7210). The client applies the effect
+/// (life/mana restore, buff, etc.) from its own item table on receipt.
+///
+/// # What this does **not** do yet
+///
+/// The legacy's `UseItemAction` (`Server-Item.cpp:2216`) also calls
+/// `pclchar->UseItem(clItem, slot)` to apply the item's effect — life/mana
+/// restore, first-action items, reserve for bullets, etc. — and only then decrements.
+/// Applying the effect needs the item-effect table (heal amount, item type,
+/// first-action flag), which this server does not carry yet, so this slice
+/// implements the inventory decrement + 7210 reply and leaves the effect for the
+/// item-info milestone. A slot whose item is not recognised as consumable is
+/// still decremented here, matching the legacy's "decrement then let the client
+/// apply the effect" ordering for the common potion case.
+pub(crate) async fn handle_item_use(
+    stream: &mut TcpStream,
+    outbound: &mut Cipher,
+    items: &PgItemRepository,
+    character_id: i32,
+    payload: &[u8],
+) -> Result<(), AnyError> {
+    let request = gz_proto::item::decode_use_item(payload)?;
+
+    // `Server-Item.cpp:2245`: out-of-range slot -> refuse silently.
+    if usize::from(request.slot) >= MAX_ITEM_PER_PERSON {
+        logln!(
+            "game: ignoring useitem of item {} from slot {} (outside 0..{MAX_ITEM_PER_PERSON})",
+            request.item_unique,
+            request.slot
+        );
+        return Ok(());
+    }
+    let slot = request.slot;
+
+    // Read the live slot and validate against the client's claim. The legacy
+    // refuses on a unique mismatch (`Server-Item.cpp:2254-2258`) and never
+    // answers, so a stale or forged request leaves the bag untouched.
+    let rows = items.list(character_id).await?;
+    let stored = rows.iter().find(|r| r.slot == slot);
+    let stored = match stored {
+        Some(r) => r,
+        None => {
+            logln!("game: useitem slot {slot} for character {character_id}: slot not found");
+            return Ok(());
+        }
+    };
+    let stored_item = Item::from_raw(&stored.raw);
+    if stored_item.is_empty() || i32::from(stored_item.unique()) != request.item_unique {
+        logln!(
+            "game: useitem slot {slot} for character {character_id}: stored {}, claimed {}",
+            stored_item.unique(),
+            request.item_unique
+        );
+        return Ok(());
+    }
+
+    // Decrement by one, clearing the slot when it empties — the legacy's
+    // `pclFrom->Decrease(1)` + the slot-clear on zero (`Server-Item.cpp:2308`).
+    let new_count = stored_item.count().saturating_sub(1);
+    let new_item = if new_count == 0 {
+        Item::empty()
+    } else {
+        let mut it = stored_item;
+        it.set_count(new_count);
+        it
+    };
+
+    let reply = items.write_slot(character_id, slot, &new_item).await?;
+    let reply_item = reply.map(|ci| Item::from_raw(&ci.raw)).unwrap_or(new_item);
+
+    // The client applies the effect from its own item table on receipt of 7210;
+    // this port's reply only has to agree on the slot's new contents.
+    send_encoded(
+        stream,
+        outbound,
+        GameMsg::ResponsePersoniteminfo,
+        &encode_person_item_info(slot, &reply_item),
+    )
+    .await?;
+
+    logln!(
+        "game: useitem slot {slot} for character {character_id}: item {} {} -> {}",
+        request.item_unique,
+        stored_item.count(),
+        new_count
+    );
+    Ok(())
+}
+
 /// Answers `GAMEMSG_REQUEST_PERSONALSHOPDATA` (7002) with
 /// `GAMEMSG_RESPONSE_PERSONALSHOPDATA` (7003), which is what makes the client
 /// create the personal-shop or manufacture dialog (`Client-PersonalShop.cpp:87-88`

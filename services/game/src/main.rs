@@ -153,7 +153,7 @@ pub(crate) use stats::{
 #[allow(unused_imports)]
 pub(crate) use items::{
     handle_inv_cancellation_sealing_up, handle_inv_drop, handle_inv_pickup, handle_item_move,
-    handle_item_split, handle_personal_shop_data,
+    handle_item_split, handle_item_use, handle_personal_shop_data,
 };
 
 // The world family lives in `world.rs`. The dispatcher calls 1101 and world
@@ -1550,6 +1550,21 @@ async fn handle_client(
                         .character_id
                         .ok_or("item pickup before a character was selected")?;
                     handle_inv_pickup(
+                        &mut stream,
+                        &mut outbound,
+                        &items,
+                        character_id,
+                        payload.as_ref(),
+                    )
+                    .await?;
+                }
+                c if c == GameMsg::RequestUseitem as u16 => {
+                    let character_id = login
+                        .as_ref()
+                        .ok_or("item use before a successful game login")?
+                        .character_id
+                        .ok_or("item use before a character was selected")?;
+                    handle_item_use(
                         &mut stream,
                         &mut outbound,
                         &items,

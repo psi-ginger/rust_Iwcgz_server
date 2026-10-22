@@ -459,6 +459,32 @@ pub fn decode_inv_drop(payload: &[u8]) -> Result<InvDropRequest, WireError> {
     Ok(InvDropRequest { slot, item })
 }
 
+/// `GAMEMSG_REQUEST_USEITEM` (306) body — `cltItemUseInfo`
+/// (`cltItem.h:483`).
+///
+/// `UI16 uiFrom` (the slot) followed by `SI32 siItemUnique`. 6 bytes, no
+/// padding — the constructor is a plain `ZeroMemory` + two field writes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UseItemRequest {
+    /// `uiFrom` — absolute slot of the character's 80-entry item array.
+    pub slot: u16,
+    /// `siItemUnique` — the item-table row id the client believes is in the
+    /// slot. The server re-reads the live slot and refuses on mismatch.
+    pub item_unique: i32,
+}
+
+/// Reads a 306 body.
+///
+/// # Errors
+///
+/// [`WireError::Truncated`] if the body is shorter than 6 bytes.
+pub fn decode_use_item(payload: &[u8]) -> Result<UseItemRequest, WireError> {
+    let mut r = Reader::new(payload);
+    let slot = r.u16()?;
+    let item_unique = r.i32()?;
+    Ok(UseItemRequest { slot, item_unique })
+}
+
 /// `GAMEMSG_REQUEST_INVPICKUP` (308) body — `cltGameMsgRequest_InvPickUp`
 /// (`MsgType-Item.h:389`).
 ///
